@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { loginSchema } from './auth.js';
+import { loginSchema, sessionTokenPayloadSchema } from './auth.js';
 import { envSchema, validateEnv } from './env.js';
 
 describe('Auth Validation Schemas', () => {
@@ -19,6 +19,40 @@ describe('Auth Validation Schemas', () => {
     const invalid = { email: 'owner@crelune.app', password: 'short' };
     const result = loginSchema.safeParse(invalid);
     expect(result.success).toBe(false);
+  });
+
+  it('validates a valid session token payload', () => {
+    const validPayload = {
+      sub: 'usr_123',
+      role: 'OWNER',
+      org: 'org_123',
+      iat: 1700000000,
+      exp: 1700604800,
+    };
+    const result = sessionTokenPayloadSchema.safeParse(validPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a session token payload with non-OWNER role', () => {
+    const invalidPayload = {
+      sub: 'usr_123',
+      role: 'ADMIN',
+      org: 'org_123',
+      iat: 1700000000,
+      exp: 1700604800,
+    };
+    const result = sessionTokenPayloadSchema.safeParse(invalidPayload);
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a session token payload with missing sub or org', () => {
+    const missingSub = {
+      role: 'OWNER',
+      org: 'org_123',
+      iat: 1700000000,
+      exp: 1700604800,
+    };
+    expect(sessionTokenPayloadSchema.safeParse(missingSub).success).toBe(false);
   });
 });
 

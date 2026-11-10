@@ -34,6 +34,8 @@ model User {
   lastName       String          @map("last_name")
   role           String          @default("OWNER")
   isActive       Boolean         @default(true) @map("is_active")
+  failedLoginAttempts Int      @default(0) @map("failed_login_attempts")
+  lockedUntil    DateTime?       @map("locked_until")
   createdAt      DateTime        @default(now()) @map("created_at")
   updatedAt      DateTime        @updatedAt @map("updated_at")
 
@@ -49,7 +51,7 @@ model UserPreference {
   userId               String   @unique @map("user_id")
   theme                String   @default("light")
   dateFormat           String   @default("DD/MM/YYYY") @map("date_format")
-  timezone             String   @default("UTC")
+  timezone             String   @default("Africa/Accra")
   leadTimeDaysBirthday Int      @default(14) @map("lead_time_days_birthday")
   leadTimeDaysEvent    Int      @default(21) @map("lead_time_days_event")
   defaultExportFormat  String   @default("PNG") @map("default_export_format")

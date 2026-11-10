@@ -1,21 +1,21 @@
 import React from 'react';
 import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
-import type { OwnerSession } from '@crelune/shared';
+import type { OwnerProfile } from '@crelune/shared';
 
 interface ShellLayoutProps {
   children: React.ReactNode;
-  session?: OwnerSession | null;
+  profile?: OwnerProfile | null;
 }
 
-export function ShellLayout({ children, session }: ShellLayoutProps) {
+export function ShellLayout({ children, profile }: ShellLayoutProps) {
   return (
     <div className="min-h-screen bg-[#F8F7FA] text-[#24212B] flex flex-col">
       {/* Desktop Fixed Sidebar */}
-      <Sidebar session={session} />
+      <Sidebar profile={profile} />
 
       {/* Mobile Top Navigation */}
-      <MobileNav session={session} />
+      <MobileNav profile={profile} />
 
       {/* Main Content Area */}
       <div className="flex-1 lg:pl-64 flex flex-col">

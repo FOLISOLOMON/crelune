@@ -134,9 +134,61 @@ Implemented in Milestone 2:
 2. **Cryptographic Password Security**:
    - Passwords hashed using Node's native `crypto.scrypt` with a random 16-byte salt and constant-time verification ([`apps/web/src/lib/auth/password.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/password.ts)).
 3. **Tamper-Evident Session Management**:
-   - Session tokens are signed using HMAC-SHA256 backed by `SESSION_SECRET` ($\ge 32$ characters) ([`apps/web/src/lib/auth/session.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/session.ts)).
+   - Session tokens are cryptographically signed using HMAC-SHA256 backed by `SESSION_SECRET` ($\ge 32$ characters) ([`apps/web/src/lib/auth/session.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/session.ts)). Note: session tokens are signed (tamper-evident integrity), not encrypted.
    - Session cookies use `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` in production.
    - Dual-engine verification supports both Node.js server components and Web Crypto Edge runtime in Next.js middleware ([`apps/web/src/middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts)).
 4. **Server-Side Route Interception**:
    - Unauthenticated requests to dashboard routes (`/`, `/members`, `/birthdays`, etc.) are intercepted by `middleware.ts` and redirected to `/login`.
    - Protected API routes return `401 Unauthorized` without session cookies.
+
+---
+
+## 8. Milestone 2.1 Security Hardening Specification
+
+Implemented as part of Milestone 2.1 corrective hardening:
+
+1. **Complete Elimination of Fallback Session Secrets**:
+   - Hardcoded development fallbacks are completely removed.
+   - `SESSION_SECRET` is strictly required in all environments (development, test, production) with a minimum length of 32 characters.
+   - All session issuance, verification, and middleware fail closed if `SESSION_SECRET` is missing or insufficient.
+
+2. **Minimized Session Token Claims (Zero PII in Cookies)**:
+   - Session cookies carry only minimal operational claims: `{ sub, role: "OWNER", org, iat, exp }`.
+   - Personally identifiable information (PII) such as full names and email addresses are never stored in client cookies.
+   - Server components and API routes query owner profile details directly from the database using `session.sub`.
+   - Strict Zod validation ([`sessionTokenPayloadSchema`](file:///d:/Projects/Crelune/packages/shared/src/schemas/auth.ts)) validates payload structure, positive integer timestamps, clock skew ($\le 60\text{s}$), and enforces `role === 'OWNER'`.
+
+3. **Strict Middleware Route Interception**:
+   - Eliminated the permissive `pathname.includes('.')` bypass rule.
+   - Whitelist restricted exclusively to internal Next.js assets (`/_next/static`, `/_next/image`, `/favicon.ico`) and exact public routes with strict HTTP method checking:
+     - `/login` (GET)
+     - `/api/auth/login` (POST only)
+     - `/api/auth/logout` (POST only)
+     - `/api/health` (GET only)
+   - All other routes—including dotted private API endpoints such as `/api/export.json` or `/api/members.csv`—are strictly intercepted and return `401 Unauthorized` when unauthenticated.
+
+4. **Login Anti-Enumeration & Durable Throttling**:
+   - Constant-time dummy `scrypt` password verification executes when a queried user does not exist or is inactive, neutralizing response timing enumeration.
+   - Account lockout state is tracked durably in PostgreSQL via `failedLoginAttempts` and `lockedUntil`.
+   - Accounts lock for 15 minutes after 5 consecutive failed attempts.
+   - Generic error responses (`"Invalid email or password"`) are returned for all credential failures without leaking account existence or database error strings.
+   - Request payloads are capped at 4KB to mitigate resource exhaustion attacks.
+
+5. **Open Redirect Defense**:
+   - Parameter `callbackUrl` is strictly validated to ensure it represents an internal relative path starting with a single `/`.
+   - Protocol-relative (`//evil.com`), backslash-relative (`/\evil.com`), and scheme-prefixed paths (`https:`, `javascript:`) are rejected and safely defaulted to `/`.
+
+6. **CSRF Mitigation on Mutation Endpoints**:
+   - `GET /api/auth/logout` is removed; logout requires an HTTP POST request.
+   - `Origin` and `Referer` headers are validated against the request's `Host` header to prevent cross-site request forgery.
+
+7. **Health Endpoint Information Shielding**:
+   - Public unauthenticated requests to `/api/health` receive a minimal status confirmation: `{"status": "ok", "timestamp": "..."}`.
+   - Operational diagnostics (database connection status, latency, provider, runtime versions) are gated behind authenticated owner sessions.
+
+8. **Secure Owner Provisioning Tooling**:
+   - Command-line password arguments (`--password=...`) are explicitly disallowed in [`scripts/create-owner.mjs`](file:///d:/Projects/Crelune/scripts/create-owner.mjs) to prevent credential leakage into process tables and shell history files.
+   - Passwords must be entered interactively via masked console input (`*`).
+   - Trivial or common passwords are systematically rejected.
+   - Default timezone is established as `Africa/Accra`.
+   - Database connection teardown (`prisma.$disconnect()`) is guaranteed on all execution branches.

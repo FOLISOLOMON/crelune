@@ -19,7 +19,7 @@ import {
   LogOut,
 } from 'lucide-react';
 import { NAVIGATION_ITEMS, type NavItem } from '@crelune/shared';
-import type { OwnerSession } from '@crelune/shared';
+import type { OwnerProfile } from '@crelune/shared';
 
 const ICON_MAP: Record<string, React.ReactNode> = {
   'layout-dashboard': <LayoutDashboard className="w-4 h-4" />,
@@ -34,10 +34,10 @@ const ICON_MAP: Record<string, React.ReactNode> = {
 };
 
 interface MobileNavProps {
-  session?: OwnerSession | null;
+  profile?: OwnerProfile | null;
 }
 
-export function MobileNav({ session }: MobileNavProps) {
+export function MobileNav({ profile }: MobileNavProps) {
   const [isOpen, setIsOpen] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
@@ -147,12 +147,12 @@ export function MobileNav({ session }: MobileNavProps) {
           <div className="flex items-center justify-between">
             <div className="min-w-0 flex-1">
               <p className="text-xs font-semibold text-[#24212B] truncate">
-                {session?.firstName
-                  ? `${session.firstName} ${session.lastName}`
+                {profile?.firstName
+                  ? `${profile.firstName} ${profile.lastName}`
                   : 'Workspace Owner'}
               </p>
               <p className="text-[11px] text-[#77727F] truncate">
-                {session?.email || 'owner@crelune.app'}
+                {profile?.email || 'owner@crelune.app'}
               </p>
             </div>
             <button

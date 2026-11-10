@@ -17,7 +17,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { NAVIGATION_ITEMS, type NavItem } from '@crelune/shared';
-import type { OwnerSession } from '@crelune/shared';
+import type { OwnerProfile } from '@crelune/shared';
 
 const ICON_MAP: Record<string, React.ReactNode> = {
   'layout-dashboard': <LayoutDashboard className="w-4 h-4" />,
@@ -32,10 +32,10 @@ const ICON_MAP: Record<string, React.ReactNode> = {
 };
 
 interface SidebarProps {
-  session?: OwnerSession | null;
+  profile?: OwnerProfile | null;
 }
 
-export function Sidebar({ session }: SidebarProps) {
+export function Sidebar({ profile }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -50,8 +50,8 @@ export function Sidebar({ session }: SidebarProps) {
   };
 
   const ownerInitials =
-    session?.firstName && session?.lastName
-      ? `${session.firstName[0]}${session.lastName[0]}`.toUpperCase()
+    profile?.firstName && profile?.lastName
+      ? `${profile.firstName[0]}${profile.lastName[0]}`.toUpperCase()
       : 'CO';
 
   return (
@@ -126,12 +126,12 @@ export function Sidebar({ session }: SidebarProps) {
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-semibold text-[#24212B] truncate">
-                {session?.firstName
-                  ? `${session.firstName} ${session.lastName}`
+                {profile?.firstName
+                  ? `${profile.firstName} ${profile.lastName}`
                   : 'Workspace Owner'}
               </p>
               <p className="text-[11px] text-[#77727F] truncate">
-                {session?.email || 'owner@crelune.app'}
+                {profile?.email || 'owner@crelune.app'}
               </p>
             </div>
           </div>

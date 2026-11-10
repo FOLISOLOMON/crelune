@@ -13,14 +13,27 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { getSession } from '@/lib/auth/session';
-import { checkDatabaseConnection } from '@crelune/database';
+import { prisma, checkDatabaseConnection } from '@crelune/database';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, Badge, Header } from '@crelune/ui';
 
 export default async function DashboardPage() {
   const session = await getSession();
   const dbHealth = await checkDatabaseConnection();
 
-  const ownerName = session?.firstName || 'Owner';
+  let ownerName = 'Workspace Owner';
+  let ownerEmail = 'owner@crelune.app';
+  if (session?.sub) {
+    const user = await prisma.user.findUnique({
+      where: { id: session.sub },
+      select: { firstName: true, email: true },
+    });
+    if (user?.firstName) {
+      ownerName = user.firstName;
+    }
+    if (user?.email) {
+      ownerEmail = user.email;
+    }
+  }
 
   const operationalCards = [
     {
@@ -147,7 +160,7 @@ export default async function DashboardPage() {
               </h4>
             </div>
             <p className="text-xs text-[#77727F]">
-              Authenticated as workspace owner ({session?.email}) • Single-owner architecture active
+              Authenticated as workspace owner ({ownerEmail}) • Single-owner architecture active
             </p>
           </div>
           <div className="flex items-center gap-3">

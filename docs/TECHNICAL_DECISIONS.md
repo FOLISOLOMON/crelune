@@ -109,6 +109,19 @@
 - **Rationale**: Standard cryptographic primitives eliminate external subscriptions, preserve full data ownership, guarantee portable PostgreSQL persistence, and enforce single-owner security boundaries.
 - **Consequences**: Complete control over owner authentication, zero third-party auth outages, fast local build times, and clean architectural separation between auth, domain logic, and UI.
 
+### ADR 010: Web Authentication Hardening, Zero-PII Tokens, and Anti-Enumeration Protections
+- **Status**: Approved (Implemented in Milestone 2.1).
+- **Context**: Code review of Milestone 2 identified areas for hardening: development fallback secrets, PII stored inside session cookies, permissive middleware wildcard bypass rules (`pathname.includes('.')`), lack of durable login attempt throttling, and sensitive CLI argument exposure in owner provisioning.
+- **Decision**:
+  1. **Eliminate All Fallback Secrets**: Require `SESSION_SECRET` ($\ge 32$ chars) across all environments. If missing or invalid, all session verification and middleware execution fails closed.
+  2. **Zero-PII Signed Tokens**: Session cookies contain only minimal operational claims (`{ sub, role: "OWNER", org, iat, exp }`). Full name, email, and PII are never encoded into client cookies. Server components query user details directly via Prisma using `session.sub`.
+  3. **Strict Route Protection**: Remove `pathname.includes('.')` bypass. Restrict whitelists strictly to Next.js internal static assets (`/_next/static`, `/_next/image`, `/favicon.ico`) and exact public routes (`/login`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/health`). Intercept all dotted private endpoints (`/api/export.json`, `/api/members.csv`) with `401 Unauthorized`.
+  4. **Anti-Enumeration & Throttling**: Execute constant-time dummy `scrypt` hashing for unknown users to neutralize response timing enumeration. Durably throttle failed attempts in PostgreSQL (`failedLoginAttempts`, `lockedUntil`), locking accounts for 15 minutes after 5 consecutive failures. Cap request payloads at 4KB.
+  5. **Open Redirect & CSRF Defenses**: Strictly validate `callbackUrl` against internal relative path rules (rejecting `//`, `/\`, or scheme indicators `:`). Enforce HTTP POST on `/api/auth/logout` and validate `Host` against `Origin`/`Referer` headers.
+  6. **Health Endpoint Shielding**: Return minimal status only on public GET requests (`{"status": "ok", "timestamp": "..."}`), gating database and environment diagnostics behind authenticated owner sessions.
+  7. **CLI Provisioning Hardening**: Disallow `--password` CLI arguments to prevent leaking into shell history and process tables (`ps`). Enforce masked interactive console input (`*`), reject common/trivial passwords, set default timezone to `Africa/Accra`, and guarantee connection teardown.
+- **Consequences**: Production-grade threat defense against enumeration, session tampering, credential leakage, open redirection, and CSRF without introducing third-party services.
+
 ---
 
 ## 2. Unresolved Technical Decisions (Awaiting Milestone Evaluation)

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-11-10
+
+### Milestone 2.1: Authentication and Security Hardening
+
+#### Security & Hardening
+- **Zero Fallback Secrets**: Removed all hardcoded development secret fallbacks across `session.ts`, `edge-session.ts`, and `middleware.ts`. `SESSION_SECRET` ($\ge 32$ chars) is now strictly required in all environments, failing closed if missing.
+- **Minimized Session Claims (Zero PII in Cookies)**: Updated session token payload to minimal operational claims (`{ sub, role: "OWNER", org, iat, exp }`), completely eliminating full name, email, and PII from client cookies. Added strict Zod schema validation (`sessionTokenPayloadSchema`) enforcing role literal `'OWNER'`, positive integer timestamps, and clock skew validation.
+- **Strict Middleware Interception**: Removed permissive `pathname.includes('.')` bypass. Enforced strict whitelist for Next.js internal static assets (`/_next/static`, `/_next/image`, `/favicon.ico`) and exact public routes with method checking (`/login`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/health`). All other routes, including dotted private API endpoints (`/api/export.json`, `/api/members.csv`), now require authenticated owner sessions and return `401 Unauthorized` when unauthenticated.
+- **Login Anti-Enumeration & Durable Throttling**: Added constant-time dummy scrypt password verification for non-existent users. Added `failedLoginAttempts` and `lockedUntil` columns to `User` in PostgreSQL, locking accounts for 15 minutes after 5 consecutive failures. Capped login payloads at 4KB.
+- **Open Redirect Protection**: Implemented `isValidCallbackUrl` in `@crelune/shared` to ensure `callbackUrl` only allows internal relative paths starting with a single `/`, rejecting protocol-relative (`//`), backslash (`/\`), and scheme-prefixed URLs (`https:`, `javascript:`).
+- **CSRF Mitigation on Logout**: Removed insecure `GET /api/auth/logout`. Enforced HTTP POST method and validated `Host` against `Origin`/`Referer` headers.
+- **Health Diagnostic Shielding**: Public unauthenticated `GET /api/health` now returns minimal status (`{"status": "ok", "timestamp": "..."}`). Database connection details, latency, and runtime telemetry are gated behind owner authentication.
+- **Owner Provisioning Hardening**: Updated `scripts/create-owner.mjs` to prohibit `--password` CLI arguments (preventing process table and shell history leakage), enforce masked interactive password input (`*`), reject common/trivial passwords, set default timezone to `Africa/Accra`, and guarantee connection teardown on all exit paths.
+- **Database Schema & Timezone Update**: Updated `UserPreference` default timezone from `UTC` to `Africa/Accra` in Prisma schema, synchronized with Neon Lakebase Postgres via `db:push`, and updated existing database records.
+- **Test Coverage Expansion**: Added 42 automated tests across `session.test.ts`, `middleware.test.ts`, `security-hardening.test.ts`, and `schemas.test.ts`, bringing total passing tests to 59 with zero failures.
+
+---
+
 ## [0.3.0] - 2026-11-10
 
 ### Milestone 2: Web Foundation Completed

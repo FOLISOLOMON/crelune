@@ -2,21 +2,20 @@
  * CRELUNE — Cryptographically Signed Session Management
  *
  * Provides tamper-proof session tokens signed with HMAC-SHA256 and secure cookie serialization.
+ * Session tokens are cryptographically signed (integrity-protected), not encrypted.
  */
 
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
-import type { OwnerSession, OwnerUser } from '@crelune/shared';
+import type { OwnerSession } from '@crelune/shared';
+import { sessionTokenPayloadSchema } from '@crelune/shared';
 
 export const SESSION_COOKIE_NAME = 'crelune_session';
-const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
-function getSecretKey(): string {
+export function getSecretKey(): string {
   const secret = process.env.SESSION_SECRET;
   if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV !== 'production') {
-      return 'crelune-dev-session-secret-fallback-at-least-32-characters-long';
-    }
     throw new Error(
       'SESSION_SECRET environment variable is missing or less than 32 characters.'
     );
@@ -33,11 +32,11 @@ function base64UrlEncode(str: string): string {
 }
 
 function base64UrlDecode(str: string): string {
-  str = str.replace(/-/g, '+').replace(/_/g, '/');
-  while (str.length % 4) {
-    str += '=';
+  let padded = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (padded.length % 4) {
+    padded += '=';
   }
-  return Buffer.from(str, 'base64').toString('utf8');
+  return Buffer.from(padded, 'base64').toString('utf8');
 }
 
 function sign(payloadStr: string, secret: string): string {
@@ -51,20 +50,17 @@ function sign(payloadStr: string, secret: string): string {
 }
 
 /**
- * Creates a signed, tamper-evident session token.
+ * Creates a signed, tamper-evident session token with minimal claims (no PII).
  */
-export function createSessionToken(user: OwnerUser): string {
+export function createSessionToken(user: { id: string; organisationId: string }): string {
   const secret = getSecretKey();
   const now = Math.floor(Date.now() / 1000);
   const session: OwnerSession = {
-    userId: user.id,
-    email: user.email,
-    organisationId: user.organisationId,
-    firstName: user.firstName,
-    lastName: user.lastName,
-    role: user.role,
-    issuedAt: now,
-    expiresAt: now + SESSION_TTL_SECONDS,
+    sub: user.id,
+    role: 'OWNER',
+    org: user.organisationId,
+    iat: now,
+    exp: now + SESSION_TTL_SECONDS,
   };
 
   const payloadEncoded = base64UrlEncode(JSON.stringify(session));
@@ -73,8 +69,8 @@ export function createSessionToken(user: OwnerUser): string {
 }
 
 /**
- * Verifies a session token signature and expiration.
- * Returns decoded OwnerSession or null if invalid or expired.
+ * Verifies a session token signature, structure, and timestamps.
+ * Fails closed and returns null on any discrepancy or missing secret.
  */
 export function verifySessionToken(token: string | undefined): OwnerSession | null {
   if (!token || typeof token !== 'string') return null;
@@ -96,12 +92,20 @@ export function verifySessionToken(token: string | undefined): OwnerSession | nu
     }
 
     const payloadJson = base64UrlDecode(payloadEncoded);
-    const session: OwnerSession = JSON.parse(payloadJson);
-
-    const now = Math.floor(Date.now() / 1000);
-    if (session.expiresAt && session.expiresAt < now) {
+    const parsedJson = JSON.parse(payloadJson);
+    const parseResult = sessionTokenPayloadSchema.safeParse(parsedJson);
+    if (!parseResult.success) {
       return null;
     }
+
+    const session = parseResult.data;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Timestamp validations
+    if (session.exp <= session.iat) return null;
+    if (session.exp < now) return null;
+    if (session.iat > now + 60) return null; // Clock skew protection (max 60 seconds future)
+    if (session.role !== 'OWNER') return null;
 
     return session;
   } catch {

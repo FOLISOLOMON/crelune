@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth/session';
+import { prisma } from '@crelune/database';
 
 export async function GET() {
   const session = await getSession();
@@ -7,15 +8,25 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 });
   }
 
+  const user = await prisma.user.findUnique({
+    where: { id: session.sub },
+    include: { organisation: true },
+  });
+
+  if (!user) {
+    return NextResponse.json({ error: 'User not found' }, { status: 404 });
+  }
+
   return NextResponse.json({
     authenticated: true,
     user: {
-      userId: session.userId,
-      email: session.email,
-      firstName: session.firstName,
-      lastName: session.lastName,
-      role: session.role,
-      organisationId: session.organisationId,
+      userId: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+      organisationId: user.organisationId,
+      organisationName: user.organisation.name,
     },
   });
 }

@@ -1,7 +1,19 @@
 import { NextResponse } from 'next/server';
+import { getSession } from '@/lib/auth/session';
 import { checkDatabaseConnection } from '@crelune/database';
 
 export async function GET() {
+  const session = await getSession();
+
+  // Public unauthenticated view: return minimal status only (zero diagnostic leakage)
+  if (!session) {
+    return NextResponse.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // Authenticated Owner view: detailed operational diagnostics
   const dbHealth = await checkDatabaseConnection();
 
   return NextResponse.json({

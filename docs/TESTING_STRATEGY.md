@@ -170,3 +170,25 @@ Automated tests verified for Milestone 2 Web Foundation:
    - `GET /` (unauthenticated): Redirected with `307` to `/login?callbackUrl=%2F`.
    - `GET /api/auth/me` (unauthenticated): Returned `401 Unauthorized`.
    - `GET /api/health`: Returned `200 OK` with database status `healthy`.
+
+---
+
+## 6. Milestone 2.1 Testing Evidence (Security Hardening)
+
+Automated tests verified for Milestone 2.1 Authentication & Security Hardening:
+1. **Unit & Integration Testing (`npm test`)**:
+   - `@crelune/web`:
+     - `src/lib/auth/session.test.ts` (12 tests): verified secret key requirement (fail-closed when missing or $<32$ chars), minimal payload claims without PII, Node.js and Edge Web Crypto verification parity, signature and payload tamper rejection, expired token rejection, clock skew enforcement ($> 60\text{s}$ rejected), non-OWNER role rejection.
+     - `src/middleware.test.ts` (17 tests): verified Next.js static asset whitelist (`/_next/static`, `/_next/image`, `/favicon.ico`), interception of dotted private endpoints (`/api/export.json`, `/api/members.csv`, `/api/backup.sqlite` return 401), method checking (`POST /api/auth/login` allowed, `GET /api/auth/login` rejected with 401, `GET /api/health` allowed, `POST /api/health` rejected with 401), authenticated login redirection to `/`, unauthenticated page redirection to `/login?callbackUrl=...`, and fail-closed behavior on missing `SESSION_SECRET` (503 for APIs, redirect for pages).
+     - `src/lib/auth/security-hardening.test.ts` (15 tests): verified password strength enforcement (minimum length, rejection of dictionary/trivial passwords, length cap), open redirect protection (relative path validation, rejection of protocol-relative `//`, backslash `/\`, schemes `https:`, `javascript:`, `data:`), CSRF Origin/Referer matching against Host header.
+     - `src/lib/auth/password.test.ts` (4 tests): verified scrypt hashing, salt uniqueness, password verification, invalid hash format rejection.
+   - `@crelune/shared`:
+     - `src/schemas/schemas.test.ts` (8 tests): verified login schema, strict session token payload schema, positive integer timestamps, role literal 'OWNER', environment variable validation.
+   - `@crelune/ui`:
+     - `src/tokens/tokens.test.ts` (3 tests): verified design tokens, colors, layout tokens.
+   - **Total**: 59 automated tests passing across 6 test suites with 0 failures (`PASS`).
+2. **Type Checking (`npm run type-check`)**:
+   - `tsc --noEmit` passed with 0 errors across `@crelune/web`, `@crelune/database`, `@crelune/shared`, and `@crelune/ui` (`PASS`).
+3. **Production Build (`npm run build`)**:
+   - `next build` compiled 17 routes and middleware (34.9 kB) with zero errors (`PASS`).
+   - `tsc -b` succeeded for all workspace packages (`PASS`).

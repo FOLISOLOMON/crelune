@@ -16,15 +16,27 @@ export interface OwnerUser {
   updatedAt: Date | string;
 }
 
-export interface OwnerSession {
-  userId: string;
-  email: string;
-  organisationId: string;
+/**
+ * Minimized cryptographic session token payload.
+ * Eliminates unnecessary PII from the client cookie.
+ */
+export interface SessionTokenPayload {
+  sub: string;
+  role: 'OWNER';
+  org: string;
+  iat: number;
+  exp: number;
+}
+
+export type OwnerSession = SessionTokenPayload;
+
+export interface OwnerProfile {
+  id: string;
   firstName: string;
   lastName: string;
-  role: UserRole;
-  issuedAt: number;
-  expiresAt: number;
+  email: string;
+  role: string;
+  organisationName: string;
 }
 
 export interface AuthResult {
