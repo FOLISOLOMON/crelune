@@ -14,6 +14,9 @@ const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 function getSecretKey(): string {
   const secret = process.env.SESSION_SECRET;
   if (!secret || secret.length < 32) {
+    if (process.env.NODE_ENV !== 'production') {
+      return 'crelune-dev-session-secret-fallback-at-least-32-characters-long';
+    }
     throw new Error(
       'SESSION_SECRET environment variable is missing or less than 32 characters.'
     );

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { verifySessionTokenEdge, SESSION_COOKIE_NAME } from './lib/auth/edge-session';
 
-const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/health'];
+const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/logout', '/api/health'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -17,7 +17,9 @@ export async function middleware(request: NextRequest) {
   }
 
   const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
-  const secretKey = process.env.SESSION_SECRET || 'a-very-long-fallback-secret-for-unconfigured-env-at-least-32-chars';
+  const secretKey =
+    process.env.SESSION_SECRET ||
+    'crelune-dev-session-secret-fallback-at-least-32-characters-long';
   const session = await verifySessionTokenEdge(sessionCookie, secretKey);
 
   const isPublicPath = PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(path + '/'));
