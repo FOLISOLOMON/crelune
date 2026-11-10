@@ -91,8 +91,8 @@
   3. **IPC Dispatch Bridge (`CONTINGENT`)**: Architect the Windows Creative Agent to target Affinity's native MCP Server (`http://localhost:33001/sse`) as primary protocol, while mandating a fallback integration path (e.g. Script Library file staging or GUI automation bridge) in Milestone 5 if Canva retains port 33001 as dormant in public releases.
   4. **PSD Import Configuration (`DOCUMENTED`)**: Configure `ApplicationSettings.loadPSDWithEditableText = true` for Photoshop template imports to preserve live text typography.
 - **Alternatives Evaluated**: Standalone headless CLI (confirmed absent in Affinity 3.3.1); direct binary injection (unsafe, rejected for security and stability).
-- **Rationale**: Reflects empirical ground truth. Guarantees master template protection and process lifecycle management while transparently acknowledging that external headless execution via MCP cannot be verified until Canva activates the listener.
-- **Consequences**: Master template safety is mathematically guaranteed. Creative Agent IPC is decoupled from unverified assumptions and will implement a validated fallback in Milestone 5 if port 33001 remains dormant.
+- **Rationale**: Reflects empirical ground truth. Protects master templates through verified immutability checks and process lifecycle management while transparently acknowledging that external headless execution via MCP cannot be verified until Canva activates the listener.
+- **Consequences**: Template integrity is checked using pre- and post-execution SHA-256 comparisons. Filesystem permissions and isolated working copies provide additional protection. Creative Agent IPC is decoupled from unverified assumptions and will implement a validated fallback in Milestone 5 if port 33001 remains dormant.
 
 ---
 
