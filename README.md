@@ -66,19 +66,19 @@ Project operating rules are maintained in [`.agents/AGENTS.md`](./.agents/AGENTS
 
 ---
 
-## 4. Development Documentation (Scheduled Milestone 0 Deliverables)
+## 4. Development Documentation
 
-Comprehensive architectural and engineering documents are maintained or scheduled for authoring in [`docs/`](./docs/):
+Comprehensive architectural and engineering documents are maintained in [`docs/`](./docs/):
 
-- [`docs/PRODUCT_MASTER_SPECIFICATION.md`](./docs/PRODUCT_MASTER_SPECIFICATION.md): **[Completed]** Authoritative product master specification.
-- `docs/ARCHITECTURE.md`: *[Milestone 0 Deliverable]* Cross-platform technical architecture and subsystem boundaries.
-- `docs/DATABASE_DESIGN.md`: *[Milestone 0 Deliverable]* Relational schema, Prisma models, indexing, and migration rules.
-- `docs/DESIGN_SYSTEM.md`: *[Milestone 0 Deliverable]* Visual design tokens, color palette, typography, and UI guidelines.
-- `docs/SECURITY.md`: *[Milestone 0 Deliverable]* Threat modeling, authentication, PII photo protection, and input safety.
-- `docs/DEVELOPMENT_ROADMAP.md`: *[Milestone 0 Deliverable]* Milestone 0 through Milestone 9 roadmap and deliverables.
-- `docs/TECHNICAL_DECISIONS.md`: *[Milestone 0 Deliverable]* Architectural Decision Records (ADRs).
-- `docs/TESTING_STRATEGY.md`: *[Milestone 0 Deliverable]* Testing tiers, verification protocols, and acceptance criteria.
-- `docs/CHANGELOG.md`: *[Milestone 0 Deliverable]* Historical record of changes and milestone milestones.
+- [`docs/PRODUCT_MASTER_SPECIFICATION.md`](./docs/PRODUCT_MASTER_SPECIFICATION.md): Authoritative product master specification.
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md): Cross-platform technical architecture and subsystem boundaries.
+- [`docs/DATABASE_DESIGN.md`](./docs/DATABASE_DESIGN.md): Relational schema, Prisma models, indexing, and migration rules.
+- [`docs/DESIGN_SYSTEM.md`](./docs/DESIGN_SYSTEM.md): Visual design tokens, color palette, typography, and UI guidelines.
+- [`docs/SECURITY.md`](./docs/SECURITY.md): Threat modeling, authentication, PII photo protection, and input safety.
+- [`docs/DEVELOPMENT_ROADMAP.md`](./docs/DEVELOPMENT_ROADMAP.md): Milestone 0 through Milestone 9 roadmap and deliverables.
+- [`docs/TECHNICAL_DECISIONS.md`](./docs/TECHNICAL_DECISIONS.md): Architectural Decision Records (ADRs).
+- [`docs/TESTING_STRATEGY.md`](./docs/TESTING_STRATEGY.md): Testing tiers, verification protocols, and acceptance criteria.
+- [`docs/CHANGELOG.md`](./docs/CHANGELOG.md): Historical record of changes and milestone milestones.
 
 ---
 
