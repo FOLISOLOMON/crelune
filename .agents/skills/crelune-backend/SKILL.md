@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-backend
 description: Guides secure backend engineering, API design, authentication, authorisation, business logic, integrations, background jobs, and reliability for CRELUNE. Activate when implementing or reviewing APIs, server-side operations, authentication, permissions, notifications, file handling, integrations, or backend architecture.
 ---

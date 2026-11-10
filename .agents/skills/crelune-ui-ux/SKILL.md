@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-ui-ux
 description: Defines and reviews the visual design system, user experience, interaction patterns, accessibility, and responsive interfaces for CRELUNE. Activate when designing screens, components, navigation, layouts, forms, design tokens, visual states, or reviewing interface quality.
 ---

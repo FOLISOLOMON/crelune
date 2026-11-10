@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-affinity-integration
 description: Guides safe technical investigation and integration between CRELUNE, Affinity 3.3 on Windows, PSD and native Affinity documents, and the CRELUNE Windows Creative Agent. Activate when inspecting templates, validating Affinity scripting capabilities, automating supported document operations, preparing design manifests, exporting artwork, or troubleshooting creative workflows.
 ---

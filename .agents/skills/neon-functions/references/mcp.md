@@ -1,4 +1,4 @@
-# MCP servers on Neon Functions
+﻿# MCP servers on Neon Functions
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server is a textbook Neon Functions workload: it's a long-running HTTP handler that an AI client (Cursor, Claude, ChatGPT, an agent) calls to discover and invoke tools, and those tools usually read and write a database. Running it as a Neon Function puts the MCP server's compute next to its Postgres data, gives it a public HTTPS URL, and lets it branch with the rest of your backend — each branch gets its own MCP server against its own isolated data.
 

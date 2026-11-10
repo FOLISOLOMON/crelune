@@ -1,4 +1,4 @@
-# Hybrid Search
+﻿# Hybrid Search
 
 Use hybrid search when either semantic similarity or exact vocabulary can identify a relevant document. Run vector and full-text search separately, then combine their results with fusion or reranking.
 

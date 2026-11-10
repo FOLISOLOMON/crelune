@@ -1,4 +1,4 @@
-# Postgres Egress Optimizer
+﻿# Postgres Egress Optimizer
 
 Guide the user through diagnosing and fixing application-side query patterns that cause excessive data transfer (egress) from their Postgres database. Most high egress bills come from the application fetching more data than it uses.
 

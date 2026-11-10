@@ -1,4 +1,4 @@
-# Semantic Vector Search
+﻿# Semantic Vector Search
 
 Use `lakebase_vector` for approximate nearest-neighbor retrieval over embeddings. It retains pgvector's vector types, distance operators, and query syntax; the index access method is `lakebase_ann`.
 

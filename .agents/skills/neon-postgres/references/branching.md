@@ -1,4 +1,4 @@
-# Lakebase Postgres Branching
+﻿# Lakebase Postgres Branching
 
 **Outcome:** a created Neon branch — or a clear, actionable next step if creation cannot proceed. Choose the correct branch type, then execute branch creation with the CLI (or MCP where the CLI isn't usable).
 

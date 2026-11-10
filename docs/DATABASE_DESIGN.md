@@ -1,4 +1,4 @@
-# CRELUNE — Database Design & Data Integrity Specification
+﻿# CRELUNE — Database Design & Data Integrity Specification
 
 **Document:** PostgreSQL Relational Schema, Prisma Models, and Data Safety Protocols  
 **Project:** CRELUNE  
@@ -10,7 +10,14 @@
 
 ## 1. Database Overview
 
-The CRELUNE data layer runs on **PostgreSQL 15+** (hosted on **Neon Lakebase Postgres**, AWS `us-east-2`) and is managed via **Prisma ORM**.
+> [!IMPORTANT]
+> **Implementation Status: Proposed Schema Design (Not Applied)**
+>
+> This document specifies the proposed relational architecture, entity-relationship models, and Prisma schema definitions for CRELUNE.
+>
+> At Milestone 0, no application tables or schema migrations have been applied to the database. The development database contains zero user tables. Schema models will be migrated incrementally during approved feature milestones (Milestone 2 through Milestone 8).
+
+The proposed CRELUNE data layer will run on **PostgreSQL 15+** (hosted on **Neon Lakebase Postgres**, AWS `us-east-2`) and be managed via **Prisma ORM**.
 
 ### Dual-URL Connection Architecture
 Neon's decoupled architecture provides two connection endpoints configured in `.env.local`:

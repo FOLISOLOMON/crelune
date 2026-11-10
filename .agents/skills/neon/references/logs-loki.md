@@ -1,4 +1,4 @@
-# Logs: CLI, Loki, and SDK pagination
+﻿# Logs: CLI, Loki, and SDK pagination
 
 Neon exposes branch-scoped logs. **Today they cover Neon Functions and Object Storage only.** Postgres computes and the AI Gateway are coming; until then, neither emits records. Logs are available in `aws-us-east-2`, `aws-us-east-1`, `aws-eu-central-1`, and `aws-ap-southeast-1`. A branch that can't serve logs at all answers `404` with `reason: telemetry_not_enabled` (the message says whether it's the wrong region or a branch not collecting telemetry yet), versus a `200` empty result when the branch is enabled but has no records in the window; an unknown branch answers `reason: branch_not_found`.
 

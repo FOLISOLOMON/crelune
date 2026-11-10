@@ -1,4 +1,4 @@
-# CRELUNE — Design System & Visual Identity Specification
+﻿# CRELUNE — Design System & Visual Identity Specification
 
 **Document:** Visual Design Tokens, Component Ergonomics, and Anti-Clutter Guidelines  
 **Project:** CRELUNE  

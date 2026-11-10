@@ -1,4 +1,4 @@
-# Mastra agents with Mastra Studio observability
+﻿# Mastra agents with Mastra Studio observability
 
 A Neon Function is a long-lived Node.js 24 process, which makes it a natural host for a [Mastra](https://mastra.ai) agent: the agent keeps running for the life of the request, and you point its model at the Neon AI Gateway so there are no extra provider keys. You can keep **running the agent on Neon Functions** while shipping its traces to a **Mastra Studio (Mastra Cloud) project** for observability — the agent runs on Neon, the traces are viewable in Mastra.
 

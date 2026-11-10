@@ -1,4 +1,4 @@
-# Type-safe env vars with parseEnv
+﻿# Type-safe env vars with parseEnv
 
 `@neon/env`'s `parseEnv` takes your `neon.ts` config object and returns a parsed, typed env object, validated against the services you declared. The shape of `env` follows your config, and missing variables are flagged with clear errors.
 

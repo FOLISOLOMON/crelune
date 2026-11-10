@@ -1,4 +1,4 @@
-# Managed Better Auth as the OAuth server
+﻿# Managed Better Auth as the OAuth server
 
 Use this page when the request is "let MCP clients sign in my users", "protect my MCP server with OAuth", or "let another app or OAuth client call my API on behalf of my users". Managed Better Auth is the OAuth 2.1 / OIDC authorization server (the OAuth provider plugin, beta, available to all Managed projects). Do not move to self-managed Better Auth for this, and keep the app's existing login method.
 

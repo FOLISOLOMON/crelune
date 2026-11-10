@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-qa
 description: Defines testing strategy, quality assurance, regression prevention, acceptance criteria, release verification, and evidence-based completion reporting across CRELUNE Web, Mobile, Backend, Database, Affinity integration, and Windows Creative Agent. Activate when implementing features, fixing bugs, reviewing changes, preparing releases, or verifying system reliability.
 ---

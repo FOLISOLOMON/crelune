@@ -1,4 +1,4 @@
-# Managing Lakebase Search with Drizzle
+﻿# Managing Lakebase Search with Drizzle
 
 When the user wants Lakebase Search managed through Drizzle, treat the SQL in [Vector Search](vector-search.md), [Full-Text Search](full-text-search.md), and [Hybrid Search](hybrid-search.md) as the source of truth and apply it as below. Use Drizzle for all schema and migration management unless the user says otherwise.
 

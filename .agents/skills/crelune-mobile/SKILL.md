@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-mobile
 description: Guides native-feeling mobile application engineering for CRELUNE using React Native, Expo, and TypeScript. Activate when implementing mobile screens, navigation, notifications, camera access, image uploads, offline behaviour, device permissions, mobile API integration, or mobile release workflows.
 ---

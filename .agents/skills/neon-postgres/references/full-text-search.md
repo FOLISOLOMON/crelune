@@ -1,4 +1,4 @@
-# Full-Text Search with BM25 Ranking
+﻿# Full-Text Search with BM25 Ranking
 
 Use `lakebase_text` for BM25 relevance ranking with PostgreSQL's standard `tsvector` type. The `lakebase_bm25` index adds corpus-aware ranking and top-K pushdown.
 

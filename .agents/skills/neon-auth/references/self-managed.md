@@ -1,4 +1,4 @@
-# Self-managed Better Auth
+﻿# Self-managed Better Auth
 
 Use this page only after `SKILL.md` routed here: a required feature is outside Managed Auth, and the installed Better Auth version documents that flow. If that check fails, keep the current identity.
 

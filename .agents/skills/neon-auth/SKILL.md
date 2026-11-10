@@ -1,4 +1,4 @@
----
+﻿---
 name: neon-auth
 description: >-
   Add authentication to a new app. Use for "add auth", "add login", Neon Auth

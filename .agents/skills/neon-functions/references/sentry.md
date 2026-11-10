@@ -1,4 +1,4 @@
-# Sentry error monitoring on Neon Functions
+﻿# Sentry error monitoring on Neon Functions
 
 A Neon Function is a **long-lived Node.js 24 process running a web-standard request/response handler** — not an edge worker or a short-lived lambda. That means any integration SDK that works in an ordinary Node process works here unchanged: you initialize it once at module load, before your handler starts serving requests, and it stays instrumented for the life of the isolate.
 

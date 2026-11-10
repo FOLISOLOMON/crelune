@@ -1,4 +1,4 @@
-# Shipping native binaries with a Function
+﻿# Shipping native binaries with a Function
 
 The default deploy bundles `source` into a single `index.mjs` with esbuild. A compiled binary cannot be inlined into that file, so it has to ship as a separate file in the deploy archive. There are three ways to put it there. Pick by what the binary is:
 

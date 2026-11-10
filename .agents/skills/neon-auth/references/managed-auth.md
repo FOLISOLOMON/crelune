@@ -1,4 +1,4 @@
-# Managed Better Auth: implement login
+﻿# Managed Better Auth: implement login
 
 Enabling `auth: true` is not implementing login. Follow the matching live quickstart, then verify sign-up, sign-in, sign-out, session, and a protected route.
 

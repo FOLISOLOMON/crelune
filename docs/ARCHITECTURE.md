@@ -1,4 +1,4 @@
-# CRELUNE — System Architecture Specification
+﻿# CRELUNE — System Architecture Specification
 
 **Document:** System Architecture & Component Boundaries  
 **Project:** CRELUNE  
@@ -10,7 +10,14 @@
 
 ## 1. Executive Architectural Summary
 
-CRELUNE (*kreh-LOON*) is a personal creative and media operations platform designed for a single owner/operator (church media lead and graphic designer). The architecture coordinates three distinct clients through a single unified backend and canonical PostgreSQL database:
+> [!IMPORTANT]
+> **Implementation Status: Proposed Technical Architecture**
+>
+> This document defines the recommended cross-platform technical architecture, component boundaries, and communication protocols for CRELUNE.
+>
+> At Milestone 0, no application client code (Web, Mobile, Windows Creative Agent) or backend services have been built. The existing repository contains only the project foundation, developer tooling, specialist skill system, and empty workspace package shells. Subsystems will be implemented sequentially according to the Development Roadmap.
+
+CRELUNE (*kreh-LOON*) is a personal creative and media operations platform designed for a single owner/operator (church media lead and graphic designer). The proposed architecture coordinates three distinct clients through a single unified backend and canonical PostgreSQL database:
 
 ```mermaid
 flowchart TD

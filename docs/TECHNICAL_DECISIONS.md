@@ -1,4 +1,4 @@
-# CRELUNE — Architectural Decision Records (ADR)
+﻿# CRELUNE — Architectural Decision Records (ADR)
 
 **Document:** Formal Technical Decisions, Trade-Off Analyses, and Unresolved Decisions  
 **Project:** CRELUNE  

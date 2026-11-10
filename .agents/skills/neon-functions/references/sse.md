@@ -1,4 +1,4 @@
-# Server-sent events (SSE) on Neon Functions
+﻿# Server-sent events (SSE) on Neon Functions
 
 SSE is the one-way (server → client) streaming counterpart to WebSockets: the browser opens a long-lived `GET` with [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) and the server pushes text frames down it. On Neon Functions an SSE endpoint is just a normal `fetch` handler that returns a `Response` whose body is a `ReadableStream` with `Content-Type: text/event-stream` — there is no library to install and nothing to upgrade. The runtime holds the response open as long as bytes keep flowing (15-minute heartbeat, see [Timeouts](../SKILL.md#timeouts-and-runtime-limits)).
 

@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-database
 description: Guides PostgreSQL database architecture, Prisma schema design, relationships, migrations, indexing, transactions, data integrity, backups, and database testing for CRELUNE. Activate when designing or changing database models, writing queries, creating migrations, optimising database performance, or reviewing data integrity and recovery.
 ---

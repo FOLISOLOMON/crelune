@@ -1,4 +1,4 @@
-# Production hardening for Neon Functions
+﻿# Production hardening for Neon Functions
 
 A Function has a public HTTPS URL. Authenticate the caller, then pick extra
 protection from who actually calls it. This file is the production path; JWT

@@ -1,4 +1,4 @@
-# Function Triggers (CLI, MCP, REST)
+﻿# Function Triggers (CLI, MCP, REST)
 
 A Function Trigger is a branch-scoped rule that POSTs to a Neon Function on a cron (`type: "schedule"`) or when an object is created in a bucket (`type: "storage_object_created"`). Same regions as Functions (`aws-us-east-2`, `aws-us-east-1`, `aws-eu-central-1`, and `aws-ap-southeast-1`).
 

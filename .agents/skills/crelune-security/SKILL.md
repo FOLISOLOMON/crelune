@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-security
 description: Defines and reviews security, privacy, authentication, authorisation, secure file handling, API protection, mobile security, database security, and Windows Creative Agent safety across CRELUNE. Activate when designing or changing security-sensitive features, handling personal data, reviewing code, configuring infrastructure, or investigating vulnerabilities.
 ---

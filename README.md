@@ -19,30 +19,37 @@ CRELUNE eliminates forgotten responsibilities, scattered information, and manual
 
 ---
 
-## 2. Platform Architecture
+## 2. Platform Architecture & Status Classification
 
-CRELUNE is structured as a three-tier client ecosystem powered by a unified shared backend:
+To maintain architectural integrity, CRELUNE strictly distinguishes between confirmed product requirements, existing infrastructure, proposed architectures, and unresolved decisions:
 
-```text
-CRELUNE Web (Next.js Desktop Workspace)
-       │
-CRELUNE Mobile (React Native + Expo Companion)
-       │
-CRELUNE Windows Creative Agent (Affinity 3.3 Bridge)
-       │
-       ▼
- Shared Backend (Node.js / Next.js Server API)
-       │
- ┌─────┴────────────────────────┐
- │                              │
- ▼                              ▼
-Lakebase Postgres (Neon)    Private Object Storage
-```
+### 2.1 Confirmed Project Requirements (Product Master Specification)
+- **Single-Owner Focus**: Built initially for one owner and system administrator. No premature multi-tenant SaaS features, invitations, or enterprise RBAC.
+- **Three-Platform Model**:
+  - *CRELUNE Web*: The central desktop workspace for managing members, viewing calendars, cataloging templates, and tracking design production.
+  - *CRELUNE Mobile*: A dedicated native-feeling companion application (strictly zero WebViews) for everyday capture, birthday notifications, and rapid member photo entry.
+  - *CRELUNE Windows Creative Agent*: A local Windows desktop bridge connecting the cloud backend to the founder's Affinity 3.3 creative environment.
+- **Creative Control**: Automation assists with data gathering and preparation; the founder retains complete creative control and final approval over all artwork.
+- **Document Safety**: Master Affinity (`.afdesign`, `.aftemplate`) and Photoshop (`.psd`) templates must never be overwritten.
+- **Privacy & Security**: Church members' birthdays, phone numbers, and photographs are private community data. Permanent public links and unauthenticated member directories are strictly prohibited.
 
-1. **CRELUNE Web**: The primary desktop command center for managing members, viewing calendars, cataloging templates, and tracking design production.
-2. **CRELUNE Mobile**: Native companion app for everyday convenience — birthday alerts, quick member capture with photos, and design progress review. (Zero WebViews).
-3. **CRELUNE Windows Creative Agent**: Local Windows 11 desktop daemon coordinating safe automated preparation and exports in Serif Affinity 3.3 without risking master templates.
-4. **Shared Backend & Database**: Canonical PostgreSQL schema managed via Prisma ORM and hosted on Neon Lakebase Postgres.
+### 2.2 Existing Infrastructure (Repository State)
+- **Workstation Environment**: Windows 11 with Node.js (`v24.21.0`), npm (`11.19.0`), and Serif Affinity 3.3 installed.
+- **Monorepo Structure**: Root `package.json` with native npm workspaces (`apps/*`, `packages/*`), including `@crelune/shared` and `@crelune/ui`.
+- **Development Database**: Neon Lakebase Postgres instance initialized and linked for development via `.env.local`.
+- **Governance & Skills**: Master operating rules in `.agents/AGENTS.md` and 9 specialized AI skills in `.agents/skills/`.
+
+### 2.3 Proposed Technical Architecture (Starting Baseline)
+- **Web**: Next.js (App Router), React, TypeScript, Tailwind CSS, and Radix UI accessible primitives.
+- **Mobile**: React Native, Expo SDK, and TypeScript.
+- **Shared Backend & APIs**: TypeScript API routes and domain services using Prisma ORM with PostgreSQL.
+- **Windows Creative Agent**: Dedicated background process bridging local Affinity 3.3 automation without browser security bypasses.
+
+### 2.4 Unresolved Implementation Decisions (Awaiting Milestone Evaluation)
+- **Affinity 3.3 Automation IPC Mechanism**: Whether the Windows Creative Agent communicates via CLI script execution, developer SDK ports, or UI automation will be empirically determined through testing in **Milestone 1**.
+- **Private Object Storage Provider**: Selection between Cloudflare R2, AWS S3, or Neon Object Storage will be evaluated based on cost and egress fees in **Milestone 3 & 8**.
+- **Mobile Push Notification Service**: Selection between Expo Push Notification Service and direct Firebase Cloud Messaging (FCM) will be finalized in **Milestone 6**.
+- **Production Hosting Platform**: Final production hosting provider will be confirmed during release planning in **Milestone 9**.
 
 ---
 
@@ -66,36 +73,25 @@ Project operating rules are maintained in [`.agents/AGENTS.md`](./.agents/AGENTS
 
 ---
 
-## 4. Development Documentation
+## 4. Development Documentation (Scheduled Milestone 0 Deliverables)
 
-Comprehensive architectural and engineering documents are maintained in [`docs/`](./docs/):
+Authoritative specifications are maintained in [`docs/`](./docs/):
 
-- [`docs/PRODUCT_MASTER_SPECIFICATION.md`](./docs/PRODUCT_MASTER_SPECIFICATION.md): Authoritative product master specification.
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md): Cross-platform technical architecture and subsystem boundaries.
-- [`docs/DATABASE_DESIGN.md`](./docs/DATABASE_DESIGN.md): Relational schema, Prisma models, indexing, and migration rules.
-- [`docs/DESIGN_SYSTEM.md`](./docs/DESIGN_SYSTEM.md): Visual design tokens, color palette, typography, and UI guidelines.
-- [`docs/SECURITY.md`](./docs/SECURITY.md): Threat modeling, authentication, PII photo protection, and input safety.
-- [`docs/DEVELOPMENT_ROADMAP.md`](./docs/DEVELOPMENT_ROADMAP.md): Milestone 0 through Milestone 9 roadmap and deliverables.
-- [`docs/TECHNICAL_DECISIONS.md`](./docs/TECHNICAL_DECISIONS.md): Architectural Decision Records (ADRs).
-- [`docs/TESTING_STRATEGY.md`](./docs/TESTING_STRATEGY.md): Testing tiers, verification protocols, and acceptance criteria.
-- [`docs/CHANGELOG.md`](./docs/CHANGELOG.md): Historical record of changes and milestone milestones.
-
----
-
-## 5. Environment & Prerequisites
-
-- **OS**: Windows 11 (required for Windows Creative Agent & Affinity integration)
-- **Runtime**: Node.js `v20+` (current workstation: `v24.21.0`)
-- **Package Manager**: npm `10+` (workspaces enabled)
-- **Creative Software**: Serif Affinity 3.3 suite (Designer, Photo, Publisher)
-- **Database**: PostgreSQL / Neon Lakebase Postgres (configured in `.env.local`)
+- [`docs/PRODUCT_MASTER_SPECIFICATION.md`](./docs/PRODUCT_MASTER_SPECIFICATION.md): **[Authoritative Requirement]** Product master specification.
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md): *[Milestone 0 Deliverable]* Cross-platform technical architecture and subsystem boundaries.
+- [`docs/DATABASE_DESIGN.md`](./docs/DATABASE_DESIGN.md): *[Milestone 0 Deliverable]* Relational schema, Prisma models, indexing, and migration rules.
+- [`docs/DESIGN_SYSTEM.md`](./docs/DESIGN_SYSTEM.md): *[Milestone 0 Deliverable]* Visual design tokens, color palette, typography, and UI guidelines.
+- [`docs/SECURITY.md`](./docs/SECURITY.md): *[Milestone 0 Deliverable]* Threat modeling, authentication, PII photo protection, and input safety.
+- [`docs/DEVELOPMENT_ROADMAP.md`](./docs/DEVELOPMENT_ROADMAP.md): *[Milestone 0 Deliverable]* Milestone 0 through Milestone 9 roadmap and deliverables.
+- [`docs/TECHNICAL_DECISIONS.md`](./docs/TECHNICAL_DECISIONS.md): *[Milestone 0 Deliverable]* Architectural Decision Records (ADRs).
+- [`docs/TESTING_STRATEGY.md`](./docs/TESTING_STRATEGY.md): *[Milestone 0 Deliverable]* Testing tiers, verification protocols, and acceptance criteria.
+- [`docs/CHANGELOG.md`](./docs/CHANGELOG.md): *[Milestone 0 Deliverable]* Historical record of changes and milestone milestones.
 
 ---
 
-## 6. Current Status
+## 5. Current Project Status
 
-- **Phase**: **Milestone 0 — Product Foundation**
-- **Core Skill System**: Established and validated.
-- **Neon Cloud Postgres**: Initialized and connected (`.env.local`).
-- **Feature Code**: Deferred until Milestone 0 documentation and validation are complete.
-
+- **Current Phase**: **Milestone 0 — Product Foundation**
+- **Skill System**: Fully validated and active in Antigravity.
+- **Repository Baseline**: Initialized with clean Git safety protocols.
+- **Feature Code**: **Deferred.** Zero application feature code will be created until Milestone 0 foundation and review are fully complete.

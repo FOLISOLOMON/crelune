@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-frontend
 description: Guides production-grade web frontend engineering for CRELUNE using Next.js, React, and TypeScript. Activate when implementing pages, components, navigation, forms, client state, API integration, responsive layouts, frontend performance, or debugging web interface issues.
 ---

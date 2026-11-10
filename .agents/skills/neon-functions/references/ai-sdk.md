@@ -1,4 +1,4 @@
-# AI SDK agents on Neon Functions
+﻿# AI SDK agents on Neon Functions
 
 A Neon Function is a long-lived Node.js 24 process, which makes it a natural host for a [Vercel AI SDK](https://ai-sdk.dev) agent: the handler keeps streaming for the life of the request (15-minute budget, see [Timeouts](../SKILL.md#timeouts-and-runtime-limits)), so multi-step tool loops and image/video generation don't get cut off the way they do on lambda-style serverless. Point the model at the **Neon AI Gateway** (see the `neon-ai-gateway` skill) and there are no extra provider keys to manage — one Neon credential reaches the whole catalog.
 

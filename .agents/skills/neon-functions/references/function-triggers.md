@@ -1,4 +1,4 @@
-# Function Triggers
+﻿# Function Triggers
 
 A Function Trigger is a branch-scoped rule that POSTs to a Neon Function so recurring work does not need a separate scheduler. The request is a normal `fetch` invocation: same public URL, same 15-minute time-to-first-byte limit, same injected env (`DATABASE_URL`, …).
 

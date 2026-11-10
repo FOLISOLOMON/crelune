@@ -1,4 +1,4 @@
----
+﻿---
 name: crelune-product-architect
 description: Guides product architecture, requirements analysis, technical direction, roadmap planning, and cross-platform consistency for CRELUNE. Activate when evaluating product ideas, defining features, making architectural decisions, planning milestones, reviewing scope, or resolving conflicts between product requirements and implementation.
 ---
