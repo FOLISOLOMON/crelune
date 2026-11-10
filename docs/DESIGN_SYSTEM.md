@@ -132,3 +132,12 @@ font-variant-numeric: tabular-nums;
 - **Empty States**: Never display a blank screen. Provide an elegant illustration or subtle icon, an explanation of the module's purpose, and a clear call-to-action button (e.g. *"No templates registered yet. Register your first Affinity flyer template to enable automated preparation."*).
 - **Loading States**: Subtle skeleton loaders matching the exact bounds of the incoming content. No screen-blocking spinners for tabular data.
 - **Error States**: Inline error banners with plain-English resolution guidance and retry actions. Stack traces are strictly suppressed.
+
+---
+
+## 8. Milestone 2 Implementation Status
+
+The design tokens and core shared components are implemented in [`packages/ui`](file:///d:/Projects/Crelune/packages/ui):
+- **Tokens**: [`tokens/colors.ts`](file:///d:/Projects/Crelune/packages/ui/src/tokens/colors.ts) and [`tokens/index.ts`](file:///d:/Projects/Crelune/packages/ui/src/tokens/index.ts) export exact brand palette constants and typography scales.
+- **Components**: [`Button`](file:///d:/Projects/Crelune/packages/ui/src/components/Button.tsx), [`Input`](file:///d:/Projects/Crelune/packages/ui/src/components/Input.tsx), [`Card`](file:///d:/Projects/Crelune/packages/ui/src/components/Card.tsx), [`Badge`](file:///d:/Projects/Crelune/packages/ui/src/components/Badge.tsx), [`EmptyState`](file:///d:/Projects/Crelune/packages/ui/src/components/EmptyState.tsx), and [`Header`](file:///d:/Projects/Crelune/packages/ui/src/components/Header.tsx) are fully type-safe, accessible, and verified via automated vitest unit tests.
+- **Tailwind Extension**: `apps/web/tailwind.config.ts` extends Tailwind CSS with canonical `crelune-*` color and radius utility classes.

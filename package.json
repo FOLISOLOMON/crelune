@@ -8,10 +8,14 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "npm run dev --workspace=@crelune/web",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "type-check": "npm run type-check --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present",
+    "owner:create": "node scripts/create-owner.mjs",
+    "db:push": "node -r dotenv/config node_modules/prisma/build/index.js db push --schema=packages/database/prisma/schema.prisma dotenv_config_path=.env.local",
+    "db:generate": "node -r dotenv/config node_modules/prisma/build/index.js generate --schema=packages/database/prisma/schema.prisma dotenv_config_path=.env.local"
   },
   "engines": {
     "node": ">=20.0.0",

@@ -151,3 +151,22 @@ Before any milestone or significant feature branch is submitted for Product Owne
 - [ ] Linter passes with zero warnings (`npm run lint`).
 - [ ] Master template checksum immutability is programmatically verified.
 - [ ] The Product Owner receives a comprehensive test execution report detailing commands run, tests executed, and evidence captured.
+
+---
+
+## 5. Milestone 2 Testing Evidence
+
+Automated tests verified for Milestone 2 Web Foundation:
+1. **Unit Testing (`npm run test`)**:
+   - `@crelune/shared`: 5 tests passed (auth schema validation, environment variable validation).
+   - `@crelune/ui`: 3 tests passed (brand color tokens, radii, spacing, shadows).
+   - `@crelune/web`: 9 tests passed (scrypt password hashing, salt uniqueness, HMAC-SHA256 session token generation, signature tamper rejection, payload tamper rejection, token expiration, universal Web Crypto Edge verification).
+   - **Total**: 17 tests passed, 0 failed.
+2. **Type Checking (`npm run type-check`)**:
+   - `tsc --noEmit` passed with 0 errors across `@crelune/web`, `@crelune/database`, `@crelune/shared`, `@crelune/ui`.
+3. **Production Build (`npm run build`)**:
+   - `next build` compiled 17 routes with zero errors.
+4. **Live HTTP Server Verification**:
+   - `GET /` (unauthenticated): Redirected with `307` to `/login?callbackUrl=%2F`.
+   - `GET /api/auth/me` (unauthenticated): Returned `401 Unauthorized`.
+   - `GET /api/health`: Returned `200 OK` with database status `healthy`.

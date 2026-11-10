@@ -1,4 +1,4 @@
-﻿# CRELUNE — System Architecture Specification
+# CRELUNE — System Architecture Specification
 
 **Document:** System Architecture & Component Boundaries  
 **Project:** CRELUNE  
@@ -11,11 +11,11 @@
 ## 1. Executive Architectural Summary
 
 > [!IMPORTANT]
-> **Implementation Status: Proposed Technical Architecture**
+> **Implementation Status: Milestone 2 Web Foundation Implemented**
 >
-> This document defines the recommended cross-platform technical architecture, component boundaries, and communication protocols for CRELUNE.
+> As of Milestone 2, the web application foundation (`apps/web`), shared domain packages (`@crelune/shared`, `@crelune/ui`, `@crelune/database`), and Neon Lakebase Postgres persistence layer are **IMPLEMENTED**.
 >
-> At Milestone 0, no application client code (Web, Mobile, Windows Creative Agent) or backend services have been built. The existing repository contains only the project foundation, developer tooling, specialist skill system, and empty workspace package shells. Subsystems will be implemented sequentially according to the Development Roadmap.
+> Mobile companion (`apps/mobile`) and Windows Creative Agent (`apps/agent`) remain scheduled for Milestone 6 and Milestone 5 respectively. Subsystems are developed sequentially according to the Development Roadmap.
 
 CRELUNE (*kreh-LOON*) is a personal creative and media operations platform designed for a single owner/operator (church media lead and graphic designer). The proposed architecture coordinates three distinct clients through a single unified backend and canonical PostgreSQL database:
 

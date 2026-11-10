@@ -1,0 +1,61 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// -----------------------------------------------------------------------------
+// CORE ORGANISATION & USER MANAGEMENT (Milestone 2 Web Foundation)
+// -----------------------------------------------------------------------------
+
+model Organisation {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  logoUrl   String?  @map("logo_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users     User[]
+
+  @@map("organisations")
+}
+
+model User {
+  id             String          @id @default(cuid())
+  organisationId String          @map("organisation_id")
+  email          String          @unique
+  passwordHash   String          @map("password_hash")
+  firstName      String          @map("first_name")
+  lastName       String          @map("last_name")
+  role           String          @default("OWNER")
+  isActive       Boolean         @default(true) @map("is_active")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  organisation   Organisation    @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  preferences    UserPreference?
+
+  @@index([organisationId])
+  @@map("users")
+}
+
+model UserPreference {
+  id                   String   @id @default(cuid())
+  userId               String   @unique @map("user_id")
+  theme                String   @default("light")
+  dateFormat           String   @default("DD/MM/YYYY") @map("date_format")
+  timezone             String   @default("UTC")
+  leadTimeDaysBirthday Int      @default(14) @map("lead_time_days_birthday")
+  leadTimeDaysEvent    Int      @default(21) @map("lead_time_days_event")
+  defaultExportFormat  String   @default("PNG") @map("default_export_format")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}

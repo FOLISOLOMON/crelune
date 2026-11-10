@@ -86,12 +86,45 @@ Authoritative specifications are maintained in [`docs/`](./docs/):
 - [`docs/TECHNICAL_DECISIONS.md`](./docs/TECHNICAL_DECISIONS.md): *[Milestone 0 Deliverable]* Architectural Decision Records (ADRs).
 - [`docs/TESTING_STRATEGY.md`](./docs/TESTING_STRATEGY.md): *[Milestone 0 Deliverable]* Testing tiers, verification protocols, and acceptance criteria.
 - [`docs/CHANGELOG.md`](./docs/CHANGELOG.md): *[Milestone 0 Deliverable]* Historical record of changes and milestone milestones.
+- [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](./docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md): *[Milestone 1 Deliverable]* Affinity 3.3 technical validation & empirical boundaries.
+- [`docs/milestones/MILESTONE_2_WEB_FOUNDATION.md`](./docs/milestones/MILESTONE_2_WEB_FOUNDATION.md): *[Milestone 2 Deliverable]* Web application foundation, responsive shell, owner auth, and Neon database integration.
 
 ---
 
 ## 5. Current Project Status
 
-- **Current Phase**: **Milestone 0 — Product Foundation**
-- **Skill System**: Fully validated and active in Antigravity.
-- **Repository Baseline**: Initialized with clean Git safety protocols.
-- **Feature Code**: **Deferred.** Zero application feature code will be created until Milestone 0 foundation and review are fully complete.
+- **Current Milestone**: **Milestone 2 — Web Foundation (COMPLETE)**
+- **Web Application**: Next.js App Router (`apps/web`) with responsive shell, navigation, and owner authentication.
+- **Design System**: Reusable tokens and components (`@crelune/ui`) implementing the approved palette.
+- **Database Layer**: Neon Lakebase Postgres synchronized with Prisma (`@crelune/database`) using dual-URL pooling.
+- **Next Milestone**: **Milestone 3 — Members and Birthdays**
+
+---
+
+## 6. Getting Started (Development Operations)
+
+### Prerequisites
+- Node.js `>= 20.0.0`
+- npm `>= 10.0.0`
+- Neon Lakebase Postgres branch configured in `.env.local`
+
+### Commands
+```bash
+# Install dependencies across all workspaces
+npm install
+
+# Run automated tests across all packages
+npm test
+
+# Run static type checking across all packages
+npm run type-check
+
+# Build the complete monorepo
+npm run build
+
+# Start local web development server
+npm run dev
+
+# Provision or verify the single owner account via local CLI
+npm run owner:create
+```

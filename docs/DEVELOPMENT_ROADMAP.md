@@ -29,7 +29,7 @@ flowchart LR
 
 ## 2. Detailed Milestone Specifications
 
-### Milestone 0 — Product Foundation *(Current Milestone)*
+### Milestone 0 — Product Foundation *(Status: COMPLETE)*
 - **Objective**: Establish development standards, technical architecture, database schema, design tokens, automated testing setup, and repository hygiene.
 - **Key Deliverables**:
   - Central operating rules (`.agents/AGENTS.md`) and 9 specialized AI skills.
@@ -38,28 +38,28 @@ flowchart LR
   - Neon Lakebase Postgres database linked with non-secret `.env.example`.
 - **Exit Criteria**: All documentation authored, verified without unsupported claims, Git working tree clean, and Product Owner approval received.
 
-### Milestone 1 — Affinity 3.3 Technical Validation
-- **Objective**: Empirically validate Affinity 3.3 JavaScript scripting capabilities (`https://sdk.affinity.studio/3.3.3/js/`) on Windows 11 before building dependent automation.
+### Milestone 1 — Affinity 3.3 Technical Validation *(Status: COMPLETE / EMPIRICAL BOUNDARIES)*
+- **Objective**: Empirically validate Affinity 3.3 JavaScript scripting capabilities on Windows 11 before building dependent automation.
 - **Key Deliverables**:
-  - Local workstation environment audit (Affinity 3.3 executable verification).
-  - Test script executing safe document duplication (Working Copy).
-  - Layer hierarchy traversal script identifying text frames and image nodes.
-  - Automated replacement of text and placed image in native `.afdesign` and imported `.psd`.
-  - Automated export test to 300 DPI PNG and JPEG.
-  - Master template immutability test (asserting SHA-256 hash unchanged).
-- **Exit Criteria**: Test report proving feasibility with zero reliance on invented or Adobe ExtendScript APIs.
+  - Local workstation environment audit (Affinity 3.3 MSIX package verification).
+  - Test harness with zero simulation verifying template immutability (`STRICT PASS`).
+  - Mapped official Canva `JSLib` DOM hierarchy (`document.js`, `nodes.js`).
+  - Discovered dormant local MCP socket in 3.3.1.4940; established contingency architecture (ADR 008).
+- **Exit Criteria**: Truthful empirical validation report delivered and accepted.
 
-### Milestone 2 — Web Foundation
-- **Objective**: Build the core Next.js web application architecture, authentication, and layout shell.
+### Milestone 2 — Web Foundation *(Status: COMPLETE)*
+- **Objective**: Build the core Next.js web application architecture, owner authentication, and responsive layout shell.
 - **Key Deliverables**:
-  - Next.js 15+ App Router scaffold (`apps/web`).
-  - Secure authentication and session management (Argon2id hashing, HTTP-only cookies).
-  - Application layout shell with $240\text{px}$ sidebar navigation using CRELUNE design tokens (`#6541A5`).
-  - Accessible Radix UI components (Dialogs, Dropdowns, Tooltips).
-  - Standardized API route handling and Zod request validation.
-- **Exit Criteria**: User can log in, view dashboard shell, and navigate modules with zero hydration errors.
+  - Next.js 15 App Router application (`apps/web`).
+  - Owner-only authentication (scrypt password derivation, HMAC-SHA256 tamper-evident session cookies, `HttpOnly` security).
+  - Server-side route protection via Next.js middleware intercepting unauthenticated traffic.
+  - Responsive application shell with desktop sidebar and mobile slide-over drawer using CRELUNE design tokens (`#6541A5`).
+  - Minimum Neon Lakebase Postgres database foundation (`Organisation`, `User`, `UserPreference`) synchronized via Prisma.
+  - Shared design tokens and accessible UI components in `@crelune/ui`.
+  - Local owner provisioning CLI script (`scripts/create-owner.mjs`).
+- **Exit Criteria**: Owner can log in, view responsive dashboard shell, navigate module foundations, and verify database connectivity. Automated vitest and Next.js production builds pass.
 
-### Milestone 3 — Members & Birthdays *(First Major Feature Set)*
+### Milestone 3 — Members & Birthdays *(Next Milestone)*
 - **Objective**: Implement member directory, birthday calendar, and automated reminder calculation.
 - **Key Deliverables**:
   - Member management UI (Add, Edit, Soft-delete, View Member Profile).

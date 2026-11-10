@@ -96,6 +96,21 @@
 
 ---
 
+### ADR 009: Web Application Architecture, Owner Authentication & Session Management
+- **Status**: Approved (Implemented in Milestone 2).
+- **Context**: The Web Foundation milestone requires establishing the central management application and a secure owner authentication layer. The system must strictly enforce the single-owner scope with zero public registration while avoiding unnecessary paid auth services.
+- **Decision**:
+  1. Build CRELUNE Web (`apps/web`) using **Next.js 15 App Router**, React, strict TypeScript, and Tailwind CSS configured with CRELUNE brand design tokens.
+  2. Implement **owner-only authentication** using Node's native `crypto.scrypt` (16-byte random salt, 64-byte key) and constant-time verification.
+  3. Store sessions in tamper-evident tokens signed via **HMAC-SHA256** backed by `SESSION_SECRET` ($\ge 32$ chars) in HTTP-only cookies (`crelune_session`) with `SameSite=Lax` and `Secure` attributes.
+  4. Enforce **server-side route protection** via Next.js `middleware.ts` using Web Crypto API universal verification, redirecting unauthenticated traffic to `/login` and protecting private API endpoints.
+  5. Provision the owner account strictly via local terminal CLI (`scripts/create-owner.mjs`). Public self-registration endpoints are completely omitted.
+- **Alternatives Evaluated**: Third-party hosted auth (Clerk/Auth0 — rejected to prevent recurring cost and external dependency for a single-owner app); NextAuth/Auth.js (heavy abstraction with frequent breaking changes); basic auth (inadequate UX).
+- **Rationale**: Standard cryptographic primitives eliminate external subscriptions, preserve full data ownership, guarantee portable PostgreSQL persistence, and enforce single-owner security boundaries.
+- **Consequences**: Complete control over owner authentication, zero third-party auth outages, fast local build times, and clean architectural separation between auth, domain logic, and UI.
+
+---
+
 ## 2. Unresolved Technical Decisions (Awaiting Milestone Evaluation)
 
 The following decisions remain intentionally deferred until their corresponding milestones, with trade-offs outlined below:

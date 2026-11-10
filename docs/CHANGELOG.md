@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-11-10
+
+### Milestone 2: Web Foundation Completed
+
+#### Added
+- **Web Application (`apps/web`)**: Implemented Next.js 15 App Router web application with TypeScript, React 19, and Tailwind CSS.
+- **Responsive Application Shell**: Developed desktop sidebar (`Sidebar.tsx`) and mobile slide-over navigation (`MobileNav.tsx`) accommodating all 9 primary operations modules.
+- **Owner-Only Authentication**: Implemented secure scrypt password derivation, HMAC-SHA256 session token generation, HTTP-only cookie serialization, and server-side route protection in `middleware.ts`.
+- **Local Owner Provisioning CLI**: Authored `scripts/create-owner.mjs` (`npm run owner:create`) for secure local administration with zero public registration exposure.
+- **Database Layer (`@crelune/database`)**: Initialized Prisma ORM models (`Organisation`, `User`, `UserPreference`) synchronized to Neon Lakebase Postgres using direct/pooled dual-URL architecture.
+- **Shared UI & Design Tokens (`@crelune/ui`)**: Implemented approved brand palette (`#6541A5`, `#A99AD1`, `#F8F7FA`, `#24212B`), typography, radii, and accessible components (`Button`, `Input`, `Card`, `Badge`, `EmptyState`, `Header`).
+- **Shared Validation & Schemas (`@crelune/shared`)**: Authored Zod validation schemas for login and environment configuration.
+- **Automated Test Suites**: Added 17 unit tests across `@crelune/shared`, `@crelune/ui`, and `@crelune/web` covering schemas, tokens, password hashing, and session tampering.
+- **Architectural Decision Record (ADR 009)**: Documented web application architecture, single-owner auth design, and session management in [`docs/TECHNICAL_DECISIONS.md`](./TECHNICAL_DECISIONS.md).
+
+---
+
 ## [0.2.1] - 2026-11-10
 
 ### Milestone 1.1: Affinity Integration Evidence Correction

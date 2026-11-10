@@ -1,4 +1,4 @@
-﻿# CRELUNE — Database Design & Data Integrity Specification
+# CRELUNE — Database Design & Data Integrity Specification
 
 **Document:** PostgreSQL Relational Schema, Prisma Models, and Data Safety Protocols  
 **Project:** CRELUNE  
@@ -11,11 +11,11 @@
 ## 1. Database Overview
 
 > [!IMPORTANT]
-> **Implementation Status: Proposed Schema Design (Not Applied)**
+> **Implementation Status: Milestone 2 Minimum Schema Applied**
 >
-> This document specifies the proposed relational architecture, entity-relationship models, and Prisma schema definitions for CRELUNE.
+> As of Milestone 2, the core foundation models (`Organisation`, `User`, `UserPreference`) have been synchronized with the Neon Lakebase Postgres development branch (`ep-mute-forest-bepsjmsu`).
 >
-> At Milestone 0, no application tables or schema migrations have been applied to the database. The development database contains zero user tables. Schema models will be migrated incrementally during approved feature milestones (Milestone 2 through Milestone 8).
+> In strict accordance with Milestone 2 boundaries, future domain models (`Member`, `DesignJob`, `Template`, `Asset`, `Event`) are documented in the specification below but will only be migrated during their designated feature milestones (Milestone 3 through Milestone 8).
 
 The proposed CRELUNE data layer will run on **PostgreSQL 15+** (hosted on **Neon Lakebase Postgres**, AWS `us-east-2`) and be managed via **Prisma ORM**.
 

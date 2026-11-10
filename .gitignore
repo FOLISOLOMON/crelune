@@ -8,11 +8,12 @@ coverage/
 *.lcov
 .nyc_output
 
-# Next.js
+# Next.js & TypeScript Build
 .next/
 out/
 build/
 dist/
+*.tsbuildinfo
 
 # React Native / Expo
 .expo/

@@ -121,3 +121,22 @@ To protect the founder's Windows 11 workstation from remote execution vulnerabil
      }
    }
    ```
+
+---
+
+## 7. Milestone 2 Authentication Implementation Controls
+
+Implemented in Milestone 2:
+1. **Owner-Only Authentication**:
+   - Single-owner baseline strictly enforces that only one owner account exists.
+   - Public registration, invitation routes, and client-side account creation are strictly absent.
+   - Account provisioning is performed exclusively via the local CLI script [`scripts/create-owner.mjs`](file:///d:/Projects/Crelune/scripts/create-owner.mjs).
+2. **Cryptographic Password Security**:
+   - Passwords hashed using Node's native `crypto.scrypt` with a random 16-byte salt and constant-time verification ([`apps/web/src/lib/auth/password.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/password.ts)).
+3. **Tamper-Evident Session Management**:
+   - Session tokens are signed using HMAC-SHA256 backed by `SESSION_SECRET` ($\ge 32$ characters) ([`apps/web/src/lib/auth/session.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/session.ts)).
+   - Session cookies use `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` in production.
+   - Dual-engine verification supports both Node.js server components and Web Crypto Edge runtime in Next.js middleware ([`apps/web/src/middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts)).
+4. **Server-Side Route Interception**:
+   - Unauthenticated requests to dashboard routes (`/`, `/members`, `/birthdays`, etc.) are intercepted by `middleware.ts` and redirected to `/login`.
+   - Protected API routes return `401 Unauthorized` without session cookies.
