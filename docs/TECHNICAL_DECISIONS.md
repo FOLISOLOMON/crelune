@@ -82,6 +82,20 @@
 
 ---
 
+### ADR 008: Windows Creative Agent Inter-Process Communication & Affinity 3.3 Integration
+- **Status**: Approved (Empirically Verified in Milestone 1).
+- **Context**: The Windows Creative Agent requires a secure, supported, non-destructive IPC mechanism to orchestrate Affinity 3.3 on Windows 11.
+- **Decision**:
+  1. Use Affinity 3.3's built-in **Model Context Protocol (MCP) Server** running on `http://localhost:33001/sse` as the primary IPC bridge. Scripts are dispatched via the standard MCP `execute_script` tool payload.
+  2. Use the sanctioned Windows App Execution Alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe`) for application lifecycle management and document activation, complying with MSIX package boundaries.
+  3. Enforce the **Template Immutability Protocol**: master templates are strictly read-only; operations execute exclusively on ephemeral working copies in `workspaces/jobs/{jobId}/`, verified by pre- and post-execution SHA-256 checksum comparison.
+  4. Enable `ApplicationSettings.loadPSDWithEditableText = true` for Photoshop template imports to preserve live text typography.
+- **Alternatives Evaluated**: Standalone headless CLI (not supported by Affinity 3.3; verified absent in binary audit); Windows UI automation / mouse emulation (fragile, error-prone, non-deterministic).
+- **Rationale**: Affinity 3.3 natively implements an MCP SSE server in `libmcp.dll` exposing structured tools (`execute_script`, `render_spread`, `render_selection`). This provides a clean, native, vendor-supported JSON-RPC over SSE communication channel without brittle UI automation or unsupported binary hooks.
+- **Consequences**: Deterministic script execution, atomic undoable document commands, high-fidelity exports, zero risk of master template corruption, and full alignment with official Affinity V3 architecture.
+
+---
+
 ## 2. Unresolved Technical Decisions (Awaiting Milestone Evaluation)
 
 The following decisions remain intentionally deferred until their corresponding milestones, with trade-offs outlined below:
@@ -103,10 +117,5 @@ The following decisions remain intentionally deferred until their corresponding 
 - **Recommendation**: Use Expo Push Notifications for initial milestones; migrate to direct FCM only if multi-tenant enterprise volume is required.
 - **Approval Required**: Product Owner decision in Milestone 6.
 
-### Decision C: Windows Creative Agent IPC Protocol
-- **Context**: Communication between local Windows Agent daemon and Affinity 3.3 (Milestone 1 & 5).
-- **Options**:
-  1. *Affinity Official JS Scripting CLI/Runner*: Invoke scripts through supported Affinity CLI or workspace triggers.
-  2. *Affinity Developer SDK WebSockets*: Connect to Affinity's local scripting debugging port if officially supported.
-- **Recommendation**: Conduct empirical verification in Milestone 1 to prove which mechanism is officially supported in Affinity 3.3.
-- **Approval Required**: Product Owner sign-off on Milestone 1 Technical Validation Report.
+### Decision C: Windows Creative Agent IPC Protocol — RESOLVED (ADR 008)
+- **Status**: Resolved in Milestone 1. See [ADR 008](#adr-008-windows-creative-agent-inter-process-communication--affinity-33-integration) and [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md).

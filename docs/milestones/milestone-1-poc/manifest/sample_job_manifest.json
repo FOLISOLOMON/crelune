@@ -1,0 +1,38 @@
+{
+  "$schema": "https://crelune.local/schemas/creative-job-v1.json",
+  "jobId": "job_poc_20261110_001",
+  "eventType": "BIRTHDAY_CELEBRATION",
+  "member": {
+    "id": "mem_sarah_jenkins_1995",
+    "name": "Sarah Jenkins",
+    "birthDate": "1995-11-15"
+  },
+  "template": {
+    "sourcePath": "docs/milestones/milestone-1-poc/template/sample_template.afdesign",
+    "expectedSha256": "E1DE786EA5D2DE1AA945F75C7DAD13422F878E8C993F641C7137BCEC7BC50EBF",
+    "format": "afdesign"
+  },
+  "fields": [
+    {
+      "layerName": "Title",
+      "action": "replace_text",
+      "value": "Happy Birthday Sarah!"
+    },
+    {
+      "layerName": "Subtitle",
+      "action": "replace_text",
+      "value": "Wishing you an incredible year ahead - CRELUNE Team"
+    }
+  ],
+  "export": {
+    "preset": "PNG",
+    "area": "WholeDocument",
+    "filename": "sarah_birthday_card.png",
+    "width": 1920,
+    "height": 1080
+  },
+  "safety": {
+    "enforceImmutability": true,
+    "isolatedWorkspace": true
+  }
+}

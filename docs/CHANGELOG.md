@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-11-10
+
+### Milestone 1: Affinity 3.3 Technical Validation Completed
+
+#### Added
+- **Affinity 3.3 Validation Report**: Authored comprehensive technical report [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](./milestones/MILESTONE_1_AFFINITY_VALIDATION.md) documenting empirical findings on Windows 11.
+- **Model Context Protocol (MCP) Integration**: Discovered and verified Canva Affinity 3.3.1's built-in MCP HTTP SSE Server (`libmcp.dll`) running on `http://localhost:33001/sse` with tool handlers for `execute_script`, `list_library_scripts`, `read_library_script`, `render_spread`, and `render_selection`.
+- **Architectural Decision Record (ADR 008)**: Recorded Windows Creative Agent IPC protocol, App Execution Alias invocation, and Template Immutability Protocol in [`docs/TECHNICAL_DECISIONS.md`](./TECHNICAL_DECISIONS.md).
+- **Milestone 1 Proof of Concept Harness**: Implemented safe, automated validation harness in [`docs/milestones/milestone-1-poc/`](./milestones/milestone-1-poc/) featuring:
+  - Synthetic job manifest (`manifest/sample_job_manifest.json`).
+  - Affinity DOM automation script (`scripts/affinity_job_executor.js`) targeting official `JSLib` APIs.
+  - Template immutability verification ensuring byte-for-byte SHA-256 invariance on master templates.
+  - Test runner script (`poc_harness.ps1`) verifying environment, execution alias, and deliverable creation.
+
+---
+
 ## [0.1.0] - 2026-11-10
 
 ### Milestone 0: Product Foundation Initialized
