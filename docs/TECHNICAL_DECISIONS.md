@@ -1,4 +1,4 @@
-﻿# CRELUNE — Architectural Decision Records (ADR)
+# CRELUNE — Architectural Decision Records (ADR)
 
 **Document:** Formal Technical Decisions, Trade-Off Analyses, and Unresolved Decisions  
 **Project:** CRELUNE  
@@ -83,16 +83,16 @@
 ---
 
 ### ADR 008: Windows Creative Agent Inter-Process Communication & Affinity 3.3 Integration
-- **Status**: Approved (Empirically Verified in Milestone 1).
-- **Context**: The Windows Creative Agent requires a secure, supported, non-destructive IPC mechanism to orchestrate Affinity 3.3 on Windows 11.
+- **Status**: Partially Resolved / Contingent Architecture (Empirically Corrected in Milestone 1.1).
+- **Context**: The Windows Creative Agent requires a secure, supported, non-destructive IPC mechanism to orchestrate Affinity 3.3 on Windows 11. Empirical testing on installed Affinity 3.3.1.4940 confirmed that while `libmcp.dll` is loaded in process memory, TCP port 33001 does not open a listening socket in standard operation, and CLI script parameters are not executed.
 - **Decision**:
-  1. Use Affinity 3.3's built-in **Model Context Protocol (MCP) Server** running on `http://localhost:33001/sse` as the primary IPC bridge. Scripts are dispatched via the standard MCP `execute_script` tool payload.
-  2. Use the sanctioned Windows App Execution Alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe`) for application lifecycle management and document activation, complying with MSIX package boundaries.
-  3. Enforce the **Template Immutability Protocol**: master templates are strictly read-only; operations execute exclusively on ephemeral working copies in `workspaces/jobs/{jobId}/`, verified by pre- and post-execution SHA-256 checksum comparison.
-  4. Enable `ApplicationSettings.loadPSDWithEditableText = true` for Photoshop template imports to preserve live text typography.
-- **Alternatives Evaluated**: Standalone headless CLI (not supported by Affinity 3.3; verified absent in binary audit); Windows UI automation / mouse emulation (fragile, error-prone, non-deterministic).
-- **Rationale**: Affinity 3.3 natively implements an MCP SSE server in `libmcp.dll` exposing structured tools (`execute_script`, `render_spread`, `render_selection`). This provides a clean, native, vendor-supported JSON-RPC over SSE communication channel without brittle UI automation or unsupported binary hooks.
-- **Consequences**: Deterministic script execution, atomic undoable document commands, high-fidelity exports, zero risk of master template corruption, and full alignment with official Affinity V3 architecture.
+  1. **Template Immutability Protocol (`VERIFIED`)**: Enforce strict read-only master templates; operations execute exclusively on ephemeral working copies in `workspaces/jobs/{jobId}/`, verified by pre- and post-execution SHA-256 checksum comparison.
+  2. **Application Lifecycle (`VERIFIED`)**: Use the sanctioned Windows App Execution Alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe`) for process lifecycle management and document activation, complying with MSIX package boundaries.
+  3. **IPC Dispatch Bridge (`CONTINGENT`)**: Architect the Windows Creative Agent to target Affinity's native MCP Server (`http://localhost:33001/sse`) as primary protocol, while mandating a fallback integration path (e.g. Script Library file staging or GUI automation bridge) in Milestone 5 if Canva retains port 33001 as dormant in public releases.
+  4. **PSD Import Configuration (`DOCUMENTED`)**: Configure `ApplicationSettings.loadPSDWithEditableText = true` for Photoshop template imports to preserve live text typography.
+- **Alternatives Evaluated**: Standalone headless CLI (confirmed absent in Affinity 3.3.1); direct binary injection (unsafe, rejected for security and stability).
+- **Rationale**: Reflects empirical ground truth. Guarantees master template protection and process lifecycle management while transparently acknowledging that external headless execution via MCP cannot be verified until Canva activates the listener.
+- **Consequences**: Master template safety is mathematically guaranteed. Creative Agent IPC is decoupled from unverified assumptions and will implement a validated fallback in Milestone 5 if port 33001 remains dormant.
 
 ---
 
@@ -117,5 +117,5 @@ The following decisions remain intentionally deferred until their corresponding 
 - **Recommendation**: Use Expo Push Notifications for initial milestones; migrate to direct FCM only if multi-tenant enterprise volume is required.
 - **Approval Required**: Product Owner decision in Milestone 6.
 
-### Decision C: Windows Creative Agent IPC Protocol — RESOLVED (ADR 008)
-- **Status**: Resolved in Milestone 1. See [ADR 008](#adr-008-windows-creative-agent-inter-process-communication--affinity-33-integration) and [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md).
+### Decision C: Windows Creative Agent IPC Protocol & Automation Fallback (Partially Resolved — ADR 008)
+- **Status**: Partially Resolved / Contingent. Template immutability and process lifecycle are verified. Final execution bridge (native MCP vs Script Library staging vs GUI automation) is deferred to Milestone 5 evaluation. See [ADR 008](#adr-008-windows-creative-agent-inter-process-communication--affinity-33-integration) and [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md).

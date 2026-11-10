@@ -1,4 +1,4 @@
-﻿# CRELUNE — Changelog
+# CRELUNE — Changelog
 
 All notable changes to the CRELUNE platform will be documented in this file.
 
@@ -7,19 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] - 2026-11-10
+
+### Milestone 1.1: Affinity Integration Evidence Correction
+
+#### Changed
+- **Eliminated Simulation**: Removed synthetic 45-byte output file creation from `poc_harness.ps1`.
+- **Empirical MCP Connectivity Probe**: Updated validation harness to probe live TCP port 33001 and report connection failure honestly (`NOT LISTENING` / `NOT_VERIFIED_INACTIVE_MCP`).
+- **Empirical Boundary Correction**: Updated [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](./milestones/MILESTONE_1_AFFINITY_VALIDATION.md) and [`docs/TECHNICAL_DECISIONS.md`](./TECHNICAL_DECISIONS.md) (ADR 008) to classify automation capabilities with strict evidentiary rigor (`VERIFIED`, `DOCUMENTED`, `PARTIALLY SUPPORTED`, `NOT VERIFIED`, `NOT SUPPORTED`).
+- **Contingent Architecture**: Classified Windows Creative Agent IPC bridge as contingent on Canva MCP activation, establishing fallback evaluation (Script Library staging vs GUI automation) for Milestone 5.
+- **Template Immutability Integrity**: Re-verified pre- and post-execution SHA-256 byte-for-byte invariance on master templates (`STRICT PASS`).
+
+---
+
 ## [0.2.0] - 2026-11-10
 
-### Milestone 1: Affinity 3.3 Technical Validation Completed
+### Milestone 1: Affinity 3.3 Technical Validation
 
 #### Added
 - **Affinity 3.3 Validation Report**: Authored comprehensive technical report [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](./milestones/MILESTONE_1_AFFINITY_VALIDATION.md) documenting empirical findings on Windows 11.
-- **Model Context Protocol (MCP) Integration**: Discovered and verified Canva Affinity 3.3.1's built-in MCP HTTP SSE Server (`libmcp.dll`) running on `http://localhost:33001/sse` with tool handlers for `execute_script`, `list_library_scripts`, `read_library_script`, `render_spread`, and `render_selection`.
-- **Architectural Decision Record (ADR 008)**: Recorded Windows Creative Agent IPC protocol, App Execution Alias invocation, and Template Immutability Protocol in [`docs/TECHNICAL_DECISIONS.md`](./TECHNICAL_DECISIONS.md).
-- **Milestone 1 Proof of Concept Harness**: Implemented safe, automated validation harness in [`docs/milestones/milestone-1-poc/`](./milestones/milestone-1-poc/) featuring:
-  - Synthetic job manifest (`manifest/sample_job_manifest.json`).
-  - Affinity DOM automation script (`scripts/affinity_job_executor.js`) targeting official `JSLib` APIs.
-  - Template immutability verification ensuring byte-for-byte SHA-256 invariance on master templates.
-  - Test runner script (`poc_harness.ps1`) verifying environment, execution alias, and deliverable creation.
+- **Canva JSLib DOM Specification**: Mapped official JavaScript DOM APIs (`document.js`, `nodes.js`) for text replacement, layer traversal, and file export.
+- **Architectural Decision Record (ADR 008)**: Recorded initial Windows Creative Agent IPC protocol, App Execution Alias invocation, and Template Immutability Protocol in [`docs/TECHNICAL_DECISIONS.md`](./TECHNICAL_DECISIONS.md).
+- **Milestone 1 Proof of Concept Harness**: Implemented safe validation harness in [`docs/milestones/milestone-1-poc/`](./milestones/milestone-1-poc/) testing environment, execution alias, and template immutability.
 
 ---
 

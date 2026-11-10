@@ -1,9 +1,16 @@
 /**
- * CRELUNE â€” Affinity 3.3 Milestone 1 Automation Proof of Concept
+ * CRELUNE — Affinity 3.3 Milestone 1 Automation Proof of Concept
  *
- * Demonstrates safe document inspection, targeted layer text replacement,
- * and high-fidelity rendering/exporting using official Canva Affinity 3.3
- * JSLib APIs.
+ * Implements targeted layer text replacement, document inspection, and high-fidelity
+ * rendering/exporting using official Canva Affinity 3.3 JSLib APIs.
+ *
+ * EMPIRICAL EXECUTION STATUS:
+ * - API Specification: DOCUMENTED & VALIDATED against Canva Affinity 3.3 JSLib (`document.js`, `nodes.js`).
+ * - Internal GUI Runtime: Supported within Affinity's embedded Scripting Studio panel.
+ * - External Headless Execution: NOT VERIFIED in Affinity 3.3.1.4940.
+ *   (Empirical investigation proved that the local MCP server on port 33001 does not open an active
+ *    TCP listener during standard operation or CLI launch, and CLI script parameters are not executed.
+ *    External invocation requires either an active MCP listener or an alternative IPC bridge.)
  */
 
 'use strict';

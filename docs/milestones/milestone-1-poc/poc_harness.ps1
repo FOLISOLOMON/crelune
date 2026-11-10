@@ -1,14 +1,15 @@
 ﻿<#
 .SYNOPSIS
-    CRELUNE — Milestone 1 Affinity 3.3 Technical Validation Proof of Concept Harness
+    CRELUNE — Milestone 1.1 Affinity 3.3 Technical Validation Proof of Concept Harness
 .DESCRIPTION
-    Validates the local environment, executes the template immutability protocol,
-    prepares isolated working directories, simulates payload execution for the Windows
-    Creative Agent, and verifies end-to-end data integrity and hash invariance.
+    Executes empirical technical validation of Affinity 3.3.1 on Windows 11.
+    Performs real environment checks, template immutability verification,
+    workspace isolation, and attempts real local MCP endpoint connectivity.
+    Strictly zero simulated execution or synthetic output creation.
 #>
 
 [CmdletBinding()]
-param(
+param (
     [string]$ManifestPath = "",
     [string]$WorkspaceRoot = ""
 )
@@ -23,18 +24,20 @@ if (-not $WorkspaceRoot) {
 }
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   CRELUNE MILESTONE 1 — AFFINITY 3.3 VALIDATION HARNESS         " -ForegroundColor Cyan
+Write-Host "   CRELUNE MILESTONE 1.1 — AFFINITY 3.3 VALIDATION HARNESS" -ForegroundColor Cyan
+Write-Host "   (Strict Empirical Verification — Zero Simulated Execution)" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
-# 1. Environment Detection
+# 1. Environment Verification
 Write-Host "`n[Stage 1] Environment Inspection..." -ForegroundColor Yellow
-$os = Get-CimInstance -ClassName Win32_OperatingSystem
-$osInfo = "$($os.Caption) (Build $($os.BuildNumber), Architecture $($os.OSArchitecture))"
-Write-Host "  Operating System: $osInfo"
+$osInfo = (Get-CimInstance Win32_OperatingSystem).Caption
+$osBuild = (Get-CimInstance Win32_OperatingSystem).BuildNumber
+$osArch = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
+Write-Host "  Operating System: $osInfo (Build $osBuild, Architecture $osArch)"
 
 $affinityPackage = Get-AppxPackage -Name "Canva.Affinity"
 if (-not $affinityPackage) {
-    Write-Error "Affinity package not found."
+    Write-Error "Affinity package 'Canva.Affinity' not found in current user profile."
 }
 Write-Host "  Affinity Package: $($affinityPackage.Name) v$($affinityPackage.Version)"
 Write-Host "  Package Location: $($affinityPackage.InstallLocation)"
@@ -42,24 +45,29 @@ Write-Host "  Package Location: $($affinityPackage.InstallLocation)"
 $aliasPath = "$env:LOCALAPPDATA\Microsoft\WindowsApps\Affinity.exe"
 $aliasExists = Test-Path $aliasPath
 Write-Host "  Execution Alias : $aliasPath (Found: $aliasExists)"
+if (-not $aliasExists) {
+    Write-Error "Affinity execution alias not found at: $aliasPath"
+}
 
-# 2. Manifest Validation
+# 2. Manifest Verification
 Write-Host "`n[Stage 2] Job Manifest Inspection..." -ForegroundColor Yellow
 if (-not (Test-Path $ManifestPath)) {
     Write-Error "Job manifest not found at: $ManifestPath"
 }
-$manifestContent = Get-Content -Raw $ManifestPath | ConvertFrom-Json
+$manifestRaw = Get-Content -Path $ManifestPath -Raw -Encoding UTF8
+$manifestContent = $manifestRaw | ConvertFrom-Json
 Write-Host "  Job ID          : $($manifestContent.jobId)"
 Write-Host "  Event Type      : $($manifestContent.eventType)"
-Write-Host "  Target Member   : $($manifestContent.member.name)"
+Write-Host "  Target Member   : $($manifestContent.fields[0].value)"
 Write-Host "  Template Source : $($manifestContent.template.sourcePath)"
 
-$templateAbsPath = Join-Path "d:\Projects\Crelune" $manifestContent.template.sourcePath
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
+$templateAbsPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $manifestContent.template.sourcePath))
 if (-not (Test-Path $templateAbsPath)) {
-    Write-Error "Template file not found at: $templateAbsPath"
+    Write-Error "Master template file not found at: $templateAbsPath"
 }
 
-# 3. Immutability Protocol Baseline
+# 3. Pre-Execution Template Immutability Check
 Write-Host "`n[Stage 3] Template Immutability Protocol (Pre-Execution)..." -ForegroundColor Yellow
 $initialHash = (Get-FileHash -Path $templateAbsPath -Algorithm SHA256).Hash
 Write-Host "  Initial Hash    : $initialHash"
@@ -87,8 +95,8 @@ Copy-Item -Path $templateAbsPath -Destination $workingDocPath -Force
 $workingDocHash = (Get-FileHash -Path $workingDocPath -Algorithm SHA256).Hash
 Write-Host "  Working Doc Copy: $workingDocPath (Hash: $workingDocHash)"
 
-# 5. Payload Preparation & Execution Contract Verification
-Write-Host "`n[Stage 5] Creative Agent Contract Preparation..." -ForegroundColor Yellow
+# 5. Contract Preparation & Real MCP Connectivity Check
+Write-Host "`n[Stage 5] Local MCP Server Connectivity & Automation Dispatch..." -ForegroundColor Yellow
 $jobConfig = @{
     jobId = $manifestContent.jobId
     workingDocumentPath = $workingDocPath
@@ -100,10 +108,63 @@ $configPath = Join-Path $jobDir "agent_job_config.json"
 $jobConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $configPath -Encoding UTF8
 Write-Host "  Config Generated: $configPath"
 
-# Simulate execution of deliverable creation (creates synthetic PNG output deliverable for verification)
-$syntheticPngBytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x07, 0x80, 0x00, 0x00, 0x04, 0x38, 0x08, 0x06, 0x00, 0x00, 0x00, 0xE0, 0xDC, 0xF9, 0xDB, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82)
-[System.IO.File]::WriteAllBytes($deliverablePath, $syntheticPngBytes)
-Write-Host "  Deliverable Created : $deliverablePath ($((Get-Item $deliverablePath).Length) bytes)"
+# Check if Affinity process is running
+$affinityProc = Get-Process Affinity -ErrorAction SilentlyContinue
+$procRunning = ($affinityProc -ne $null)
+Write-Host "  Affinity Process: $(if ($procRunning) { "RUNNING (PID: $($affinityProc.Id))" } else { "NOT RUNNING" })"
+
+# Real TCP connection probe on MCP default port 33001
+$mcpPort = 33001
+$mcpEndpoint = "http://localhost:$mcpPort/sse"
+$mcpListening = $false
+Write-Host "  Probing MCP Port: localhost:$mcpPort..."
+
+$tcpClient = New-Object System.Net.Sockets.TcpClient
+$asyncResult = $tcpClient.BeginConnect("127.0.0.1", $mcpPort, $null, $null)
+$waitSuccess = $asyncResult.AsyncWaitHandle.WaitOne(1000, $false)
+if ($waitSuccess -and $tcpClient.Connected) {
+    $tcpClient.EndConnect($asyncResult)
+    $mcpListening = $true
+    $tcpClient.Close()
+} else {
+    $tcpClient.Close()
+}
+
+$executionStatus = ""
+$executionReason = ""
+$deliverableCreated = $false
+
+if ($mcpListening) {
+    Write-Host "  MCP Port Status : LISTENING" -ForegroundColor Green
+    Write-Host "  Connecting to MCP SSE endpoint ($mcpEndpoint)..."
+    try {
+        $handshake = Invoke-WebRequest -Uri $mcpEndpoint -Method Get -TimeoutSec 3 -ErrorAction Stop
+        Write-Host "  MCP Handshake   : SUCCESS (HTTP $($handshake.StatusCode))" -ForegroundColor Green
+        $executionStatus = "EXECUTED_VIA_MCP"
+        $executionReason = "Dispatched via live local MCP server."
+    } catch {
+        Write-Host "  MCP Handshake   : FAILED ($($_.Exception.Message))" -ForegroundColor Red
+        $executionStatus = "MCP_HANDSHAKE_FAILED"
+        $executionReason = $_.Exception.Message
+    }
+} else {
+    Write-Host "  MCP Port Status : NOT LISTENING (TCP port $mcpPort is closed)" -ForegroundColor Yellow
+    Write-Host "  Automation Status: NOT VERIFIED / INACTIVE" -ForegroundColor Yellow
+    Write-Host "  Note: Affinity 3.3.1.4940 does not expose an active HTTP/SSE listener on port $mcpPort"
+    Write-Host "        during standard operation. Zero simulated output is produced."
+    $executionStatus = "NOT_VERIFIED_INACTIVE_MCP"
+    $executionReason = "Local MCP server on port $mcpPort is inactive in Affinity 3.3.1.4940. External headless script dispatch cannot connect."
+}
+
+# Verify deliverable state (strictly check actual filesystem, no synthetic file written)
+if (Test-Path $deliverablePath) {
+    $deliverableCreated = $true
+    $deliverableBytes = (Get-Item $deliverablePath).Length
+    Write-Host "  Deliverable Created : $deliverablePath ($deliverableBytes bytes)" -ForegroundColor Green
+} else {
+    $deliverableCreated = $false
+    Write-Host "  Deliverable Status  : NONE (Output file not created; simulation strictly omitted)" -ForegroundColor DarkYellow
+}
 
 # 6. Post-Execution Template Immutability Verification
 Write-Host "`n[Stage 6] Post-Execution Immutability Verification..." -ForegroundColor Yellow
@@ -124,7 +185,9 @@ $report = [PSCustomObject]@{
         affinityVersion = $affinityPackage.Version
         packageLocation = $affinityPackage.InstallLocation
         appAlias = $aliasPath
-        mcpPort = 33001
+        affinityProcessRunning = $procRunning
+        mcpEndpoint = $mcpEndpoint
+        mcpListening = $mcpListening
     }
     immutability = [PSCustomObject]@{
         masterTemplatePath = $templateAbsPath
@@ -137,12 +200,22 @@ $report = [PSCustomObject]@{
         workspacePath = $jobDir
         workingDocumentPath = $workingDocPath
         deliverablePath = $deliverablePath
-        deliverableSizeBytes = (Get-Item $deliverablePath).Length
-        status = "SUCCESS"
+        deliverableCreated = $deliverableCreated
+        status = $executionStatus
+        reason = $executionReason
+        simulationOmitted = $true
     }
 }
 
 $reportPath = Join-Path $jobDir "poc_verification_report.json"
 $report | ConvertTo-Json -Depth 5 | Set-Content -Path $reportPath -Encoding UTF8
 Write-Host "`nVerification report written to: $reportPath" -ForegroundColor Cyan
-Write-Host "Milestone 1 Proof of Concept Harness Completed Successfully!`n" -ForegroundColor Green
+
+Write-Host "`n=================================================================" -ForegroundColor Cyan
+Write-Host "Validation Summary:"
+Write-Host "  - Master Template Immutability: STRICT PASS (Hash Verified)" -ForegroundColor Green
+Write-Host "  - Workspace Isolation         : PASS" -ForegroundColor Green
+Write-Host "  - Job Manifest & Contract     : PASS" -ForegroundColor Green
+Write-Host "  - Local MCP Server Dispatch   : $executionStatus" -ForegroundColor Yellow
+Write-Host "  - Deliverable Creation        : $(if ($deliverableCreated) { "PASS" } else { "NOT CREATED (NO SIMULATION)" })" -ForegroundColor Yellow
+Write-Host "=================================================================`n" -ForegroundColor Cyan
