@@ -19,8 +19,11 @@ describe('Object Storage Configuration & Exact Runtime Allowlist', () => {
     AWS_SECRET_ACCESS_KEY: 'nsk_test_dev_secret',
     OBJECT_STORAGE_BUCKET: APPROVED_DEV_STORAGE_TARGET.bucket,
     OBJECT_STORAGE_ENV_PREFIX: APPROVED_DEV_STORAGE_TARGET.envPrefix,
+    OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: APPROVED_DEV_STORAGE_TARGET.branchId,
     NEON_BRANCH: APPROVED_DEV_STORAGE_TARGET.branchName,
     NEON_BRANCH_ID: APPROVED_DEV_STORAGE_TARGET.branchId,
+    DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/${APPROVED_DEV_STORAGE_TARGET.databaseName}?sslmode=require`,
+    DATABASE_URL_UNPOOLED: `postgres://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/${APPROVED_DEV_STORAGE_TARGET.databaseName}?sslmode=require`,
   };
 
   it('loads exact approved development storage configuration cleanly', () => {
@@ -35,6 +38,10 @@ describe('Object Storage Configuration & Exact Runtime Allowlist', () => {
       envPrefix: 'development',
       branchId: 'br-nameless-silence-bexjp44k',
       branchName: 'development',
+      credentialBranchId: 'br-nameless-silence-bexjp44k',
+      pooledDbHost: 'ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech',
+      directDbHost: 'ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech',
+      databaseName: 'neondb',
     });
   });
 
@@ -162,10 +169,108 @@ describe('Object Storage Configuration & Exact Runtime Allowlist', () => {
         AWS_SECRET_ACCESS_KEY: 'nsk_prod_candidate',
         OBJECT_STORAGE_BUCKET: 'crelune-prod-member-photos',
         OBJECT_STORAGE_ENV_PREFIX: 'production',
+        OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: 'br-withered-moon-be8coj8h',
         NEON_BRANCH: 'production',
         NEON_BRANCH_ID: 'br-withered-moon-be8coj8h',
+        DATABASE_URL:
+          'postgresql://prod_user:prod_pw@ep-mute-forest-bepsjmsu-pooler.c-9.us-east-2.aws.neon.tech/neondb?sslmode=require',
+        DATABASE_URL_UNPOOLED:
+          'postgresql://prod_user:prod_pw@ep-mute-forest-bepsjmsu.c-9.us-east-2.aws.neon.tech/neondb?sslmode=require',
       })
     ).toThrow(/not approved or configured/i);
+  });
+
+  it('enforces exact DATABASE_URL, DATABASE_URL_UNPOOLED, and OBJECT_STORAGE_CREDENTIAL_BRANCH_ID pairing without leaking secrets', () => {
+    const expectRejectedWithoutLeaks = (
+      overrides: Record<string, string | undefined>,
+      secretFragments: string[] = []
+    ) => {
+      let caught: unknown;
+      try {
+        getObjectStorageConfig({
+          ...validDevEnv,
+          ...overrides,
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(StorageConfigError);
+      const message = caught instanceof Error ? caught.message : String(caught);
+      expect(message).not.toContain('super_secret_pw');
+      expect(message).not.toContain('crelune_test');
+      for (const secretFragment of secretFragments) {
+        expect(message).not.toContain(secretFragment);
+      }
+    };
+
+    // Missing database URLs or credential branch marker
+    expectRejectedWithoutLeaks({ DATABASE_URL: undefined });
+    expectRejectedWithoutLeaks({ DATABASE_URL: '' });
+    expectRejectedWithoutLeaks({ DATABASE_URL_UNPOOLED: undefined });
+    expectRejectedWithoutLeaks({ DATABASE_URL_UNPOOLED: '' });
+    expectRejectedWithoutLeaks({ OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: undefined });
+    expectRejectedWithoutLeaks({ OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: '' });
+    expectRejectedWithoutLeaks({
+      OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: 'br-example-id',
+    });
+    expectRejectedWithoutLeaks({
+      OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: 'br-other-branch-123',
+    });
+
+    // Malformed URLs and wrong protocols
+    for (const malformedUrl of [
+      'not-a-url',
+      'http://crelune_user:leaked_secret@ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech/neondb',
+      'mysql://crelune_user:leaked_secret@ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech/neondb',
+      'postgresql://crelune_user:leaked_secret@ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech',
+    ]) {
+      expectRejectedWithoutLeaks(
+        { DATABASE_URL: malformedUrl },
+        ['crelune_user', 'leaked_secret']
+      );
+      expectRejectedWithoutLeaks(
+        { DATABASE_URL_UNPOOLED: malformedUrl },
+        ['crelune_user', 'leaked_secret']
+      );
+    }
+
+    // Swapped pooled and direct URLs
+    expectRejectedWithoutLeaks({
+      DATABASE_URL: validDevEnv.DATABASE_URL_UNPOOLED,
+      DATABASE_URL_UNPOOLED: validDevEnv.DATABASE_URL,
+    });
+
+    // Wrong database name
+    expectRejectedWithoutLeaks({
+      DATABASE_URL: `postgresql://u:secret_db_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/otherdb?sslmode=require`,
+    }, ['secret_db_pw']);
+    expectRejectedWithoutLeaks({
+      DATABASE_URL_UNPOOLED: `postgresql://u:secret_db_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/otherdb?sslmode=require`,
+    }, ['secret_db_pw']);
+
+    // Arbitrary, lookalike, query-smuggled, or production hosts even when NEON_BRANCH & NEON_BRANCH_ID say development
+    for (const badHost of [
+      'ep-other-db-pooler.c-9.us-east-2.aws.neon.tech',
+      `${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}.evil.com`,
+      `evil.${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}`,
+      'ep-mute-forest-bepsjmsu-pooler.c-9.us-east-2.aws.neon.tech',
+      'localhost',
+    ]) {
+      expectRejectedWithoutLeaks(
+        {
+          DATABASE_URL: `postgresql://u:secret_leak@${badHost}/neondb?host=${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}`,
+        },
+        ['secret_leak']
+      );
+    }
+
+    expectRejectedWithoutLeaks(
+      {
+        DATABASE_URL_UNPOOLED:
+          'postgresql://u:secret_leak@ep-mute-forest-bepsjmsu.c-9.us-east-2.aws.neon.tech/neondb',
+      },
+      ['secret_leak']
+    );
   });
 
   it('never uses original filenames and enforces environment + organisation + member key isolation', () => {

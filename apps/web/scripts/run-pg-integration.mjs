@@ -45,6 +45,7 @@ for (const key of [
   'AWS_REGION',
   'OBJECT_STORAGE_BUCKET',
   'OBJECT_STORAGE_ENV_PREFIX',
+  'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID',
 ]) {
   if (process.env[key] && process.env[key] !== fileEnv[key]) {
     fail(`pre-existing shell ${key} conflicts with .env.local.`);
@@ -143,6 +144,14 @@ if (
   mergedEnv.OBJECT_STORAGE_ENV_PREFIX.trim() !== 'development'
 ) {
   fail('OBJECT_STORAGE_ENV_PREFIX must equal "development" for integration tests.');
+}
+if (
+  !mergedEnv.OBJECT_STORAGE_CREDENTIAL_BRANCH_ID ||
+  mergedEnv.OBJECT_STORAGE_CREDENTIAL_BRANCH_ID.trim() !== APPROVED_DEV_BRANCH_ID
+) {
+  fail(
+    `OBJECT_STORAGE_CREDENTIAL_BRANCH_ID must equal "${APPROVED_DEV_BRANCH_ID}" for integration tests.`
+  );
 }
 
 function findPgIntegrationTests(dir) {

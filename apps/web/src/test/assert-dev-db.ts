@@ -33,6 +33,7 @@ const PROTECTED_ENV_KEYS = [
   'AWS_REGION',
   'OBJECT_STORAGE_BUCKET',
   'OBJECT_STORAGE_ENV_PREFIX',
+  'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID',
 ] as const;
 
 export interface VerifiedDevStorageTarget {
@@ -258,6 +259,13 @@ export function assertSafeDevStorageEnvironment(
   if (envPrefix !== APPROVED_DEV_STORAGE_ENV_PREFIX) {
     throw new Error(
       `Refusing to run storage integration tests: OBJECT_STORAGE_ENV_PREFIX must equal "${APPROVED_DEV_STORAGE_ENV_PREFIX}".`
+    );
+  }
+
+  const credentialBranchId = (env.OBJECT_STORAGE_CREDENTIAL_BRANCH_ID || '').trim();
+  if (credentialBranchId !== APPROVED_DEV_BRANCH_ID) {
+    throw new Error(
+      `Refusing to run storage integration tests: OBJECT_STORAGE_CREDENTIAL_BRANCH_ID must equal "${APPROVED_DEV_BRANCH_ID}".`
     );
   }
 

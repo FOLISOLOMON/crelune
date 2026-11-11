@@ -2,8 +2,8 @@
  * CRELUNE — Private Object Storage Configuration & Key Isolation
  *
  * Server-only configuration loader and environment/organisation-scoped key builder.
- * Enforces exact runtime allowlists so credentials and branch/environment namespaces
- * cannot target arbitrary, lookalike, or cross-environment storage endpoints.
+ * Enforces exact runtime allowlists pairing object storage endpoints, buckets,
+ * Neon branch metadata, pooled/direct PostgreSQL endpoints, and credential branch assertions.
  */
 
 import crypto from 'node:crypto';
@@ -19,6 +19,10 @@ export interface ObjectStorageConfig {
   envPrefix: StorageEnvPrefix;
   branchId: string;
   branchName: string;
+  credentialBranchId: string;
+  pooledDbHost: string;
+  directDbHost: string;
+  databaseName: string;
 }
 
 export interface ApprovedStorageTarget {
@@ -28,6 +32,9 @@ export interface ApprovedStorageTarget {
   envPrefix: StorageEnvPrefix;
   branchId: string;
   branchName: string;
+  pooledDbHost: string;
+  directDbHost: string;
+  databaseName: string;
 }
 
 const VALID_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -41,15 +48,22 @@ export const APPROVED_DEV_STORAGE_TARGET: ApprovedStorageTarget = {
   envPrefix: 'development',
   branchId: 'br-nameless-silence-bexjp44k',
   branchName: 'development',
+  pooledDbHost: 'ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech',
+  directDbHost: 'ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech',
+  databaseName: 'neondb',
 };
 
-// Production object storage has not yet been provisioned or approved.
+// Production object storage and production DB pairing have not yet been provisioned or approved.
 // Keep null until an explicit production endpoint, bucket, region, branch ID,
-// and prefix are provisioned and approved.
+// pooled DB host, direct DB host, and prefix are provisioned and approved.
 export const APPROVED_PROD_STORAGE_TARGET: ApprovedStorageTarget | null = null;
 
 const KNOWN_PROD_BRANCH_ID = 'br-withered-moon-be8coj8h';
 const KNOWN_PROD_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
+const KNOWN_PROD_DB_HOSTS = new Set([
+  'ep-mute-forest-bepsjmsu-pooler.c-9.us-east-2.aws.neon.tech',
+  'ep-mute-forest-bepsjmsu.c-9.us-east-2.aws.neon.tech',
+]);
 const KNOWN_PROD_DB_ENDPOINT_ID = 'ep-mute-forest-bepsjmsu';
 
 export class StorageConfigError extends Error {
@@ -66,7 +80,7 @@ export class StorageKeyViolationError extends Error {
   }
 }
 
-function isPlaceholderCredential(value: string): boolean {
+function isPlaceholderValue(value: string): boolean {
   const lower = value.toLowerCase();
   return (
     lower.startsWith('replace-with-') ||
@@ -105,6 +119,45 @@ function validateStrictHttpsEndpoint(endpointRaw: string): URL {
   return parsedEndpoint;
 }
 
+/**
+ * Parses a PostgreSQL connection URL cleanly with `new URL` without exposing
+ * credentials, query secrets, or raw connection strings in thrown errors.
+ */
+function parsePostgresUrl(
+  rawUrl: string | undefined,
+  varName: 'DATABASE_URL' | 'DATABASE_URL_UNPOOLED'
+): { hostname: string; database: string } {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) {
+    throw new StorageConfigError(
+      `${varName} is required to verify runtime database and storage pairing.`
+    );
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new StorageConfigError(`${varName} is malformed.`);
+  }
+
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
+    throw new StorageConfigError(`${varName} must use a valid PostgreSQL protocol.`);
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (!hostname) {
+    throw new StorageConfigError(`${varName} is missing a database hostname.`);
+  }
+
+  const database = parsed.pathname.replace(/^\//, '');
+  if (!database || database.includes('/')) {
+    throw new StorageConfigError(`${varName} is missing a valid database name.`);
+  }
+
+  return { hostname, database };
+}
+
 function assertTargetEquality(
   actual: {
     endpointHost: string;
@@ -113,6 +166,11 @@ function assertTargetEquality(
     envPrefix: StorageEnvPrefix;
     branchId: string;
     branchName: string;
+    credentialBranchId: string;
+    pooledDbHost: string;
+    pooledDbName: string;
+    directDbHost: string;
+    directDbName: string;
   },
   approved: ApprovedStorageTarget
 ): void {
@@ -124,6 +182,11 @@ function assertTargetEquality(
   if (actual.branchId !== approved.branchId) {
     throw new StorageConfigError(
       `NEON_BRANCH_ID "${actual.branchId}" does not match exact approved branch ID for ${approved.envPrefix}.`
+    );
+  }
+  if (actual.credentialBranchId !== approved.branchId) {
+    throw new StorageConfigError(
+      `OBJECT_STORAGE_CREDENTIAL_BRANCH_ID "${actual.credentialBranchId}" does not match exact approved branch ID for ${approved.envPrefix}.`
     );
   }
   if (actual.endpointHost !== approved.endpointHost) {
@@ -141,12 +204,33 @@ function assertTargetEquality(
       `OBJECT_STORAGE_BUCKET "${actual.bucket}" does not match exact approved ${approved.envPrefix} bucket "${approved.bucket}".`
     );
   }
+  if (actual.pooledDbHost !== approved.pooledDbHost) {
+    throw new StorageConfigError(
+      `DATABASE_URL host "${actual.pooledDbHost}" does not match exact approved ${approved.envPrefix} pooled host "${approved.pooledDbHost}".`
+    );
+  }
+  if (actual.pooledDbName !== approved.databaseName) {
+    throw new StorageConfigError(
+      `DATABASE_URL database "${actual.pooledDbName}" does not match exact approved ${approved.envPrefix} database "${approved.databaseName}".`
+    );
+  }
+  if (actual.directDbHost !== approved.directDbHost) {
+    throw new StorageConfigError(
+      `DATABASE_URL_UNPOOLED host "${actual.directDbHost}" does not match exact approved ${approved.envPrefix} direct host "${approved.directDbHost}".`
+    );
+  }
+  if (actual.directDbName !== approved.databaseName) {
+    throw new StorageConfigError(
+      `DATABASE_URL_UNPOOLED database "${actual.directDbName}" does not match exact approved ${approved.envPrefix} database "${approved.databaseName}".`
+    );
+  }
 }
 
 /**
- * Loads and validates Neon Object Storage S3 credentials against an exact
- * runtime allowlist for development (and fails closed for unapproved production).
- * Never embeds credential values in error messages.
+ * Loads and validates Neon Object Storage credentials against an exact runtime
+ * allowlist pairing storage endpoints, buckets, credential branch assertions,
+ * and pooled/direct PostgreSQL URLs (failing closed for unapproved production).
+ * Never embeds database usernames, passwords, full URLs, or storage secrets in errors.
  */
 export function getObjectStorageConfig(
   env: Record<string, string | undefined> = process.env
@@ -174,7 +258,7 @@ export function getObjectStorageConfig(
     );
   }
 
-  if (isPlaceholderCredential(accessKeyId) || isPlaceholderCredential(secretAccessKey)) {
+  if (isPlaceholderValue(accessKeyId) || isPlaceholderValue(secretAccessKey)) {
     throw new StorageConfigError(
       'Object storage credentials use placeholder values and cannot be used.'
     );
@@ -199,6 +283,12 @@ export function getObjectStorageConfig(
     );
   }
 
+  if (!credentialBranchId || isPlaceholderValue(credentialBranchId)) {
+    throw new StorageConfigError(
+      'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID is required to assert storage credential branch association.'
+    );
+  }
+
   const parsedEndpoint = validateStrictHttpsEndpoint(endpointRaw);
   const endpointHost = parsedEndpoint.hostname.toLowerCase();
 
@@ -206,28 +296,25 @@ export function getObjectStorageConfig(
     throw new StorageConfigError('OBJECT_STORAGE_BUCKET has an invalid S3 bucket name.');
   }
 
+  const pooledDb = parsePostgresUrl(env.DATABASE_URL, 'DATABASE_URL');
+  const directDb = parsePostgresUrl(env.DATABASE_URL_UNPOOLED, 'DATABASE_URL_UNPOOLED');
+
   if (envPrefix === 'development') {
     if (
       KNOWN_PROD_BRANCH_NAMES.has(neonBranch.toLowerCase()) ||
       neonBranchId === KNOWN_PROD_BRANCH_ID ||
+      credentialBranchId === KNOWN_PROD_BRANCH_ID ||
       endpointHost.includes(KNOWN_PROD_BRANCH_ID) ||
       bucket.toLowerCase().includes('prod') ||
-      credentialBranchId === KNOWN_PROD_BRANCH_ID ||
       accessKeyId.includes(KNOWN_PROD_BRANCH_ID) ||
       secretAccessKey.includes(KNOWN_PROD_BRANCH_ID) ||
-      (env.DATABASE_URL && env.DATABASE_URL.includes(KNOWN_PROD_DB_ENDPOINT_ID))
+      KNOWN_PROD_DB_HOSTS.has(pooledDb.hostname) ||
+      KNOWN_PROD_DB_HOSTS.has(directDb.hostname) ||
+      pooledDb.hostname.startsWith(`${KNOWN_PROD_DB_ENDPOINT_ID}-`) ||
+      directDb.hostname.startsWith(`${KNOWN_PROD_DB_ENDPOINT_ID}.`)
     ) {
       throw new StorageConfigError(
-        'Refusing development storage prefix paired with production branch, endpoint, or credentials.'
-      );
-    }
-
-    if (
-      credentialBranchId &&
-      credentialBranchId !== APPROVED_DEV_STORAGE_TARGET.branchId
-    ) {
-      throw new StorageConfigError(
-        'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID does not match approved development branch ID.'
+        'Refusing development storage prefix paired with production branch, endpoint, database, or credentials.'
       );
     }
 
@@ -239,6 +326,11 @@ export function getObjectStorageConfig(
         envPrefix,
         branchId: neonBranchId,
         branchName: neonBranch,
+        credentialBranchId,
+        pooledDbHost: pooledDb.hostname,
+        pooledDbName: pooledDb.database,
+        directDbHost: directDb.hostname,
+        directDbName: directDb.database,
       },
       APPROVED_DEV_STORAGE_TARGET
     );
@@ -247,15 +339,17 @@ export function getObjectStorageConfig(
     if (
       neonBranch.toLowerCase() === APPROVED_DEV_STORAGE_TARGET.branchName ||
       neonBranchId === APPROVED_DEV_STORAGE_TARGET.branchId ||
+      credentialBranchId === APPROVED_DEV_STORAGE_TARGET.branchId ||
       endpointHost === APPROVED_DEV_STORAGE_TARGET.endpointHost ||
       endpointHost.includes(APPROVED_DEV_STORAGE_TARGET.branchId) ||
       bucket === APPROVED_DEV_STORAGE_TARGET.bucket ||
-      credentialBranchId === APPROVED_DEV_STORAGE_TARGET.branchId ||
+      pooledDb.hostname === APPROVED_DEV_STORAGE_TARGET.pooledDbHost ||
+      directDb.hostname === APPROVED_DEV_STORAGE_TARGET.directDbHost ||
       accessKeyId.includes(APPROVED_DEV_STORAGE_TARGET.branchId) ||
       secretAccessKey.includes(APPROVED_DEV_STORAGE_TARGET.branchId)
     ) {
       throw new StorageConfigError(
-        'Refusing production storage prefix paired with development branch, endpoint, bucket, or credentials.'
+        'Refusing production storage prefix paired with development branch, endpoint, database, bucket, or credentials.'
       );
     }
 
@@ -273,6 +367,11 @@ export function getObjectStorageConfig(
         envPrefix,
         branchId: neonBranchId,
         branchName: neonBranch,
+        credentialBranchId,
+        pooledDbHost: pooledDb.hostname,
+        pooledDbName: pooledDb.database,
+        directDbHost: directDb.hostname,
+        directDbName: directDb.database,
       },
       APPROVED_PROD_STORAGE_TARGET
     );
@@ -287,6 +386,10 @@ export function getObjectStorageConfig(
     envPrefix,
     branchId: neonBranchId,
     branchName: neonBranch,
+    credentialBranchId,
+    pooledDbHost: pooledDb.hostname,
+    directDbHost: directDb.hostname,
+    databaseName: pooledDb.database,
   };
 }
 

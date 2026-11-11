@@ -211,10 +211,26 @@ describe('PostgreSQL Integration Database Safety Guard', () => {
           DATABASE_URL_UNPOOLED: validDevEnv.DATABASE_URL_UNPOOLED,
           NEON_BRANCH: validDevEnv.NEON_BRANCH,
           NEON_BRANCH_ID: validDevEnv.NEON_BRANCH_ID,
+          OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: APPROVED_DEV_BRANCH_ID,
         },
-        validDevEnv
+        {
+          ...validDevEnv,
+          OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: APPROVED_DEV_BRANCH_ID,
+        }
       )
     ).not.toThrow();
+
+    expect(() =>
+      assertNoShellEnvConflict(
+        {
+          OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: 'br-withered-moon-be8coj8h',
+        },
+        {
+          ...validDevEnv,
+          OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: APPROVED_DEV_BRANCH_ID,
+        }
+      )
+    ).toThrow(/shell OBJECT_STORAGE_CREDENTIAL_BRANCH_ID conflicts with \.env\.local/i);
   });
 
   it('validates development Neon Object Storage configuration and blocks production endpoints', () => {
@@ -224,6 +240,7 @@ describe('PostgreSQL Integration Database Safety Guard', () => {
       AWS_REGION: APPROVED_DEV_STORAGE_REGION,
       OBJECT_STORAGE_BUCKET: APPROVED_DEV_STORAGE_BUCKET,
       OBJECT_STORAGE_ENV_PREFIX: APPROVED_DEV_STORAGE_ENV_PREFIX,
+      OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: APPROVED_DEV_BRANCH_ID,
       AWS_ACCESS_KEY_ID: 'nak_test',
       AWS_SECRET_ACCESS_KEY: 'nsk_test',
     };
@@ -249,5 +266,19 @@ describe('PostgreSQL Integration Database Safety Guard', () => {
         OBJECT_STORAGE_ENV_PREFIX: 'production',
       })
     ).toThrow(/OBJECT_STORAGE_ENV_PREFIX/i);
+
+    expect(() =>
+      assertSafeDevStorageEnvironment({
+        ...validStorageEnv,
+        OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: '',
+      })
+    ).toThrow(/OBJECT_STORAGE_CREDENTIAL_BRANCH_ID/i);
+
+    expect(() =>
+      assertSafeDevStorageEnvironment({
+        ...validStorageEnv,
+        OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: 'br-withered-moon-be8coj8h',
+      })
+    ).toThrow(/OBJECT_STORAGE_CREDENTIAL_BRANCH_ID/i);
   });
 });
