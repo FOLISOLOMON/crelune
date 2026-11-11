@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - 2026-11-11
+
+### Milestone 2.1.2: Rate-Limit Client Identity & PostgreSQL Verification
+
+#### Security & Reliability
+- **Strict Client IP Resolution**: Eliminated shared synthetic placeholder IP identities (`direct-client`, `proxy-unknown`) in [`apps/web/src/lib/auth/rate-limit.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts). [`extractClientIp`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) now returns `null` when `TRUST_PROXY !== 'true'` or forwarding headers fail strict `node:net` `isIP` / RFC 5952 IPv6 canonicalization. When `TRUST_PROXY=true`, uses `X-Real-IP` or the rightmost hop of `X-Forwarded-For` written by the trusted ingress proxy.
+- **Zero Global Unknown-IP Lockout**: When client IP is `null`, the shared `ip:` aggregate bucket is skipped completely (`ipBlocked = false`) so random probes cannot trigger global `429` lockouts, while account-specific protection remains active via `acct_noip:<hash>` (`5/15m`, bounded `15m` block returning indistinguishable `401`).
+- **Bounded Throttle Record Cleanup**: Added `@@index([windowStart])` on [`AuthThrottle`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma) (`db:push`) and implemented opportunistic bounded batch pruning (`pruneExpiredThrottles` / `maybePruneExpiredThrottles`, `LIMIT 250`, `10m` warm cooldown / `5%` cold sample) deleting only strictly expired records.
+- **PostgreSQL Concurrency Verification & Test Expansion**: Added [`rate-limit.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.test.ts) (`11` tests), expanded `auth-routes.test.ts` (`19` tests), and added [`rate-limit.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.pg.integration.test.ts) (`5` real Neon PostgreSQL concurrency/lifecycle integration tests passing with automatic cleanup), documented in ADR 012 and `MILESTONE_2_1_2_RATE_LIMIT_VERIFICATION.md`.
+
+---
+
 ## [0.3.2] - 2026-11-11
 
 ### Milestone 2.1.1: Final Authentication Security Corrections

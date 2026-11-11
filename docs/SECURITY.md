@@ -227,3 +227,27 @@ Implemented in Milestone 2.1.1 following Product Owner source review:
 
 6. **Consistent Session Lifetime Validation ([`packages/shared/src/schemas/auth.ts`](file:///d:/Projects/Crelune/packages/shared/src/schemas/auth.ts))**:
    - Shared [`validateSessionPayload`](file:///d:/Projects/Crelune/packages/shared/src/schemas/auth.ts) enforces `SESSION_TTL_SECONDS = 604800` (`7` days), `exp > iat`, `exp - iat <= SESSION_TTL_SECONDS`, `exp > now`, and `iat <= now + 60` identically across Node and Edge runtimes.
+
+---
+
+## 10. Milestone 2.1.2 Rate-Limit Client Identity & PostgreSQL Verification
+
+Implemented in Milestone 2.1.2:
+
+1. **Strict Client IP Identity & Proxy Trust Configuration ([`apps/web/src/lib/auth/rate-limit.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts))**:
+   - Removed synthetic shared fallback strings (`direct-client`, `proxy-unknown`). Unknown client IPs return `null` from [`extractClientIp`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts).
+   - Strict IPv4/IPv6 validation and RFC 5952 canonicalization ([`parseValidIp`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts)) built on `node:net` `isIP()`, rejecting malformed octets, leading-zero IPv4, IPv6 zone IDs (`%`), and comma-joined spoofing attempts while unwrapping IPv4-mapped `::ffff:a.b.c.d` forms.
+   - `TRUST_PROXY=true` deployment contract: must ONLY be enabled when deployed behind a trusted single-hop ingress proxy that overwrites incoming client forwarding headers:
+     - Checks `X-Real-IP` first (must be a single valid IP).
+     - Otherwise reads the **rightmost** entry of `X-Forwarded-For` appended/set by the trusted ingress (resisting client-prepended entries).
+     - When `TRUST_PROXY` is unset or `false`, all forwarding headers are ignored and `ip` resolves to `null`.
+
+2. **Safe Unknown-IP Fallback Strategy (Zero Global IP Lockout)**:
+   - When `ip !== null`, throttling tracks both `ip:<hash>` (`20` failures / `15m` → `429`) and `ip_acct:<hash>` (`5` failures / `15m` → indistinguishable `401 Invalid email or password`).
+   - When `ip === null`, **no shared `ip:` aggregate bucket is created or checked** (`ipBlocked` stays `false`), preventing malicious visitors with unknown IPs from exhausting a placeholder IP bucket and triggering `429` lockouts against the owner.
+   - Account-specific brute-force protection remains active via `acct_noip:<hash>` (`5` failures / `15m` → bounded `15m` block returning indistinguishable `401 Invalid email or password`, cleared on successful owner login from an unknown-IP context).
+
+3. **Throttle Record Lifecycle & Bounded Opportunistic Cleanup**:
+   - [`AuthThrottle`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma) indexes both `blocked_until` and `window_start`.
+   - [`pruneExpiredThrottles`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) deletes at most `250` rows per batch strictly matching `(blocked_until IS NOT NULL AND blocked_until <= now)` or `(blocked_until IS NULL AND window_start <= now - 15m)`. Active blocks and active windows are never deleted.
+   - [`maybePruneExpiredThrottles`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) runs cleanup opportunistically at most once every `10` minutes per warm worker (or sampled at `5%` on cold worker invocations), avoiding per-login cleanup queries and avoiding external dependencies.

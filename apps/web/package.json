@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest run",
+    "test": "vitest run --exclude **/*.pg.integration.test.ts",
+    "test:integration:db": "node -r dotenv/config ../../node_modules/vitest/vitest.mjs run src/lib/auth/rate-limit.pg.integration.test.ts dotenv_config_path=../../.env.local",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

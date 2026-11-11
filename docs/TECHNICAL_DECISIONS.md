@@ -136,6 +136,16 @@
   - *DB Lookup Latency*: Enforcing active owner & `sessionVersion` executes one indexed primary-key lookup (`users.id` with `organisation` and `preferences`) per protected SSR/API request (~1–5ms on warm Neon pool; cold Neon resume after scale-to-zero incurs standard wake latency).
   - *Recovery*: Stale/compromised sessions are immediately invalidated by incrementing `users.session_version` or setting `users.is_active = false`; throttle blocks recover automatically after 15 minutes (or immediately upon `DELETE FROM auth_throttles` / valid owner login clearing `(IP, account)`).
 
+### ADR 012: Client IP Identity Resolution, Unknown-IP Fallback, and `auth_throttles` Record Lifecycle
+- **Status**: Approved (Implemented in Milestone 2.1.2).
+- **Context**: Review of Milestone 2.1.1 identified that `extractClientIp()` fell back to a shared synthetic identifier (`'direct-client'` / `'proxy-unknown'`), causing requests without trusted proxy headers to collide in a single shared `ip:` aggregate bucket (enabling shared IP lockout denial of service). In addition, regex-only IP checks accepted malformed values, PostgreSQL throttle atomicity had only been tested with mocks, and `auth_throttles` lacked expired-row cleanup.
+- **Decision**:
+  1. **Null Unknown IP (`string | null`)**: [`extractClientIp`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) returns `null` when `TRUST_PROXY !== 'true'` or forwarding headers fail strict `node:net` `isIP` / RFC 5952 IPv6 validation ([`parseValidIp`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts)).
+  2. **Trusted Proxy Contract**: When `TRUST_PROXY=true`, reads single-valued `X-Real-IP` first or the rightmost hop of `X-Forwarded-For` written by the trusted ingress proxy.
+  3. **Scoped Fallback**: When `ip === null`, skip the `ip:` aggregate bucket completely and track only the account-scoped `acct_noip:<hash>` bucket (`5/15m`, bounded `15m` block, indistinguishable `401`).
+  4. **Opportunistic Bounded Pruning**: Add `@@index([windowStart])` on `AuthThrottle` and run [`maybePruneExpiredThrottles`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) (cooldown `10m` / cold sample `5%`, `LIMIT 250` per batch) deleting only expired blocks/windows.
+- **Consequences**: Unknown-IP visitors can never exhaust a shared IP bucket against the owner, account protection remains active in direct/local deployments, random login probes cannot grow `auth_throttles` without bound, and PostgreSQL atomic upsert semantics are directly verified via [`rate-limit.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.pg.integration.test.ts).
+
 ---
 
 ## 2. Unresolved Technical Decisions (Awaiting Milestone Evaluation)

@@ -74,7 +74,7 @@ export async function POST(request: Request) {
         { status: 429 }
       );
     }
-    if (throttle.ipAccountBlocked) {
+    if (throttle.accountBlocked) {
       // Externally indistinguishable from invalid credentials (prevents enumeration and lock disclosure)
       await verifyPassword(password, DUMMY_HASH);
       return NextResponse.json(

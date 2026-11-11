@@ -76,5 +76,6 @@ model AuthThrottle {
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   @@index([blockedUntil])
+  @@index([windowStart])
   @@map("auth_throttles")
 }

@@ -169,6 +169,23 @@ vi.mock('@crelune/database', () => ({
         },
       ];
     }),
+    $executeRaw: vi.fn(async (_strings: TemplateStringsArray, ...values: unknown[]) => {
+      // [0] now, [1] windowCutoff, [2] batchSize
+      const now = values[0] as Date;
+      const windowCutoff = values[1] as Date;
+      const batchSize = values[2] as number;
+      let deleted = 0;
+      for (const [key, row] of mockState.throttles.entries()) {
+        if (deleted >= batchSize) break;
+        const expiredBlock = row.blockedUntil !== null && row.blockedUntil <= now;
+        const expiredWindow = row.blockedUntil === null && row.windowStart <= windowCutoff;
+        if (expiredBlock || expiredWindow) {
+          mockState.throttles.delete(key);
+          deleted += 1;
+        }
+      }
+      return deleted;
+    }),
   },
 }));
 
@@ -387,8 +404,8 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
         expect(failRes.status).toBe(401);
       }
 
-      const { ipAccountKey } = buildThrottleKeys('203.0.113.10', 'owner@crelune.test');
-      expect(mockState.throttles.get(ipAccountKey)?.attempts).toBe(2);
+      const { accountKey } = buildThrottleKeys('203.0.113.10', 'owner@crelune.test');
+      expect(mockState.throttles.get(accountKey)?.attempts).toBe(2);
 
       // Now correct password
       const okRes = await loginPost(
@@ -399,7 +416,7 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
       );
       expect(okRes.status).toBe(200);
       expect(mockState.cookies.has(SESSION_COOKIE_NAME)).toBe(true);
-      expect(mockState.throttles.has(ipAccountKey)).toBe(false);
+      expect(mockState.throttles.has(accountKey)).toBe(false);
     });
   });
 
@@ -425,8 +442,8 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
         expect(body.error).toBe('Invalid email or password');
       }
 
-      const { ipAccountKey } = buildThrottleKeys('198.51.100.44', 'owner@crelune.test');
-      const bucket = mockState.throttles.get(ipAccountKey);
+      const { accountKey } = buildThrottleKeys('198.51.100.44', 'owner@crelune.test');
+      const bucket = mockState.throttles.get(accountKey);
       expect(bucket?.blockedUntil).toBeInstanceOf(Date);
       expect(bucket?.attempts).toBe(IP_ACCOUNT_MAX_ATTEMPTS);
 
@@ -471,6 +488,64 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
       expect(flooded.status).toBe(429);
     });
 
+    it('does not create a global IP lockout when client IP is unknown, while preserving account throttling', async () => {
+      process.env.TRUST_PROXY = 'false';
+
+      // Probe 25 random accounts without a trusted IP (even with spoofed forwarding headers)
+      for (let i = 0; i < IP_MAX_ATTEMPTS + 5; i++) {
+        const probeRes = await loginPost(
+          makeLoginRequest(
+            { email: `random-${i}@crelune.test`, password: 'WrongPassword!123' },
+            { 'x-forwarded-for': '203.0.113.200', 'x-real-ip': '203.0.113.200' }
+          )
+        );
+        expect(probeRes.status).toBe(401);
+      }
+
+      // No `ip:` bucket should exist in auth_throttles
+      const ipBuckets = Array.from(mockState.throttles.keys()).filter((k) => k.startsWith('ip:'));
+      expect(ipBuckets).toHaveLength(0);
+
+      // Legitimate owner succeeds cleanly (never 429-blocked by a shared unknown-IP bucket)
+      const ownerLoginRes = await loginPost(
+        makeLoginRequest({
+          email: 'owner@crelune.test',
+          password: 'CorrectHorseBattery!2026',
+        })
+      );
+      expect(ownerLoginRes.status).toBe(200);
+
+      // Account-specific throttling still enforces threshold on the target account when IP is unknown
+      for (let i = 0; i < IP_ACCOUNT_MAX_ATTEMPTS; i++) {
+        const failRes = await loginPost(
+          makeLoginRequest({
+            email: 'owner@crelune.test',
+            password: 'WrongPassword!123',
+          })
+        );
+        expect(failRes.status).toBe(401);
+      }
+
+      const blockedUnknownIpRes = await loginPost(
+        makeLoginRequest({
+          email: 'owner@crelune.test',
+          password: 'CorrectHorseBattery!2026',
+        })
+      );
+      expect(blockedUnknownIpRes.status).toBe(401);
+      expect((await blockedUnknownIpRes.json()).error).toBe('Invalid email or password');
+
+      // Unknown-IP block does not share buckets with a proxy-verified IP session
+      process.env.TRUST_PROXY = 'true';
+      const verifiedIpRes = await loginPost(
+        makeLoginRequest(
+          { email: 'owner@crelune.test', password: 'CorrectHorseBattery!2026' },
+          { 'x-real-ip': '203.0.113.55' }
+        )
+      );
+      expect(verifiedIpRes.status).toBe(200);
+    });
+
     it('does not extend blockedUntil on retries and automatically recovers after block expiry', async () => {
       const t0 = new Date('2026-11-11T10:00:00.000Z');
       const bucketKey = 'ip_acct:recovery-test';
@@ -500,7 +575,7 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
       // After block duration passes, checkLoginThrottle clears block and next failure resets window cleanly
       const tAfter = new Date(initialBlockedUntil.getTime() + 1000);
       const statusAfter = await checkLoginThrottle('198.51.100.1', 'nobody@crelune.test', tAfter);
-      expect(statusAfter.ipAccountBlocked).toBe(false);
+      expect(statusAfter.accountBlocked).toBe(false);
 
       const resetRow = await recordAtomicBucketFailure(bucketKey, {
         now: tAfter,

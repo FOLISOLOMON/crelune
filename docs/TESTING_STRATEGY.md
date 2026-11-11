@@ -220,3 +220,27 @@ Automated and live HTTP verification executed for Milestone 2.1.1:
 5. **Checks Not Executed / Not Configured**:
    - `npm run lint`: ESLint config not initialized in `apps/web` (`next lint` prompts interactively and exits `1`; Next.js built-in type/lint validation still runs during `next build`).
    - Browser E2E UI suite (Playwright/headless browser): `NOT RUN` (not configured in Milestone 2.1.1; HTTP/SSR/middleware behavior verified via Vitest and live `next start` `fetch` harness).
+
+---
+
+## 8. Milestone 2.1.2 Testing Evidence (Rate-Limit Client Identity & PostgreSQL Verification)
+
+Verified for Milestone 2.1.2:
+1. **Unit & Route Suites (`cmd /c npm test`)**:
+   - `@crelune/web` (`90` tests passing across `6` files, excluding opt-in live PostgreSQL integration file):
+     - Added [`src/lib/auth/rate-limit.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.test.ts) (`11` tests): strict IPv4/IPv6 validation & canonicalization (`node:net` `isIP`, RFC 5952 IPv6 compression, `::ffff:a.b.c.d` unwrapping, rejection of malformed octets/zone IDs/comma strings), `TRUST_PROXY` proxy header gating, rightmost `X-Forwarded-For` hop extraction, `null` fallback for unknown IP (never `'direct-client'`), unknown-IP `ip:` bucket omission, and opportunistic cleanup cooldown gating.
+     - Extended [`src/app/api/auth/auth-routes.test.ts`](file:///d:/Projects/Crelune/apps/web/src/app/api/auth/auth-routes.test.ts) (`19` tests): added route-level unknown-IP fallback verification confirming 25+ random-email probes with `TRUST_PROXY=false` create zero `ip:` rows and never return `429`, while account-specific `acct_noip` throttling still protects the owner's account independently of proxy-verified IP requests.
+     - Retained all existing auth/session/middleware/password/security suites (`security-hardening.test.ts` `22`, `session.test.ts` `15`, `middleware.test.ts` `19`, `password.test.ts` `4`).
+   - `@crelune/shared`: `src/schemas/schemas.test.ts` (`14` tests passing).
+   - `@crelune/ui`: `src/tokens/tokens.test.ts` (`3` tests passing).
+   - **Unit/Route Total**: `107` passed, `0` failed, `0` skipped (`PASS`).
+2. **Real PostgreSQL Integration Verification (`cmd /c npm run test:integration:db`)**:
+   - Executed [`src/lib/auth/rate-limit.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.pg.integration.test.ts) directly against Neon Postgres (`auth_throttles` table on endpoint `ep-mute-forest-bepsjmsu`, branch named `production` by Neon default / local dev DB in `.env.local`) using strictly synthetic test keys (`__pg_*`) with automated cleanup (`5` tests, `0` failures, `24.65s` test duration, `PASS`):
+     - Verified atomic counter increments under `Promise.all` concurrent `INSERT ... ON CONFLICT DO UPDATE` upserts and threshold activation.
+     - Verified active blocks do not extend `blocked_until` on retries and reset cleanly on expiry.
+     - Verified independent IP isolation and `clearAccountThrottle` deleting only the authenticated IP+account row.
+     - Verified IP aggregate (`20` distinct accounts) block isolation across IPs.
+     - Verified unknown-IP (`acct_noip`, zero `ip:` rows) and `pruneExpiredThrottles` deleting only expired test records while preserving active windows/blocks.
+   - Verified post-test `auth_throttles` count is `0` (`{"totalAuthThrottleRows":0}`).
+3. **Type Checking (`cmd /c npm run type-check`) & Production Build (`cmd /c npm run build`)**:
+   - Zero TypeScript errors across all 4 workspaces (`PASS`) and full `next build` + workspace `tsc -b` build succeeded (`PASS`).

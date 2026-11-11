@@ -11,6 +11,7 @@
     "dev": "npm run dev --workspace=@crelune/web",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:integration:db": "npm run test:integration:db --workspace=@crelune/web",
     "type-check": "npm run type-check --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "owner:create": "node scripts/create-owner.mjs",
