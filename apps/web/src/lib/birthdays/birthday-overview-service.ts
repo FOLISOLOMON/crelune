@@ -367,6 +367,10 @@ export async function updateBirthdayPreparationStatus(
   notes: string | null;
   statusUpdatedAt: string;
 }> {
+  if (!Number.isInteger(targetYear) || targetYear < 2000 || targetYear > 2200) {
+    throw new MemberValidationError('Birthday target year must be a whole number between 2000 and 2200.');
+  }
+
   return prisma.$transaction(async (tx) => {
     const member = await tx.member.findFirst({
       where: {
@@ -397,9 +401,9 @@ export async function updateBirthdayPreparationStatus(
 
     const settings = await loadOwnerBirthdayPreferences(tx, actor.userId);
     const celebration = resolveCelebrationDateForYear(
-      targetYear,
       member.birthMonth,
       member.birthDay,
+      targetYear,
       settings.leapDayPolicy
     );
 

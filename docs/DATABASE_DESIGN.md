@@ -492,6 +492,7 @@ model DeviceRegistration {
    - Models `Member` and `Asset` utilize `archivedAt DateTime?`.
    - Application queries must filter `where: { archivedAt: null }` by default. Hard deletes are reserved for GDPR/Privacy right-to-be-forgotten requests.
 3. **Multi-Step Updates in Prisma Transactions**:
-   - State-changing operations (such as creating a `DesignJob` and inserting its initial `DesignJobHistory` audit row) must be executed inside `prisma.$transaction([ ... ])`.
+   - State-changing operations (such as creating/updating a `DesignJob`, inserting its `DesignJobHistory` audit row, and reconciling `BirthdayPreparation.designJobId`) must execute atomically inside `prisma.$transaction`.
+   - Active (`status !== 'CANCELLED'`) `BIRTHDAY_FLYER` uniqueness per `(organisationId, memberId, birthdayTargetYear)` and `BirthdayPreparation.designJobId` ownership reconciliation are serialized in PostgreSQL using transaction-scoped deterministic SHA-256 advisory locks (`pg_advisory_xact_lock(int4, int4)`) acquired in sorted order, plus `FOR UPDATE` row locking on `design_jobs` during updates and status transitions (see [ADR 014](./TECHNICAL_DECISIONS.md#adr-014--birthday-design-job-uniqueness-advisory-locking--preparation-reconciliation)).
 4. **Direct URL Migration Execution**:
    - Prisma Migrate must strictly connect via `DATABASE_URL_UNPOOLED` to prevent pgBouncer connection pooling from interfering with transactional DDL schema migration statements.

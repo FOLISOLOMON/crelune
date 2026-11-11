@@ -157,7 +157,8 @@ export function buildCreateDesignJobPayload(
 ):
   | { success: true; data: CreateDesignJobInput }
   | { success: false; fieldErrors: Record<string, string>; formError: string } {
-  const targetYearRaw = values.birthdayTargetYear.trim();
+  const targetYearRaw =
+    values.category === 'BIRTHDAY_FLYER' ? values.birthdayTargetYear.trim() : '';
   let birthdayTargetYear: number | null = null;
   if (targetYearRaw.length > 0) {
     if (!/^\d{4}$/.test(targetYearRaw)) {
@@ -224,6 +225,45 @@ export function buildUpdateDesignJobPayload(
 
   const nextMemberId = values.memberId || null;
   if (nextMemberId !== initial.memberId) patch.memberId = nextMemberId;
+
+  let nextTargetYear: number | null = null;
+  if (values.category === 'BIRTHDAY_FLYER') {
+    const rawYear = values.birthdayTargetYear.trim();
+    if (rawYear.length > 0) {
+      if (!/^\d{4}$/.test(rawYear)) {
+        return {
+          success: false,
+          fieldErrors: { birthdayTargetYear: 'Enter a 4-digit target year.' },
+          formError: 'Please fix the highlighted fields.',
+        };
+      }
+      nextTargetYear = Number.parseInt(rawYear, 10);
+    }
+
+    const birthdayErrors: Record<string, string> = {};
+    if (!nextMemberId) {
+      birthdayErrors.memberId =
+        'A linked member is required for birthday flyer jobs.';
+    }
+    if (nextTargetYear === null) {
+      birthdayErrors.birthdayTargetYear =
+        'A birthday target year is required for birthday flyer jobs.';
+    }
+    if (Object.keys(birthdayErrors).length > 0) {
+      return {
+        success: false,
+        fieldErrors: birthdayErrors,
+        formError:
+          birthdayErrors.memberId ??
+          birthdayErrors.birthdayTargetYear ??
+          'Please fix the highlighted fields.',
+      };
+    }
+  }
+
+  if (nextTargetYear !== initial.birthdayTargetYear) {
+    patch.birthdayTargetYear = nextTargetYear;
+  }
 
   const nextDueDate = normalize(values.dueDate);
   if (nextDueDate !== initial.dueDate) patch.dueDate = nextDueDate;

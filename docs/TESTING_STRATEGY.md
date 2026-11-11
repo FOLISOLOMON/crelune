@@ -328,3 +328,22 @@ Verified for Stage 3.5 Review Fixes, Stage 3.6, and Milestone 4 against local wo
    - Clean Next.js `15.5.29` and workspace `tsc -b` builds after clearing `.next` cache (`PASS`), compiling `/`, `/birthdays`, `/designs`, `/designs/[id]`, `/members`, `/members/[id]`, `/notifications`, `/settings`, and all API routes.
 5. **Known Automated Coverage Scope**:
    - Real interactive React component DOM flows are verified under `jsdom` via `@testing-library/react`; full headless Chromium browser E2E (Playwright/Cypress) and automated cron scheduling in Vercel/external infrastructure remain `NOT RUN` / Milestone 9 scope.
+
+---
+
+## 14. Critical Correction Cycle Testing Evidence (Birthday Engine & Design Job Integrity)
+
+Verified following fixes for Findings 1–3 against local workspaces and Neon `development` (`br-nameless-silence-bexjp44k`):
+1. **TypeScript, ESLint & Clean Build (`npm run type-check`, `npm run lint`, `npm run build`)**:
+   - `4`-workspace `tsc --noEmit` across `@crelune/web`, `@crelune/database`, `@crelune/shared`, and `@crelune/ui`: `PASS` (`0` errors).
+   - `next lint` (`✔ No ESLint warnings or errors`): `PASS`.
+   - Clean Next.js `15.5.29` build (after `.next` deletion) plus workspace `tsc -b` builds: `PASS`.
+2. **Unit, Schema, Lock & Route Suites (`npm test`)**:
+   - `@crelune/web`: `23` test files, `180` tests passed (`0` failed, `0` skipped) — adding [`design-job-lock.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/designs/design-job-lock.test.ts) (`2` deterministic/collision-immunity tests) and HTTP `409` / incomplete `BIRTHDAY_FLYER` validation cases in [`design-routes.test.ts`](file:///d:/Projects/Crelune/apps/web/src/app/api/designs/design-routes.test.ts) (`7` tests total).
+   - `@crelune/shared`: `6` test files, `44` tests passed (`0` failed, `0` skipped) — updated [`design-job.test.ts`](file:///d:/Projects/Crelune/packages/shared/src/schemas/design-job.test.ts) (`6` tests) for bidirectional `(category, memberId, birthdayTargetYear)` schema rules across create and update payloads.
+   - `@crelune/ui`: `1` test file, `3` tests passed (`0` failed, `0` skipped).
+   - **Total unit/route tests**: `30` test files, `227` tests passed, `0` failed, `0` skipped (`PASS`).
+3. **Neon `development` PostgreSQL + Concurrency Integration (`npm run test:integration:db`)**:
+   - Guard verified `development` (`br-nameless-silence-bexjp44k`, pooled `ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech`, direct `ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech`, `/neondb`).
+   - `6` test files, `39` tests passed (`0` failed, `0` skipped) — [`design-birthday-bundle.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/design-birthday-bundle.pg.integration.test.ts) expanded from `3` to `7` PostgreSQL integration tests covering Finding 1 (`celebrationDate` persistence, `FEB_28` vs `MAR_1` leap-day policies, invalid `targetYear` / missing birthday / archived rejections), Finding 2 (simultaneous `Promise.allSettled` race proving single job creation + `DesignJobConflictError`, multi-year/multi-member/multi-org isolation, non-birthday independence, simulated mid-transaction audit failure rollback), and Finding 3 (member/year reassignment, `PUBLISHED` status preservation, conflict `409` guard on destination prep, `{ memberId: null }` on `BIRTHDAY_FLYER` rejection, category switch detachment, cancellation detach, replacement creation, and `409` conflict on cancelled-job reopen).
+   - Post-run Neon `development` confirmed preserved workspace state (`1` organisation `crelune-ops`, `1` user, `1` member `thomas`, `2` auditLogs) with `0` residual synthetic `__pg_*` records; Neon `production` (`br-withered-moon-be8coj8h`) confirmed untouched (`written_data_bytes: 0`).

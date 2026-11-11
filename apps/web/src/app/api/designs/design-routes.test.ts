@@ -46,7 +46,11 @@ vi.mock('@/lib/designs/design-job-service', async (importOriginal) => {
   };
 });
 
-import { DesignJobNotFoundError, DesignJobTransitionError } from '@/lib/designs/design-job-service';
+import {
+  DesignJobConflictError,
+  DesignJobNotFoundError,
+  DesignJobTransitionError,
+} from '@/lib/designs/design-job-service';
 import { GET as listDesignsRoute, POST as createDesignRoute } from './route';
 import { GET as getDesignRoute, PATCH as patchDesignRoute } from './[id]/route';
 import { POST as transitionDesignRoute } from './[id]/transition/route';
@@ -194,5 +198,69 @@ describe('Milestone 4 Design Job API Routes', () => {
       VALID_JOB_ID,
       { title: 'Updated Flyer Brief' }
     );
+  });
+
+  it('rejects incomplete BIRTHDAY_FLYER creation payloads with 400 and maps duplicate conflict to 409', async () => {
+    const missingYearRes = await createDesignRoute(
+      new Request('http://localhost:3000/api/designs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Incomplete Birthday Flyer',
+          category: 'BIRTHDAY_FLYER',
+          memberId: '33333333-3333-4333-8333-333333333333',
+        }),
+      })
+    );
+    expect(missingYearRes.status).toBe(400);
+    expect(createDesignJobMock).not.toHaveBeenCalled();
+
+    createDesignJobMock.mockRejectedValueOnce(
+      new DesignJobConflictError(
+        'An active birthday design job already exists for this member in 2026.',
+        'DUPLICATE_BIRTHDAY_DESIGN_JOB'
+      )
+    );
+
+    const conflictRes = await createDesignRoute(
+      new Request('http://localhost:3000/api/designs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Duplicate Birthday Flyer',
+          category: 'BIRTHDAY_FLYER',
+          memberId: '33333333-3333-4333-8333-333333333333',
+          birthdayTargetYear: 2026,
+        }),
+      })
+    );
+    expect(conflictRes.status).toBe(409);
+    const conflictJson = await conflictRes.json();
+    expect(conflictJson.code).toBe('DUPLICATE_BIRTHDAY_DESIGN_JOB');
+  });
+
+  it('maps prep ownership conflicts on PATCH /api/designs/[id] to 409', async () => {
+    updateDesignJobMock.mockRejectedValueOnce(
+      new DesignJobConflictError(
+        'Birthday preparation for 2026 is already linked to another design job.',
+        'BIRTHDAY_PREP_ALREADY_LINKED'
+      )
+    );
+
+    const res = await patchDesignRoute(
+      new Request(`http://localhost:3000/api/designs/${VALID_JOB_ID}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memberId: '44444444-4444-4444-8444-444444444444',
+          birthdayTargetYear: 2026,
+        }),
+      }),
+      { params: Promise.resolve({ id: VALID_JOB_ID }) }
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe('BIRTHDAY_PREP_ALREADY_LINKED');
   });
 });

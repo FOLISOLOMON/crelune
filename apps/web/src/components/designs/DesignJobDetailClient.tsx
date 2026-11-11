@@ -81,11 +81,29 @@ export function DesignJobDetailClient({
     field: K,
     value: DesignJobFormValues[K]
   ) => {
-    setFormValues((prev) => ({ ...prev, [field]: value }));
-    if (fieldErrors[field]) {
+    setFormValues((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === 'category') {
+        if (value === 'BIRTHDAY_FLYER' && !next.birthdayTargetYear.trim()) {
+          next.birthdayTargetYear = String(
+            job.birthdayTargetYear ?? new Date().getFullYear()
+          );
+        } else if (value !== 'BIRTHDAY_FLYER') {
+          next.birthdayTargetYear = '';
+        }
+      }
+      return next;
+    });
+    if (
+      fieldErrors[field] ||
+      (field === 'category' && fieldErrors.birthdayTargetYear)
+    ) {
       setFieldErrors((prev) => {
         const next = { ...prev };
         delete next[field];
+        if (field === 'category') {
+          delete next.birthdayTargetYear;
+        }
         return next;
       });
     }
@@ -394,7 +412,9 @@ export function DesignJobDetailClient({
                         htmlFor="edit-design-member"
                         className="block text-xs font-medium text-[#24212B]"
                       >
-                        Linked Member
+                        {formValues.category === 'BIRTHDAY_FLYER'
+                          ? 'Linked Member *'
+                          : 'Linked Member'}
                       </label>
                       <select
                         id="edit-design-member"
@@ -412,6 +432,11 @@ export function DesignJobDetailClient({
                           </option>
                         ))}
                       </select>
+                      {fieldErrors.memberId && (
+                        <p className="text-xs font-medium text-[#DC2626]">
+                          {fieldErrors.memberId}
+                        </p>
+                      )}
                     </div>
 
                     <Input
@@ -423,6 +448,20 @@ export function DesignJobDetailClient({
                       disabled={isSaving}
                     />
                   </div>
+
+                  {formValues.category === 'BIRTHDAY_FLYER' && (
+                    <Input
+                      label="Birthday Target Year *"
+                      placeholder="e.g., 2026"
+                      value={formValues.birthdayTargetYear}
+                      onChange={(e) =>
+                        handleFieldChange('birthdayTargetYear', e.target.value)
+                      }
+                      error={fieldErrors.birthdayTargetYear}
+                      helperText="Changing the member or target year updates the linked birthday preparation record."
+                      disabled={isSaving}
+                    />
+                  )}
 
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <Input

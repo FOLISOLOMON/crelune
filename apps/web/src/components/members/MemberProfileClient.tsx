@@ -27,6 +27,8 @@ import {
 import {
   DESIGN_CATEGORY_LABELS,
   DESIGN_JOB_STATUS_LABELS,
+  getNextBirthdayOccurrence,
+  getTodayCivilDate,
   type DesignJobDetail,
   type DesignJobSummary,
   type MemberDetail,
@@ -633,17 +635,30 @@ export function MemberProfileClient({
           setDesignJobs((prev) => [created, ...prev]);
           setStatusBanner(`Created linked design job "${created.title}".`);
         }}
-        initialPrefill={{
-          memberId: member.id,
-          category:
-            member.birthMonth !== null && member.birthDay !== null
-              ? 'BIRTHDAY_FLYER'
-              : 'GENERAL_GRAPHIC_DESIGN',
-          title:
-            member.birthMonth !== null && member.birthDay !== null
-              ? `${member.fullName} Birthday Flyer`
-              : `${member.fullName} Design Brief`,
-        }}
+        initialPrefill={(() => {
+          if (member.birthMonth !== null && member.birthDay !== null) {
+            const occurrence = getNextBirthdayOccurrence(
+              {
+                birthMonth: member.birthMonth,
+                birthDay: member.birthDay,
+                birthYear: member.birthYear,
+              },
+              getTodayCivilDate()
+            );
+            return {
+              memberId: member.id,
+              category: 'BIRTHDAY_FLYER' as const,
+              title: `${member.fullName} Birthday Flyer`,
+              birthdayTargetYear: String(occurrence.targetYear),
+              dueDate: occurrence.celebrationIsoDate,
+            };
+          }
+          return {
+            memberId: member.id,
+            category: 'GENERAL_GRAPHIC_DESIGN' as const,
+            title: `${member.fullName} Design Brief`,
+          };
+        })()}
         lockedMemberLabel={member.fullName}
       />
     </div>

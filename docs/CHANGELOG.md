@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] - 2026-11-11
+
+### Critical Correction Cycle: Birthday Engine & Design Job Integrity
+- **Finding 1 — Preparation Celebration Date Resolution**: Fixed swapped `resolveCelebrationDateForYear` arguments in [`birthday-overview-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/birthdays/birthday-overview-service.ts) (`updateBirthdayPreparationStatus`), enforced integer `targetYear` (`2000..2200`) validation, and verified persisted `celebrationDate` across standard and `FEB_28` / `MAR_1` leap-day policies.
+- **Finding 2 — Concurrent Birthday Design Job Protection**: Added transaction-scoped SHA-256 64-bit PostgreSQL advisory locks (`pg_advisory_xact_lock(int4, int4)`) in [`design-job-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/designs/design-job-service.ts) keyed by `(organisationId, memberId, targetYear)`, rejecting duplicate active (`status !== 'CANCELLED'`) `BIRTHDAY_FLYER` jobs or conflicting `BirthdayPreparation.designJobId` assignments with HTTP `409 Conflict` (`DesignJobConflictError`) in [`design-http.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/designs/design-http.ts) (recorded in [ADR 014](./TECHNICAL_DECISIONS.md#adr-014--birthday-design-job-uniqueness-advisory-locking--preparation-reconciliation)).
+- **Finding 3 — Atomic `BirthdayPreparation` Reconciliation & Schema Alignment**: Updated [`schemas/design-job.ts`](file:///d:/Projects/Crelune/packages/shared/src/schemas/design-job.ts) so `BIRTHDAY_FLYER` jobs always require both `memberId` and `birthdayTargetYear` while non-birthday jobs forbid `birthdayTargetYear`. Updated `updateDesignJob` and `transitionDesignJobStatus` to acquire sorted advisory locks and row locks (`FOR UPDATE`), atomically detach/re-link `BirthdayPreparation.designJobId` across reassignments, category switches, and cancellations while preserving `PUBLISHED`/`SKIPPED`/existing prep statuses, and aligned [`MemberProfileClient.tsx`](file:///d:/Projects/Crelune/apps/web/src/components/members/MemberProfileClient.tsx), [`DesignJobModal.tsx`](file:///d:/Projects/Crelune/apps/web/src/components/designs/DesignJobModal.tsx), [`DesignJobDetailClient.tsx`](file:///d:/Projects/Crelune/apps/web/src/components/designs/DesignJobDetailClient.tsx), and [`design-form-utils.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/designs/design-form-utils.ts).
+- **Regression & Concurrency Verification**: Expanded unit, API route, and live Neon `development` PostgreSQL integration/concurrency suites (`227` unit tests across `30` files; `39` PostgreSQL integration tests across `6` files; clean `type-check`, `lint`, and Next.js `15.5.29` build).
+
+---
+
 ## [0.4.0] - 2026-11-11
 
 ### Milestone 3 Stage 3.5 Review, Stage 3.6 & Milestone 4: Birthdays Operations, Notifications, Preferences & Design Management

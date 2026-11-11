@@ -190,3 +190,31 @@ The following decisions remain intentionally deferred until their corresponding 
 
 ### Decision C: Windows Creative Agent IPC Protocol & Automation Fallback (Partially Resolved — ADR 008)
 - **Status**: Partially Resolved / Contingent. Template immutability and process lifecycle are verified. Final execution bridge (native MCP vs Script Library staging vs GUI automation) is deferred to Milestone 5 evaluation. See [ADR 008](#adr-008-windows-creative-agent-inter-process-communication--affinity-33-integration) and [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md).
+
+---
+
+## ADR 014 — Birthday Design Job Uniqueness, Advisory Locking & Preparation Reconciliation
+
+- **Date**: 2026-11-11
+- **Status**: Accepted
+- **Scope**: Birthday Operations (`@crelune/shared`, `apps/web/src/lib/designs/design-job-service.ts`, `design-http.ts`)
+
+### Context
+
+An independent code review identified three integrity gaps across the Stage 3.6 / Milestone 4 bundle:
+1. [`updateBirthdayPreparationStatus`](file:///d:/Projects/Crelune/apps/web/src/lib/birthdays/birthday-overview-service.ts) invoked `resolveCelebrationDateForYear` with reversed arguments `(targetYear, birthMonth, birthDay, policy)`.
+2. Concurrent `createDesignJob` requests for `BIRTHDAY_FLYER` jobs on the same `(organisationId, memberId, birthdayTargetYear)` lacked a concurrency lock and could create duplicate active flyer jobs or race against `BirthdayPreparation.designJobId`.
+3. `updateDesignJob` and cancellation/reopen transitions did not reconcile `BirthdayPreparation.designJobId` or enforce bidirectional consistency between `category === 'BIRTHDAY_FLYER'`, `memberId`, and `birthdayTargetYear`.
+
+### Decisions
+
+1. **Duplicate Behaviour Policy**: Reject concurrent or sequential creation, update, or `CANCELLED -> DRAFT` reopening that would produce more than one active (`status !== 'CANCELLED'`) `BIRTHDAY_FLYER` job per `(organisationId, memberId, birthdayTargetYear)`, or overwrite a `BirthdayPreparation.designJobId` owned by another job, with **HTTP `409 Conflict`** (`DesignJobConflictError`, code `DUPLICATE_BIRTHDAY_DESIGN_JOB` or `BIRTHDAY_PREP_ALREADY_LINKED`). Cancelled `BIRTHDAY_FLYER` jobs detach their `BirthdayPreparation.designJobId` so a clean replacement flyer may be created; reopening an old cancelled job once a replacement exists is rejected with `409`. Non-birthday categories may link multiple jobs to the same member independently without touching `BirthdayPreparation`.
+2. **Transaction-Scoped Deterministic Advisory Locking**: Before checking active conflicts or mutating `BirthdayPreparation`, services acquire PostgreSQL transaction-scoped advisory locks (`SELECT pg_advisory_xact_lock(int4, int4)`) keyed from the SHA-256 digest (first two signed 32-bit big-endian ints) of canonical `JSON.stringify(['crelune:birthday-design-job:v1', organisationId, memberId, targetYear])`. When updating a birthday tuple (`oldTuple -> newTuple`), locks are acquired in sorted key order to prevent AB-BA deadlocks.
+3. **Strict Category & Preparation Reconciliation Invariants**:
+   - `BIRTHDAY_FLYER` creation and updates require both an active member with complete `(birthMonth, birthDay)` and an integer `birthdayTargetYear` (`2000..2200`). Non-birthday jobs forbid a non-null `birthdayTargetYear`.
+   - Reassigning `memberId` or `birthdayTargetYear`, converting away from `BIRTHDAY_FLYER` (automatically clearing `birthdayTargetYear`), or transitioning to `CANCELLED` detaches only `BirthdayPreparation` rows where `designJobId === job.id` without clearing existing `status` or `notes`, and links any destination preparation only if unowned while preserving `PUBLISHED`, `SKIPPED`, and existing progress statuses.
+
+### Consequences
+
+- Strong concurrency correctness and atomic multi-table reconciliation on PostgreSQL without requiring destructive DDL migrations on production or brittle composite unique constraints on nullable/cancelled columns.
+- Zero interference with non-birthday creative workflows or historical preparation states.

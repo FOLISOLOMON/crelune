@@ -76,6 +76,14 @@ const optionalMemberIdSchema = z.preprocess(
   memberIdParamSchema.nullable().optional()
 );
 
+const optionalBirthdayTargetYearSchema = z
+  .number()
+  .int('Birthday target year must be a whole number')
+  .min(2000, 'Birthday target year is out of range')
+  .max(2200, 'Birthday target year is out of range')
+  .nullable()
+  .optional();
+
 export const createDesignJobSchema = z
   .object({
     title: z
@@ -90,13 +98,7 @@ export const createDesignJobSchema = z
     priority: z.enum(DESIGN_PRIORITIES).default('NORMAL'),
     initialStatus: z.enum(['DRAFT', 'PENDING']).default('DRAFT'),
     memberId: optionalMemberIdSchema,
-    birthdayTargetYear: z
-      .number()
-      .int('Birthday target year must be a whole number')
-      .min(2000, 'Birthday target year is out of range')
-      .max(2200, 'Birthday target year is out of range')
-      .nullable()
-      .optional(),
+    birthdayTargetYear: optionalBirthdayTargetYearSchema,
     requiredText: preprocessOptionalTrimmedString(
       DESIGN_JOB_TEXT_MAX_LENGTH,
       'Required text'
@@ -125,15 +127,29 @@ export const createDesignJobSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
-    if (
-      data.birthdayTargetYear !== undefined &&
-      data.birthdayTargetYear !== null &&
-      !data.memberId
-    ) {
+    if (data.category === 'BIRTHDAY_FLYER') {
+      if (!data.memberId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['memberId'],
+          message: 'A linked member is required for birthday flyer jobs.',
+        });
+      }
+      if (data.birthdayTargetYear === undefined || data.birthdayTargetYear === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['birthdayTargetYear'],
+          message: 'A birthday target year is required for birthday flyer jobs.',
+        });
+      }
+      return;
+    }
+
+    if (data.birthdayTargetYear !== undefined && data.birthdayTargetYear !== null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ['memberId'],
-        message: 'A linked member is required when specifying a birthday target year.',
+        path: ['birthdayTargetYear'],
+        message: 'Birthday target year is only allowed for birthday flyer jobs.',
       });
     }
   });
@@ -154,6 +170,7 @@ export const updateDesignJobSchema = z
     category: z.enum(DESIGN_CATEGORIES).optional(),
     priority: z.enum(DESIGN_PRIORITIES).optional(),
     memberId: optionalMemberIdSchema,
+    birthdayTargetYear: optionalBirthdayTargetYearSchema,
     requiredText: preprocessOptionalTrimmedString(
       DESIGN_JOB_TEXT_MAX_LENGTH,
       'Required text'
@@ -181,8 +198,50 @@ export const updateDesignJobSchema = z
     dueDate: optionalCivilDateSchema,
   })
   .strict()
-  .refine((data) => Object.keys(data).length > 0, {
-    message: 'At least one design job field must be updated.',
+  .superRefine((data, ctx) => {
+    if (Object.keys(data).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one design job field must be updated.',
+      });
+    }
+
+    if (data.category === 'BIRTHDAY_FLYER') {
+      if (data.memberId === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['memberId'],
+          message: 'A linked member is required for birthday flyer jobs.',
+        });
+      }
+      if (data.birthdayTargetYear === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['birthdayTargetYear'],
+          message: 'A birthday target year is required for birthday flyer jobs.',
+        });
+      }
+    } else if (
+      data.category !== undefined &&
+      data.birthdayTargetYear !== undefined &&
+      data.birthdayTargetYear !== null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['birthdayTargetYear'],
+        message: 'Birthday target year is only allowed for birthday flyer jobs.',
+      });
+    } else if (
+      data.birthdayTargetYear !== undefined &&
+      data.birthdayTargetYear !== null &&
+      data.memberId === null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['memberId'],
+        message: 'A linked member is required when specifying a birthday target year.',
+      });
+    }
   });
 
 export type UpdateDesignJobInput = z.infer<typeof updateDesignJobSchema>;

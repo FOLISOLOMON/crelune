@@ -6,6 +6,7 @@ import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { designJobIdParamSchema } from '@crelune/shared';
 import {
+  DesignJobConflictError,
   DesignJobNotFoundError,
   DesignJobTransitionError,
   DesignJobValidationError,
@@ -67,6 +68,16 @@ export function handleDesignRouteError(
     return designJsonResponse(
       { error: err.message, code: 'VALIDATION_ERROR' },
       400
+    );
+  }
+
+  if (err instanceof DesignJobConflictError) {
+    return designJsonResponse(
+      {
+        error: err.message,
+        code: err.code,
+      },
+      409
     );
   }
 

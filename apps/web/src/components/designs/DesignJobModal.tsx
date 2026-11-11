@@ -82,11 +82,24 @@ export function DesignJobModal({
     field: K,
     value: DesignJobFormValues[K]
   ) => {
-    setValues((prev) => ({ ...prev, [field]: value }));
-    if (fieldErrors[field]) {
+    setValues((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === 'category') {
+        if (value === 'BIRTHDAY_FLYER' && !next.birthdayTargetYear.trim()) {
+          next.birthdayTargetYear = String(new Date().getFullYear());
+        } else if (value !== 'BIRTHDAY_FLYER') {
+          next.birthdayTargetYear = '';
+        }
+      }
+      return next;
+    });
+    if (fieldErrors[field] || (field === 'category' && fieldErrors.birthdayTargetYear)) {
       setFieldErrors((prev) => {
         const next = { ...prev };
         delete next[field];
+        if (field === 'category') {
+          delete next.birthdayTargetYear;
+        }
         return next;
       });
     }
@@ -264,7 +277,9 @@ export function DesignJobModal({
                 htmlFor="design-member-select"
                 className="block text-xs font-medium text-[#24212B]"
               >
-                Linked Member (Optional)
+                {values.category === 'BIRTHDAY_FLYER'
+                  ? 'Linked Member *'
+                  : 'Linked Member (Optional)'}
               </label>
               {lockedMemberLabel ? (
                 <div className="flex h-9.5 items-center rounded-lg border border-[#E8E5ED] bg-[#F8F7FA] px-3 text-sm font-medium text-[#24212B]">
@@ -304,14 +319,14 @@ export function DesignJobModal({
             />
           </div>
 
-          {values.memberId && (
+          {values.category === 'BIRTHDAY_FLYER' && (
             <Input
-              label="Birthday Target Year (Optional)"
+              label="Birthday Target Year *"
               placeholder="e.g., 2026"
               value={values.birthdayTargetYear}
               onChange={(e) => updateField('birthdayTargetYear', e.target.value)}
               error={fieldErrors.birthdayTargetYear}
-              helperText="Set this to link the flyer directly to the member's birthday preparation record."
+              helperText="Required for birthday flyer jobs so the design tracks against the member's annual birthday preparation."
               disabled={isSubmitting || Boolean(initialPrefill?.birthdayTargetYear)}
             />
           )}
