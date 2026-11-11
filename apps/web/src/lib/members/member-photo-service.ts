@@ -1,16 +1,18 @@
 /**
  * CRELUNE — Private Member Photograph Lifecycle Service
  *
- * Coordinates Neon Object Storage operations with PostgreSQL member metadata
- * and transactional append-only audit logging:
+ * Coordinates Neon Object Storage operations with PostgreSQL member metadata,
+ * transactional append-only audit logging, and durable cleanup retries:
  *  - Verifies organisation ownership on every read, upload, replacement, and deletion.
+ *  - Accepts only processed, EXIF/metadata-stripped image bytes (`ProcessedMemberPhoto`).
  *  - Uploads & verifies new objects before committing Postgres updates.
- *  - Cleans up newly uploaded objects if the Postgres transaction fails.
- *  - Deletes previous objects only after DB commit succeeds, and validates
- *    object key scope before every read or deletion.
+ *  - Persists durable `PendingStorageCleanup` records whenever an orphan or obsolete
+ *    object deletion fails, without exposing credentials, URLs, or blocking committed writes.
+ *  - Validates every key against the approved environment, organisation, and member scope
+ *    before read, enqueue, or deletion.
  */
 
-import { prisma } from '@crelune/database';
+import { prisma, type StorageCleanupReason } from '@crelune/database';
 import {
   isMemberArchived,
   type MemberDetail,
@@ -24,14 +26,16 @@ import {
   MemberNotFoundError,
   type MemberActorContext,
 } from '@/lib/members/member-service';
-import type { ValidatedMemberPhoto } from '@/lib/storage/image-validator';
+import type { ProcessedMemberPhoto } from '@/lib/storage/image-processor';
 import {
   createObjectStorageProvider,
   type ObjectStorageProvider,
 } from '@/lib/storage/object-storage';
 import {
+  APPROVED_PROD_STORAGE_TARGET,
   assertKeyMatchesMemberScope,
   buildMemberPhotoObjectKey,
+  StorageKeyViolationError,
 } from '@/lib/storage/storage-config';
 
 export class MemberPhotoNotFoundError extends Error {
@@ -65,37 +69,143 @@ export interface DeleteMemberPhotoResult {
   removed: boolean;
 }
 
+export interface RetryStorageCleanupsOptions {
+  organisationId: string;
+  memberId?: string;
+  limit?: number;
+  now?: Date;
+  ignoreBackoff?: boolean;
+}
+
+export interface RetryStorageCleanupsResult {
+  examined: number;
+  succeeded: number;
+  failed: number;
+  rejected: number;
+  skipped: number;
+}
+
+const DEFAULT_RETRY_DELAY_MS = 30_000;
+const MAX_RETRY_DELAY_MS = 3_600_000;
+
 function getStorageOrDefault(
   storage?: ObjectStorageProvider
 ): ObjectStorageProvider {
   return storage ?? createObjectStorageProvider();
 }
 
-async function safeCompensateDelete(
-  storage: ObjectStorageProvider,
-  key: string,
-  reason: string
-): Promise<void> {
+/**
+ * Formats external storage errors cleanly for database/log storage without
+ * ever leaking URLs, object keys, bucket names, or credentials.
+ */
+function formatSafeCleanupError(err: unknown): string {
+  if (!err || typeof err !== 'object') {
+    return 'UnknownStorageError';
+  }
+  const errName =
+    err instanceof Error && /^[A-Za-z0-9_]{1,40}$/.test(err.name)
+      ? err.name
+      : 'StorageError';
+  const meta = (err as { $metadata?: { httpStatusCode?: number } }).$metadata;
+  const status = meta?.httpStatusCode;
+  if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
+    return `${errName}:${status}`.slice(0, 64);
+  }
+  return errName.slice(0, 64);
+}
+
+async function enqueuePendingStorageCleanup(params: {
+  storage: ObjectStorageProvider;
+  organisationId: string;
+  memberId: string;
+  storageKey: string;
+  reason: StorageCleanupReason;
+  error: unknown;
+}): Promise<void> {
+  // Never enqueue out-of-scope or arbitrary keys into durable cleanup storage
+  assertKeyMatchesMemberScope(params.storageKey, {
+    envPrefix: params.storage.envPrefix,
+    organisationId: params.organisationId,
+    memberId: params.memberId,
+  });
+
+  const safeError = formatSafeCleanupError(params.error);
+  const nextRetryAt = new Date(Date.now() + DEFAULT_RETRY_DELAY_MS);
+
+  await prisma.pendingStorageCleanup.upsert({
+    where: { storageKey: params.storageKey },
+    create: {
+      organisationId: params.organisationId,
+      memberId: params.memberId,
+      storageKey: params.storageKey,
+      reason: params.reason,
+      status: 'PENDING',
+      attemptCount: 1,
+      lastError: safeError,
+      nextRetryAt,
+    },
+    update: {
+      reason: params.reason,
+      status: 'PENDING',
+      attemptCount: { increment: 1 },
+      lastError: safeError,
+      nextRetryAt,
+      completedAt: null,
+    },
+  });
+}
+
+async function attemptDeleteOrEnqueue(params: {
+  storage: ObjectStorageProvider;
+  organisationId: string;
+  memberId: string;
+  key: string;
+  reason: StorageCleanupReason;
+}): Promise<void> {
+  assertKeyMatchesMemberScope(params.key, {
+    envPrefix: params.storage.envPrefix,
+    organisationId: params.organisationId,
+    memberId: params.memberId,
+  });
+
   try {
-    await storage.deleteObject(key);
-  } catch (err) {
-    console.error(
-      `Object storage cleanup failed (${reason}):`,
-      err instanceof Error ? err.name : 'UnknownError'
-    );
+    await params.storage.deleteObject(params.key);
+  } catch (deleteErr) {
+    const safeErrLabel = formatSafeCleanupError(deleteErr);
+    try {
+      await enqueuePendingStorageCleanup({
+        storage: params.storage,
+        organisationId: params.organisationId,
+        memberId: params.memberId,
+        storageKey: params.key,
+        reason: params.reason,
+        error: deleteErr,
+      });
+      console.error(
+        `Queued durable storage cleanup (reason=${params.reason}, error=${safeErrLabel}).`
+      );
+    } catch (queueErr) {
+      console.error(
+        `Failed to enqueue durable storage cleanup (reason=${params.reason}, deleteError=${safeErrLabel}, queueError=${formatSafeCleanupError(queueErr)}).`
+      );
+    }
   }
 }
 
 /**
- * Uploads or replaces a member's private photograph without risking data loss or
- * broken DB pointers on storage or transaction failures.
+ * Uploads or replaces a member's private photograph using processed, metadata-stripped
+ * bytes without risking data loss or broken DB pointers on storage or transaction failures.
  */
 export async function uploadMemberPhoto(
   actor: MemberActorContext,
   memberId: string,
-  validatedPhoto: ValidatedMemberPhoto,
+  processedPhoto: ProcessedMemberPhoto,
   storageProvider?: ObjectStorageProvider
 ): Promise<UploadMemberPhotoResult> {
+  if (!processedPhoto.processed) {
+    throw new Error('Refusing to store unprocessed image bytes without metadata sanitization.');
+  }
+
   const storage = getStorageOrDefault(storageProvider);
 
   // Fail fast before transferring bytes to object storage if member is missing or archived
@@ -116,24 +226,33 @@ export async function uploadMemberPhoto(
     envPrefix: storage.envPrefix,
     organisationId: actor.organisationId,
     memberId,
-    extension: validatedPhoto.extension,
+    extension: processedPhoto.extension,
   });
 
-  // Step 1: Upload and verify the new object before mutating PostgreSQL
+  // Step 1: Upload and verify the new sanitized object before mutating PostgreSQL
   await storage.putPrivateObject({
     key: newKey,
-    body: validatedPhoto.bytes,
-    contentType: validatedPhoto.mimeType,
+    body: processedPhoto.bytes,
+    contentType: processedPhoto.mimeType,
     cacheControl: 'private, no-store',
   });
 
   try {
     const head = await storage.headObject(newKey);
-    if (!head.exists || (head.contentLength !== undefined && head.contentLength !== validatedPhoto.byteSize)) {
+    if (
+      !head.exists ||
+      (head.contentLength !== undefined && head.contentLength !== processedPhoto.byteSize)
+    ) {
       throw new Error('Uploaded photo failed post-upload storage verification.');
     }
   } catch (err) {
-    await safeCompensateDelete(storage, newKey, 'post_upload_verify_failure');
+    await attemptDeleteOrEnqueue({
+      storage,
+      organisationId: actor.organisationId,
+      memberId,
+      key: newKey,
+      reason: 'POST_UPLOAD_VERIFY_FAILURE',
+    });
     throw err;
   }
 
@@ -186,8 +305,8 @@ export async function uploadMemberPhoto(
         where: { id: existing.id },
         data: {
           photoStorageKey: newKey,
-          photoMimeType: validatedPhoto.mimeType,
-          photoByteSize: validatedPhoto.byteSize,
+          photoMimeType: processedPhoto.mimeType,
+          photoByteSize: processedPhoto.byteSize,
           photoUpdatedAt: now,
         },
         select: MEMBER_DETAIL_SELECT,
@@ -203,10 +322,10 @@ export async function uploadMemberPhoto(
         entityType: 'Member',
         entityId: updated.id,
         metadata: {
-          mimeType: validatedPhoto.mimeType,
-          byteSize: validatedPhoto.byteSize,
-          width: validatedPhoto.width,
-          height: validatedPhoto.height,
+          mimeType: processedPhoto.mimeType,
+          byteSize: processedPhoto.byteSize,
+          width: processedPhoto.width,
+          height: processedPhoto.height,
           replaced,
         },
       });
@@ -221,24 +340,31 @@ export async function uploadMemberPhoto(
     previousKeyToDelete = txResult.previousKey;
     updatedMemberRow = txResult.updated as typeof updatedMemberRow;
   } catch (err) {
-    // Database failed after S3 upload succeeded -> delete orphan newKey, leaving any prior photo intact
-    await safeCompensateDelete(storage, newKey, 'db_transaction_rollback');
+    // Database failed after S3 upload succeeded -> delete orphan newKey (or queue retry), leaving old photo intact
+    await attemptDeleteOrEnqueue({
+      storage,
+      organisationId: actor.organisationId,
+      memberId,
+      key: newKey,
+      reason: 'DB_TRANSACTION_ROLLBACK',
+    });
     throw err;
   }
 
-  // Step 3: Now that Postgres points safely to newKey, delete old key inside verified scope
+  // Step 3: Now that Postgres points safely to newKey, delete old key (or queue retry) without failing commit
   if (previousKeyToDelete && previousKeyToDelete !== newKey) {
     try {
-      assertKeyMatchesMemberScope(previousKeyToDelete, {
-        envPrefix: storage.envPrefix,
+      await attemptDeleteOrEnqueue({
+        storage,
         organisationId: actor.organisationId,
         memberId,
+        key: previousKeyToDelete,
+        reason: 'PREVIOUS_PHOTO_CLEANUP',
       });
-      await safeCompensateDelete(storage, previousKeyToDelete, 'previous_photo_cleanup');
     } catch (err) {
       console.error(
         'Skipped old photo deletion due to key scope mismatch:',
-        err instanceof Error ? err.name : 'UnknownError'
+        formatSafeCleanupError(err)
       );
     }
   }
@@ -251,10 +377,10 @@ export async function uploadMemberPhoto(
     member: memberDetail,
     photo: {
       url: `/api/members/${memberDetail.id}/photo`,
-      mimeType: validatedPhoto.mimeType as MemberPhotoMimeType,
-      byteSize: validatedPhoto.byteSize,
-      width: validatedPhoto.width,
-      height: validatedPhoto.height,
+      mimeType: processedPhoto.mimeType as MemberPhotoMimeType,
+      byteSize: processedPhoto.byteSize,
+      width: processedPhoto.width,
+      height: processedPhoto.height,
       updatedAt: photoUpdatedAtIso,
     },
   };
@@ -307,7 +433,7 @@ export async function getMemberPhoto(
 
 /**
  * Idempotently removes a member's photo metadata inside an audited transaction and then
- * deletes the object from private storage.
+ * deletes the object from private storage (or queues durable cleanup retry if deletion fails).
  */
 export async function deleteMemberPhoto(
   actor: MemberActorContext,
@@ -384,7 +510,13 @@ export async function deleteMemberPhoto(
 
   keyToDelete = txResult.key;
   if (keyToDelete) {
-    await safeCompensateDelete(storage, keyToDelete, 'member_photo_removed');
+    await attemptDeleteOrEnqueue({
+      storage,
+      organisationId: actor.organisationId,
+      memberId,
+      key: keyToDelete,
+      reason: 'MEMBER_PHOTO_REMOVED',
+    });
   }
 
   return {
@@ -393,3 +525,118 @@ export async function deleteMemberPhoto(
   };
 }
 
+/**
+ * Retries due `PendingStorageCleanup` records for an organisation with strict
+ * environment, organisation, and member scope verification and idempotent completion.
+ * Out-of-scope or actively referenced keys are marked REJECTED and never deleted.
+ */
+export async function retryPendingStorageCleanups(
+  options: RetryStorageCleanupsOptions,
+  storageProvider?: ObjectStorageProvider
+): Promise<RetryStorageCleanupsResult> {
+  const storage = getStorageOrDefault(storageProvider);
+  if (storage.envPrefix !== 'development' && !APPROVED_PROD_STORAGE_TARGET) {
+    throw new StorageKeyViolationError(
+      'Refusing storage cleanup against unapproved environment target.'
+    );
+  }
+
+  const now = options.now ?? new Date();
+  const take = Math.min(Math.max(options.limit ?? 25, 1), 100);
+
+  const candidates = await prisma.pendingStorageCleanup.findMany({
+    where: {
+      organisationId: options.organisationId,
+      ...(options.memberId ? { memberId: options.memberId } : {}),
+      status: 'PENDING',
+      ...(options.ignoreBackoff ? {} : { nextRetryAt: { lte: now } }),
+    },
+    orderBy: [{ nextRetryAt: 'asc' }, { createdAt: 'asc' }],
+    take,
+  });
+
+  const summary: RetryStorageCleanupsResult = {
+    examined: candidates.length,
+    succeeded: 0,
+    failed: 0,
+    rejected: 0,
+    skipped: 0,
+  };
+
+  for (const record of candidates) {
+    // Defense-in-depth: validate exact environment, organisation, and member scope BEFORE S3 call
+    try {
+      if (record.organisationId !== options.organisationId) {
+        throw new StorageKeyViolationError('Cleanup record organisation mismatch.');
+      }
+      assertKeyMatchesMemberScope(record.storageKey, {
+        envPrefix: storage.envPrefix,
+        organisationId: record.organisationId,
+        memberId: record.memberId,
+      });
+
+      const activeReference = await prisma.member.findFirst({
+        where: {
+          organisationId: record.organisationId,
+          photoStorageKey: record.storageKey,
+        },
+        select: { id: true },
+      });
+      if (activeReference) {
+        throw new StorageKeyViolationError(
+          'Cleanup key matches an active member photograph and cannot be deleted.'
+        );
+      }
+    } catch (scopeErr) {
+      const rejectedUpdate = await prisma.pendingStorageCleanup.updateMany({
+        where: { id: record.id, status: 'PENDING' },
+        data: {
+          status: 'REJECTED',
+          attemptCount: { increment: 1 },
+          lastError: formatSafeCleanupError(scopeErr),
+        },
+      });
+      if (rejectedUpdate.count === 1) {
+        summary.rejected += 1;
+      } else {
+        summary.skipped += 1;
+      }
+      continue;
+    }
+
+    try {
+      await storage.deleteObject(record.storageKey);
+
+      const completedUpdate = await prisma.pendingStorageCleanup.updateMany({
+        where: { id: record.id, status: 'PENDING' },
+        data: {
+          status: 'COMPLETED',
+          completedAt: new Date(),
+          lastError: null,
+          attemptCount: { increment: 1 },
+        },
+      });
+      if (completedUpdate.count === 1) {
+        summary.succeeded += 1;
+      } else {
+        summary.skipped += 1;
+      }
+    } catch (deleteErr) {
+      const backoffMs = Math.min(
+        DEFAULT_RETRY_DELAY_MS * 2 ** Math.min(record.attemptCount, 6),
+        MAX_RETRY_DELAY_MS
+      );
+      await prisma.pendingStorageCleanup.updateMany({
+        where: { id: record.id, status: 'PENDING' },
+        data: {
+          attemptCount: { increment: 1 },
+          lastError: formatSafeCleanupError(deleteErr),
+          nextRetryAt: new Date(now.getTime() + backoffMs),
+        },
+      });
+      summary.failed += 1;
+    }
+  }
+
+  return summary;
+}

@@ -292,3 +292,16 @@ Verified for Stage 3.2 against local workspaces and Neon `development` (`br-name
    - Exact branch/storage endpoint guard verified `development` (`br-nameless-silence-bexjp44k`), bucket `crelune-dev-member-photos`, endpoint host `br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech`.
    - `4` test files, `17` tests passed (`0` failed, `0` skipped), including `4` live Postgres + Neon Object Storage tests in [`member-photo.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/member-photo.pg.integration.test.ts) verifying private bucket unauthenticated `403` denial, authenticated upload/stream/replace/delete lifecycle across JPEG/PNG/WebP, S3 compensation cleanup on DB audit failure, archival upload restriction (`409`), cross-organisation isolation, and non-`OWNER` revocation (`401`).
    - Post-test database row counts (`members: 0`, `auditLogs: 0`, `authThrottles: 0`), `development` bucket object list (`0` objects), and `production` isolation (`[]` buckets, `written_data_bytes: 0`) verified clean.
+
+---
+
+## 12. Milestone 3, Stage 3.3.1 Testing Evidence (Photo Storage Hardening)
+
+1. **Unit & Route Suites (`cmd /c npm test`)**:
+   - `19` test files, `165` tests passed (`0` failed, `0` skipped): `@crelune/web` (`14` files / `129` tests), `@crelune/shared` (`4` files / `33` tests), `@crelune/ui` (`1` file / `3` tests).
+   - Added exhaustive runtime allowlist rejection tests in [`storage-config.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.test.ts) (`6` tests), EXIF/GPS/XMP/comment stripping + orientation + alpha preservation tests in [`image-processor.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/image-processor.test.ts) (`4` tests), and streaming `ReadableStream` pre-parse body limit tests (missing `Content-Length`, spoofed small `Content-Length`, oversized multipart, malformed boundary, inner Blob > 10 MB) in [`member-photo-route.test.ts`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/%5Bid%5D/photo/member-photo-route.test.ts) (`4` tests).
+2. **TypeScript & Production Build (`cmd /c npm run type-check`, `cmd /c npm run build`)**:
+   - Zero TypeScript errors across all `4` workspaces and clean Next.js `15.5.29` build with `serverExternalPackages: ['sharp']` (`PASS`).
+3. **Neon `development` PG + Object Storage Integration (`cmd /c npm run test:integration:db`)**:
+   - `4` test files, `17` tests passed (`0` failed, `0` skipped), including live Neon S3 + Postgres verification in [`member-photo.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/member-photo.pg.integration.test.ts) for EXIF/GPS stripped uploads, failed compensation cleanup queueing, failed replacement/removal cleanup queueing without blocking committed DB state, idempotent retries, duplicate retry no-ops, out-of-scope cleanup key `REJECTED` blocking, and sanitized error messages.
+   - Post-test row counts (`members: 0`, `auditLogs: 0`, `authThrottles: 0`, `pendingStorageCleanups: 0`), `development` bucket objects (`0`), and `production` isolation (`written_data_bytes: 0`, `[]` buckets) verified clean.

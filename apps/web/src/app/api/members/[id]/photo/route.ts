@@ -11,10 +11,12 @@ import {
   getMemberPhoto,
   uploadMemberPhoto,
 } from '@/lib/members/member-photo-service';
-import { validateUploadedMemberPhoto } from '@/lib/storage/image-validator';
+import {
+  MAX_MULTIPART_CONTENT_LENGTH,
+  readBoundedMultipartFormData,
+} from '@/lib/storage/bounded-multipart';
+import { processUploadedMemberPhoto } from '@/lib/storage/image-processor';
 
-// Allow small multipart boundary/header overhead around the 10 MB image cap
-const MAX_MULTIPART_CONTENT_LENGTH = MAX_MEMBER_PHOTO_BYTES + 256 * 1024;
 const FORBIDDEN_MULTIPART_FIELDS = new Set([
   'storagekey',
   'photostoragekey',
@@ -83,21 +85,38 @@ export async function POST(
     return idResult.response;
   }
 
-  const contentType = request.headers.get('content-type') || '';
-  if (!contentType.toLowerCase().includes('multipart/form-data')) {
-    return memberJsonResponse(
-      {
-        error: 'Upload request must use multipart/form-data.',
-        code: 'INVALID_CONTENT_TYPE',
-      },
-      400
+  try {
+    // Enforce hard byte limit directly on the incoming stream before multipart parsing
+    const formData = await readBoundedMultipartFormData(
+      request,
+      MAX_MULTIPART_CONTENT_LENGTH
     );
-  }
 
-  const contentLengthHeader = request.headers.get('content-length');
-  if (contentLengthHeader) {
-    const declaredLength = Number.parseInt(contentLengthHeader, 10);
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_MULTIPART_CONTENT_LENGTH) {
+    for (const fieldName of formData.keys()) {
+      if (FORBIDDEN_MULTIPART_FIELDS.has(fieldName.trim().toLowerCase())) {
+        return memberJsonResponse(
+          {
+            error: 'Client-supplied storage locations or object keys are not permitted.',
+            code: 'FORBIDDEN_UPLOAD_FIELD',
+          },
+          400
+        );
+      }
+    }
+
+    const fileEntries = formData.getAll('file');
+    if (fileEntries.length !== 1 || !(fileEntries[0] instanceof Blob)) {
+      return memberJsonResponse(
+        {
+          error: 'A single image file field named "file" is required.',
+          code: 'INVALID_UPLOAD_FIELD',
+        },
+        400
+      );
+    }
+
+    const uploadedBlob = fileEntries[0];
+    if (uploadedBlob.size > MAX_MEMBER_PHOTO_BYTES) {
       return memberJsonResponse(
         {
           error: 'Uploaded photo exceeds the 10 MB maximum limit.',
@@ -106,60 +125,14 @@ export async function POST(
         413
       );
     }
-  }
 
-  let formData: FormData;
-  try {
-    formData = await request.formData();
-  } catch {
-    return memberJsonResponse(
-      { error: 'Invalid multipart upload payload.', code: 'INVALID_UPLOAD_BODY' },
-      400
-    );
-  }
+    const bytes = new Uint8Array(await uploadedBlob.arrayBuffer());
+    const filename =
+      'name' in uploadedBlob && typeof uploadedBlob.name === 'string'
+        ? uploadedBlob.name
+        : undefined;
 
-  for (const fieldName of formData.keys()) {
-    if (FORBIDDEN_MULTIPART_FIELDS.has(fieldName.trim().toLowerCase())) {
-      return memberJsonResponse(
-        {
-          error: 'Client-supplied storage locations or object keys are not permitted.',
-          code: 'FORBIDDEN_UPLOAD_FIELD',
-        },
-        400
-      );
-    }
-  }
-
-  const fileEntries = formData.getAll('file');
-  if (fileEntries.length !== 1 || !(fileEntries[0] instanceof Blob)) {
-    return memberJsonResponse(
-      {
-        error: 'A single image file field named "file" is required.',
-        code: 'INVALID_UPLOAD_FIELD',
-      },
-      400
-    );
-  }
-
-  const uploadedBlob = fileEntries[0];
-  if (uploadedBlob.size > MAX_MEMBER_PHOTO_BYTES) {
-    return memberJsonResponse(
-      {
-        error: 'Uploaded photo exceeds the 10 MB maximum limit.',
-        code: 'FILE_TOO_LARGE',
-      },
-      413
-    );
-  }
-
-  const bytes = new Uint8Array(await uploadedBlob.arrayBuffer());
-  const filename =
-    'name' in uploadedBlob && typeof uploadedBlob.name === 'string'
-      ? uploadedBlob.name
-      : undefined;
-
-  try {
-    const validatedPhoto = validateUploadedMemberPhoto({
+    const processedPhoto = await processUploadedMemberPhoto({
       bytes,
       declaredMimeType: uploadedBlob.type,
       filename,
@@ -171,7 +144,7 @@ export async function POST(
         organisationId: auth.owner.profile.organisationId,
       },
       idResult.id,
-      validatedPhoto
+      processedPhoto
     );
 
     return memberJsonResponse(result, 200);
@@ -208,4 +181,3 @@ export async function DELETE(
     return handleMemberRouteError(err, 'DELETE /api/members/[id]/photo');
   }
 }
-

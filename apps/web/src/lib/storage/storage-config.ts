@@ -2,12 +2,13 @@
  * CRELUNE — Private Object Storage Configuration & Key Isolation
  *
  * Server-only configuration loader and environment/organisation-scoped key builder.
- * Guarantees credentials and branch/environment namespaces cannot leak or cross boundaries.
+ * Enforces exact runtime allowlists so credentials and branch/environment namespaces
+ * cannot target arbitrary, lookalike, or cross-environment storage endpoints.
  */
 
 import crypto from 'node:crypto';
 
-export type StorageEnvPrefix = 'development' | 'staging' | 'production';
+export type StorageEnvPrefix = 'development' | 'production';
 
 export interface ObjectStorageConfig {
   endpoint: string;
@@ -16,18 +17,40 @@ export interface ObjectStorageConfig {
   secretAccessKey: string;
   bucket: string;
   envPrefix: StorageEnvPrefix;
+  branchId: string;
+  branchName: string;
+}
+
+export interface ApprovedStorageTarget {
+  endpointHost: string;
+  region: string;
+  bucket: string;
+  envPrefix: StorageEnvPrefix;
+  branchId: string;
+  branchName: string;
 }
 
 const VALID_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
-const ALLOWED_ENV_PREFIXES = new Set<StorageEnvPrefix>([
-  'development',
-  'staging',
-  'production',
-]);
+const ALLOWED_ENV_PREFIXES = new Set<StorageEnvPrefix>(['development', 'production']);
 const ALLOWED_EXTENSIONS = new Set(['jpg', 'png', 'webp']);
 
-const DEV_BRANCH_ID = 'br-nameless-silence-bexjp44k';
-const PROD_BRANCH_ID = 'br-withered-moon-be8coj8h';
+export const APPROVED_DEV_STORAGE_TARGET: ApprovedStorageTarget = {
+  endpointHost: 'br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech',
+  region: 'us-east-2',
+  bucket: 'crelune-dev-member-photos',
+  envPrefix: 'development',
+  branchId: 'br-nameless-silence-bexjp44k',
+  branchName: 'development',
+};
+
+// Production object storage has not yet been provisioned or approved.
+// Keep null until an explicit production endpoint, bucket, region, branch ID,
+// and prefix are provisioned and approved.
+export const APPROVED_PROD_STORAGE_TARGET: ApprovedStorageTarget | null = null;
+
+const KNOWN_PROD_BRANCH_ID = 'br-withered-moon-be8coj8h';
+const KNOWN_PROD_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
+const KNOWN_PROD_DB_ENDPOINT_ID = 'ep-mute-forest-bepsjmsu';
 
 export class StorageConfigError extends Error {
   constructor(message: string) {
@@ -43,26 +66,16 @@ export class StorageKeyViolationError extends Error {
   }
 }
 
-/**
- * Loads and validates Neon Object Storage S3 credentials and environment isolation bounds.
- * Never embeds credential values in error messages.
- */
-export function getObjectStorageConfig(
-  env: Record<string, string | undefined> = process.env
-): ObjectStorageConfig {
-  const endpointRaw = (env.AWS_ENDPOINT_URL_S3 || '').trim();
-  const region = (env.AWS_REGION || '').trim();
-  const accessKeyId = (env.AWS_ACCESS_KEY_ID || '').trim();
-  const secretAccessKey = (env.AWS_SECRET_ACCESS_KEY || '').trim();
-  const bucket = (env.OBJECT_STORAGE_BUCKET || '').trim();
-  const envPrefix = (env.OBJECT_STORAGE_ENV_PREFIX || '').trim() as StorageEnvPrefix;
+function isPlaceholderCredential(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    lower.startsWith('replace-with-') ||
+    lower.includes('br-example-id') ||
+    lower === 'example'
+  );
+}
 
-  if (!endpointRaw || !region || !accessKeyId || !secretAccessKey || !bucket || !envPrefix) {
-    throw new StorageConfigError(
-      'Object storage configuration is incomplete. Verify server environment variables.'
-    );
-  }
-
+function validateStrictHttpsEndpoint(endpointRaw: string): URL {
   let parsedEndpoint: URL;
   try {
     parsedEndpoint = new URL(endpointRaw);
@@ -74,43 +87,195 @@ export function getObjectStorageConfig(
     throw new StorageConfigError('AWS_ENDPOINT_URL_S3 must use HTTPS.');
   }
 
-  if (!ALLOWED_ENV_PREFIXES.has(envPrefix)) {
+  if (parsedEndpoint.username || parsedEndpoint.password) {
+    throw new StorageConfigError('AWS_ENDPOINT_URL_S3 must not embed credentials.');
+  }
+
+  if (
+    parsedEndpoint.port ||
+    (parsedEndpoint.pathname !== '/' && parsedEndpoint.pathname !== '') ||
+    parsedEndpoint.search ||
+    parsedEndpoint.hash
+  ) {
     throw new StorageConfigError(
-      'OBJECT_STORAGE_ENV_PREFIX must be one of development, staging, or production.'
+      'AWS_ENDPOINT_URL_S3 must be a clean origin URL without custom ports, paths, or query parameters.'
     );
   }
+
+  return parsedEndpoint;
+}
+
+function assertTargetEquality(
+  actual: {
+    endpointHost: string;
+    region: string;
+    bucket: string;
+    envPrefix: StorageEnvPrefix;
+    branchId: string;
+    branchName: string;
+  },
+  approved: ApprovedStorageTarget
+): void {
+  if (actual.branchName !== approved.branchName) {
+    throw new StorageConfigError(
+      `NEON_BRANCH "${actual.branchName}" does not match exact approved branch "${approved.branchName}".`
+    );
+  }
+  if (actual.branchId !== approved.branchId) {
+    throw new StorageConfigError(
+      `NEON_BRANCH_ID "${actual.branchId}" does not match exact approved branch ID for ${approved.envPrefix}.`
+    );
+  }
+  if (actual.endpointHost !== approved.endpointHost) {
+    throw new StorageConfigError(
+      `AWS_ENDPOINT_URL_S3 host "${actual.endpointHost}" does not match exact approved ${approved.envPrefix} storage host "${approved.endpointHost}".`
+    );
+  }
+  if (actual.region !== approved.region) {
+    throw new StorageConfigError(
+      `AWS_REGION "${actual.region}" does not match exact approved ${approved.envPrefix} region "${approved.region}".`
+    );
+  }
+  if (actual.bucket !== approved.bucket) {
+    throw new StorageConfigError(
+      `OBJECT_STORAGE_BUCKET "${actual.bucket}" does not match exact approved ${approved.envPrefix} bucket "${approved.bucket}".`
+    );
+  }
+}
+
+/**
+ * Loads and validates Neon Object Storage S3 credentials against an exact
+ * runtime allowlist for development (and fails closed for unapproved production).
+ * Never embeds credential values in error messages.
+ */
+export function getObjectStorageConfig(
+  env: Record<string, string | undefined> = process.env
+): ObjectStorageConfig {
+  const endpointRaw = (env.AWS_ENDPOINT_URL_S3 || '').trim();
+  const region = (env.AWS_REGION || '').trim();
+  const accessKeyId = (env.AWS_ACCESS_KEY_ID || '').trim();
+  const secretAccessKey = (env.AWS_SECRET_ACCESS_KEY || '').trim();
+  const bucket = (env.OBJECT_STORAGE_BUCKET || '').trim();
+  const envPrefixRaw = (env.OBJECT_STORAGE_ENV_PREFIX || '').trim();
+  const neonBranch = (env.NEON_BRANCH || '').trim();
+  const neonBranchId = (env.NEON_BRANCH_ID || '').trim();
+  const credentialBranchId = (env.OBJECT_STORAGE_CREDENTIAL_BRANCH_ID || '').trim();
+
+  if (
+    !endpointRaw ||
+    !region ||
+    !accessKeyId ||
+    !secretAccessKey ||
+    !bucket ||
+    !envPrefixRaw
+  ) {
+    throw new StorageConfigError(
+      'Object storage configuration is incomplete. Verify server environment variables.'
+    );
+  }
+
+  if (isPlaceholderCredential(accessKeyId) || isPlaceholderCredential(secretAccessKey)) {
+    throw new StorageConfigError(
+      'Object storage credentials use placeholder values and cannot be used.'
+    );
+  }
+
+  if (!ALLOWED_ENV_PREFIXES.has(envPrefixRaw as StorageEnvPrefix)) {
+    throw new StorageConfigError(
+      'OBJECT_STORAGE_ENV_PREFIX must be an approved environment prefix (development or production).'
+    );
+  }
+  const envPrefix = envPrefixRaw as StorageEnvPrefix;
+
+  if (!neonBranchId) {
+    throw new StorageConfigError(
+      'NEON_BRANCH_ID is required to verify object storage branch isolation.'
+    );
+  }
+
+  if (!neonBranch) {
+    throw new StorageConfigError(
+      'NEON_BRANCH is required to verify object storage branch isolation.'
+    );
+  }
+
+  const parsedEndpoint = validateStrictHttpsEndpoint(endpointRaw);
+  const endpointHost = parsedEndpoint.hostname.toLowerCase();
 
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) {
     throw new StorageConfigError('OBJECT_STORAGE_BUCKET has an invalid S3 bucket name.');
   }
 
-  const endpointHost = parsedEndpoint.hostname.toLowerCase();
-  const neonBranch = (env.NEON_BRANCH || '').trim().toLowerCase();
-  const neonBranchId = (env.NEON_BRANCH_ID || '').trim();
-
-  // Fail closed on cross-environment / cross-branch storage configuration mistakes
   if (envPrefix === 'development') {
-    if (neonBranch === 'production' || neonBranchId === PROD_BRANCH_ID) {
+    if (
+      KNOWN_PROD_BRANCH_NAMES.has(neonBranch.toLowerCase()) ||
+      neonBranchId === KNOWN_PROD_BRANCH_ID ||
+      endpointHost.includes(KNOWN_PROD_BRANCH_ID) ||
+      bucket.toLowerCase().includes('prod') ||
+      credentialBranchId === KNOWN_PROD_BRANCH_ID ||
+      accessKeyId.includes(KNOWN_PROD_BRANCH_ID) ||
+      secretAccessKey.includes(KNOWN_PROD_BRANCH_ID) ||
+      (env.DATABASE_URL && env.DATABASE_URL.includes(KNOWN_PROD_DB_ENDPOINT_ID))
+    ) {
       throw new StorageConfigError(
-        'Refusing development storage prefix when targeting production database branch.'
+        'Refusing development storage prefix paired with production branch, endpoint, or credentials.'
       );
     }
-    if (endpointHost.includes(PROD_BRANCH_ID) || bucket.toLowerCase().includes('prod')) {
+
+    if (
+      credentialBranchId &&
+      credentialBranchId !== APPROVED_DEV_STORAGE_TARGET.branchId
+    ) {
       throw new StorageConfigError(
-        'Refusing development storage configuration pointing at production storage endpoint or bucket.'
+        'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID does not match approved development branch ID.'
       );
     }
-  } else if (envPrefix === 'production') {
-    if (neonBranch === 'development' || neonBranchId === DEV_BRANCH_ID) {
+
+    assertTargetEquality(
+      {
+        endpointHost,
+        region,
+        bucket,
+        envPrefix,
+        branchId: neonBranchId,
+        branchName: neonBranch,
+      },
+      APPROVED_DEV_STORAGE_TARGET
+    );
+  } else {
+    // Reject obvious development contamination under production prefix first
+    if (
+      neonBranch.toLowerCase() === APPROVED_DEV_STORAGE_TARGET.branchName ||
+      neonBranchId === APPROVED_DEV_STORAGE_TARGET.branchId ||
+      endpointHost === APPROVED_DEV_STORAGE_TARGET.endpointHost ||
+      endpointHost.includes(APPROVED_DEV_STORAGE_TARGET.branchId) ||
+      bucket === APPROVED_DEV_STORAGE_TARGET.bucket ||
+      credentialBranchId === APPROVED_DEV_STORAGE_TARGET.branchId ||
+      accessKeyId.includes(APPROVED_DEV_STORAGE_TARGET.branchId) ||
+      secretAccessKey.includes(APPROVED_DEV_STORAGE_TARGET.branchId)
+    ) {
       throw new StorageConfigError(
-        'Refusing production storage prefix while attached to development branch.'
+        'Refusing production storage prefix paired with development branch, endpoint, bucket, or credentials.'
       );
     }
-    if (endpointHost.includes(DEV_BRANCH_ID)) {
+
+    if (!APPROVED_PROD_STORAGE_TARGET) {
       throw new StorageConfigError(
-        'Refusing production storage prefix pointing at development storage endpoint.'
+        'Production object storage target is not approved or configured. Failing closed.'
       );
     }
+
+    assertTargetEquality(
+      {
+        endpointHost,
+        region,
+        bucket,
+        envPrefix,
+        branchId: neonBranchId,
+        branchName: neonBranch,
+      },
+      APPROVED_PROD_STORAGE_TARGET
+    );
   }
 
   return {
@@ -120,6 +285,8 @@ export function getObjectStorageConfig(
     secretAccessKey,
     bucket,
     envPrefix,
+    branchId: neonBranchId,
+    branchName: neonBranch,
   };
 }
 
@@ -198,4 +365,3 @@ export function assertKeyMatchesMemberScope(
     throw new StorageKeyViolationError('Object storage key leaf has an invalid format.');
   }
 }
-

@@ -14,6 +14,7 @@ import {
   MemberPhotoConflictError,
   MemberPhotoNotFoundError,
 } from '@/lib/members/member-photo-service';
+import { BoundedMultipartError } from '@/lib/storage/bounded-multipart';
 import { ImageValidationError } from '@/lib/storage/image-validator';
 
 const PRIVATE_NO_STORE_HEADERS = {
@@ -84,6 +85,13 @@ export function handleMemberRouteError(
     return memberJsonResponse(
       { error: err.message, code: 'MEMBER_ARCHIVED' },
       409
+    );
+  }
+
+  if (err instanceof BoundedMultipartError) {
+    return memberJsonResponse(
+      { error: err.message, code: err.code },
+      err.status
     );
   }
 

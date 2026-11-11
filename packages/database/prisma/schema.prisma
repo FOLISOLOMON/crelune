@@ -39,6 +39,19 @@ enum NotificationType {
   SYSTEM
 }
 
+enum StorageCleanupStatus {
+  PENDING
+  COMPLETED
+  REJECTED
+}
+
+enum StorageCleanupReason {
+  POST_UPLOAD_VERIFY_FAILURE
+  DB_TRANSACTION_ROLLBACK
+  PREVIOUS_PHOTO_CLEANUP
+  MEMBER_PHOTO_REMOVED
+}
+
 // -----------------------------------------------------------------------------
 // CORE ORGANISATION & USER MANAGEMENT (Milestone 2 Web Foundation)
 // -----------------------------------------------------------------------------
@@ -57,6 +70,7 @@ model Organisation {
   birthdayReminders    BirthdayReminder[]
   notifications        Notification[]
   auditLogs            AuditLog[]
+  pendingCleanups      PendingStorageCleanup[]
 
   @@map("organisations")
 }
@@ -244,4 +258,28 @@ model AuditLog {
   @@index([organisationId, createdAt])
   @@index([organisationId, entityType, entityId])
   @@map("audit_logs")
+}
+
+// Durable retry queue for failed private object storage deletions (Stage 3.3.1).
+// Every queued key is scope-validated against environment, organisation, and member
+// bounds before enqueue and again before any storage deletion attempt.
+model PendingStorageCleanup {
+  id             String               @id @default(cuid())
+  organisationId String               @map("organisation_id")
+  memberId       String               @map("member_id")
+  storageKey     String               @unique @map("storage_key")
+  reason         StorageCleanupReason
+  status         StorageCleanupStatus @default(PENDING)
+  attemptCount   Int                  @default(0) @map("attempt_count")
+  lastError      String?              @map("last_error")
+  nextRetryAt    DateTime             @default(now()) @map("next_retry_at")
+  completedAt    DateTime?            @map("completed_at")
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  organisation   Organisation         @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@index([organisationId, status, nextRetryAt])
+  @@index([memberId])
+  @@map("pending_storage_cleanups")
 }

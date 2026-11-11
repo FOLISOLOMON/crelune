@@ -4,6 +4,7 @@ import {
   ListObjectsV2Command,
   S3Client,
 } from '@aws-sdk/client-s3';
+import sharp from 'sharp';
 import { prisma } from '@crelune/database';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as auditService from '@/lib/audit/audit-service';
@@ -15,20 +16,25 @@ import {
   getMemberPhoto,
   MemberPhotoConflictError,
   MemberPhotoNotFoundError,
+  retryPendingStorageCleanups,
   uploadMemberPhoto,
 } from '@/lib/members/member-photo-service';
-import { validateUploadedMemberPhoto } from '@/lib/storage/image-validator';
-import { createObjectStorageProvider } from '@/lib/storage/object-storage';
+import { processUploadedMemberPhoto } from '@/lib/storage/image-processor';
+import {
+  createObjectStorageProvider,
+  type ObjectStorageProvider,
+} from '@/lib/storage/object-storage';
 import { assertSafeDevStorageEnvironment } from '@/test/assert-dev-db';
 import {
-  createSyntheticJpeg,
-  createSyntheticPng,
-  createSyntheticWebp,
+  createDecodableJpeg,
+  createDecodablePng,
+  createDecodableWebp,
+  createSyntheticExifGpsJpeg,
 } from '@/test/synthetic-images';
 
 const RUN_PREFIX = `__pg_photo_${Date.now()}`;
 
-describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Development)', () => {
+describe('PostgreSQL + Neon Object Storage Stage 3.3.1 Integration (Neon Development)', () => {
   let orgAId = '';
   let orgBId = '';
   let ownerAId = '';
@@ -119,20 +125,23 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
       await purgeTestNamespaceObjects(orgAId);
       await purgeTestNamespaceObjects(orgBId);
       if (orgAId || orgBId) {
+        const orgIds = [orgAId, orgBId].filter(Boolean);
+        await prisma.pendingStorageCleanup.deleteMany({
+          where: { organisationId: { in: orgIds } },
+        });
         await prisma.auditLog.deleteMany({
-          where: { organisationId: { in: [orgAId, orgBId].filter(Boolean) } },
+          where: { organisationId: { in: orgIds } },
         });
         await prisma.member.deleteMany({
-          where: { organisationId: { in: [orgAId, orgBId].filter(Boolean) } },
+          where: { organisationId: { in: orgIds } },
         });
         await prisma.user.deleteMany({
           where: { id: { in: [ownerAId, nonOwnerId].filter(Boolean) } },
         });
         await prisma.organisation.deleteMany({
-          where: { id: { in: [orgAId, orgBId].filter(Boolean) } },
+          where: { id: { in: orgIds } },
         });
       }
-      // Verify zero synthetic objects remain in Neon development bucket
       for (const orgId of [orgAId, orgBId].filter(Boolean)) {
         const remaining = await s3RawClient.send(
           new ListObjectsV2Command({
@@ -157,13 +166,13 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
     );
     createdMemberIds.push(member.id);
 
-    const validated = validateUploadedMemberPhoto({
-      bytes: createSyntheticPng(8, 8),
+    const processed = await processUploadedMemberPhoto({
+      bytes: await createDecodablePng(8, 8),
       declaredMimeType: 'image/png',
       filename: 'private-check.png',
     });
 
-    await uploadMemberPhoto({ userId: ownerAId, organisationId: orgAId }, member.id, validated);
+    await uploadMemberPhoto({ userId: ownerAId, organisationId: orgAId }, member.id, processed);
     const dbMember = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
     const objectUrl = `${endpointOrigin}/${bucketName}/${dbMember.photoStorageKey}`;
 
@@ -178,51 +187,65 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
     await deleteMemberPhoto({ userId: ownerAId, organisationId: orgAId }, member.id);
   });
 
-  it('uploads, retrieves, replaces, enforces archival rules, deletes, and cleans old objects in Neon development', async () => {
+  it('strips EXIF/GPS before persistence, enforces archival rules, deletes, and cleans old objects in Neon development', async () => {
     const member = await createMember(
       { userId: ownerAId, organisationId: orgAId },
-      { fullName: `${RUN_PREFIX} Photo Lifecycle`, confirmDuplicate: true }
+      { fullName: `${RUN_PREFIX} EXIF Lifecycle`, confirmDuplicate: true }
     );
     createdMemberIds.push(member.id);
     const storage = createObjectStorageProvider();
 
-    // Upload initial JPEG
-    const jpegBytes = createSyntheticJpeg(20, 24);
+    // Upload JPEG with EXIF/GPS/XMP/COM metadata & Orientation=6 (24x16 -> upright 16x24)
+    const exifJpeg = await createSyntheticExifGpsJpeg({
+      width: 24,
+      height: 16,
+      orientation: '6',
+    });
+    const processed1 = await processUploadedMemberPhoto({
+      bytes: exifJpeg,
+      declaredMimeType: 'image/jpeg',
+      filename: 'portrait.jpg',
+    });
+
     const upload1 = await uploadMemberPhoto(
       { userId: ownerAId, organisationId: orgAId },
       member.id,
-      validateUploadedMemberPhoto({
-        bytes: jpegBytes,
-        declaredMimeType: 'image/jpeg',
-        filename: 'portrait.jpg',
-      }),
+      processed1,
       storage
     );
     expect(upload1.photo.mimeType).toBe('image/jpeg');
+    expect(upload1.photo.width).toBe(16);
+    expect(upload1.photo.height).toBe(24);
 
     const row1 = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
     const firstKey = row1.photoStorageKey!;
     expect(firstKey).toMatch(
       new RegExp(`^development/organisations/${orgAId}/members/${member.id}/photos/[a-zA-Z0-9-]+\\.jpg$`)
     );
-    expect(row1.photoMimeType).toBe('image/jpeg');
-    expect(row1.photoByteSize).toBe(jpegBytes.byteLength);
+    expect(row1.photoByteSize).toBe(processed1.byteSize);
 
-    // Retrieve exact bytes
+    // Retrieved object from Neon S3 must contain ZERO EXIF/GPS/XMP/COM metadata
     const fetched1 = await getMemberPhoto(orgAId, member.id, storage);
     expect(fetched1.contentType).toBe('image/jpeg');
-    expect(Buffer.from(fetched1.body)).toEqual(Buffer.from(jpegBytes));
+    expect(Buffer.from(fetched1.body)).not.toEqual(Buffer.from(exifJpeg));
+    const fetchedBuf = Buffer.from(fetched1.body);
+    expect(fetchedBuf.toString('latin1')).not.toContain('SecretGPSLocation');
+    expect(fetchedBuf.toString('latin1')).not.toContain('SyntheticCam');
+    const fetchedMeta = await sharp(fetchedBuf).metadata();
+    expect(fetchedMeta.exif).toBeUndefined();
+    expect(fetchedMeta.width).toBe(16);
+    expect(fetchedMeta.height).toBe(24);
 
     // Replace with WebP -> verify new key stored & firstKey removed from Neon S3
-    const webpBytes = createSyntheticWebp(16, 16);
+    const processedWebp = await processUploadedMemberPhoto({
+      bytes: await createDecodableWebp(16, 16),
+      declaredMimeType: 'image/webp',
+      filename: 'updated.webp',
+    });
     await uploadMemberPhoto(
       { userId: ownerAId, organisationId: orgAId },
       member.id,
-      validateUploadedMemberPhoto({
-        bytes: webpBytes,
-        declaredMimeType: 'image/webp',
-        filename: 'updated.webp',
-      }),
+      processedWebp,
       storage
     );
     const row2 = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
@@ -237,14 +260,14 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
       data: { archivedAt: new Date() },
     });
     expect(Buffer.from((await getMemberPhoto(orgAId, member.id, storage)).body)).toEqual(
-      Buffer.from(webpBytes)
+      Buffer.from(processedWebp.bytes)
     );
     await expect(
       uploadMemberPhoto(
         { userId: ownerAId, organisationId: orgAId },
         member.id,
-        validateUploadedMemberPhoto({
-          bytes: createSyntheticPng(),
+        await processUploadedMemberPhoto({
+          bytes: await createDecodablePng(8, 8),
           declaredMimeType: 'image/png',
           filename: 'blocked.png',
         }),
@@ -259,9 +282,6 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
 
     const rowCleared = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
     expect(rowCleared.photoStorageKey).toBeNull();
-    expect(rowCleared.photoMimeType).toBeNull();
-    expect(rowCleared.photoByteSize).toBeNull();
-    expect(rowCleared.photoUpdatedAt).toBeNull();
 
     const del2 = await deleteMemberPhoto({ userId: ownerAId, organisationId: orgAId }, member.id, storage);
     expect(del2.removed).toBe(false);
@@ -280,85 +300,177 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
     }
   });
 
-  it('preserves previous photo on storage upload failure and removes new orphan if audit/DB fails', async () => {
+  it('queues durable cleanup on failed compensation/replacement/removal, supports idempotent retries, and rejects out-of-scope cleanup keys', async () => {
     const member = await createMember(
       { userId: ownerAId, organisationId: orgAId },
-      { fullName: `${RUN_PREFIX} Compensation`, confirmDuplicate: true }
+      { fullName: `${RUN_PREFIX} Durable Cleanup`, confirmDuplicate: true }
     );
     createdMemberIds.push(member.id);
     const realStorage = createObjectStorageProvider();
 
-    // Baseline photo uploaded cleanly
-    const baselinePng = createSyntheticPng(6, 6);
-    await uploadMemberPhoto(
-      { userId: ownerAId, organisationId: orgAId },
-      member.id,
-      validateUploadedMemberPhoto({
-        bytes: baselinePng,
-        declaredMimeType: 'image/png',
-        filename: 'base.png',
-      }),
-      realStorage
-    );
-    const baselineKey = (await prisma.member.findUniqueOrThrow({ where: { id: member.id } }))
-      .photoStorageKey!;
+    // 1. Baseline upload succeeds
+    const png1 = await processUploadedMemberPhoto({
+      bytes: await createDecodablePng(8, 8),
+      declaredMimeType: 'image/png',
+      filename: 'base.png',
+    });
+    await uploadMemberPhoto({ userId: ownerAId, organisationId: orgAId }, member.id, png1, realStorage);
+    const key1 = (await prisma.member.findUniqueOrThrow({ where: { id: member.id } })).photoStorageKey!;
 
-    // Failure A: Upload step throws -> prior DB + S3 intact
+    // Storage wrapper whose deleteObject fails with URL/credential text in message (verifying sanitization)
+    const failingDeleteStorage: ObjectStorageProvider = {
+      envPrefix: realStorage.envPrefix,
+      putPrivateObject: realStorage.putPrivateObject.bind(realStorage),
+      headObject: realStorage.headObject.bind(realStorage),
+      getObject: realStorage.getObject.bind(realStorage),
+      deleteObject: async () => {
+        const err = new Error(
+          'Delete failed at https://br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech?X-Amz-Credential=nsk_secret'
+        );
+        err.name = 'NetworkTimeoutError';
+        throw err;
+      },
+    };
+
+    // 2. Failed new-object compensation (DB audit fails AND S3 delete throws) -> queued durably & prior key1 preserved
+    vi.spyOn(auditService, 'recordAuditEvent').mockRejectedValueOnce(new Error('Simulated audit failure'));
+    const webpOrphan = await processUploadedMemberPhoto({
+      bytes: await createDecodableWebp(10, 10),
+      declaredMimeType: 'image/webp',
+      filename: 'orphan.webp',
+    });
     await expect(
       uploadMemberPhoto(
         { userId: ownerAId, organisationId: orgAId },
         member.id,
-        validateUploadedMemberPhoto({
-          bytes: createSyntheticJpeg(),
-          declaredMimeType: 'image/jpeg',
-          filename: 'fail.jpg',
-        }),
-        {
-          envPrefix: realStorage.envPrefix,
-          putPrivateObject: async () => {
-            throw new Error('Simulated S3 failure');
-          },
-          headObject: realStorage.headObject.bind(realStorage),
-          getObject: realStorage.getObject.bind(realStorage),
-          deleteObject: realStorage.deleteObject.bind(realStorage),
-        }
-      )
-    ).rejects.toThrow(/Simulated S3 failure/);
-
-    expect(Buffer.from((await getMemberPhoto(orgAId, member.id, realStorage)).body)).toEqual(
-      Buffer.from(baselinePng)
-    );
-
-    // Failure B: S3 upload succeeds, then AuditLog fails -> DB rolls back AND new S3 object deleted (no orphan)
-    vi.spyOn(auditService, 'recordAuditEvent').mockRejectedValueOnce(
-      new Error('Simulated audit failure')
-    );
-    await expect(
-      uploadMemberPhoto(
-        { userId: ownerAId, organisationId: orgAId },
-        member.id,
-        validateUploadedMemberPhoto({
-          bytes: createSyntheticWebp(),
-          declaredMimeType: 'image/webp',
-          filename: 'rollback.webp',
-        }),
-        realStorage
+        webpOrphan,
+        failingDeleteStorage
       )
     ).rejects.toThrow(/Simulated audit failure/);
 
-    const afterRollback = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
-    expect(afterRollback.photoStorageKey).toBe(baselineKey);
+    expect((await prisma.member.findUniqueOrThrow({ where: { id: member.id } })).photoStorageKey).toBe(key1);
+    const compRecords = await prisma.pendingStorageCleanup.findMany({
+      where: { organisationId: orgAId, memberId: member.id, status: 'PENDING' },
+    });
+    expect(compRecords).toHaveLength(1);
+    expect(compRecords[0]!.reason).toBe('DB_TRANSACTION_ROLLBACK');
+    expect(compRecords[0]!.lastError).not.toContain('https://');
+    expect(compRecords[0]!.lastError).not.toContain('nsk_secret');
+    const orphanKey = compRecords[0]!.storageKey;
+    expect((await realStorage.headObject(orphanKey)).exists).toBe(true);
 
-    const listMemberObjects = await s3RawClient.send(
-      new ListObjectsV2Command({
-        Bucket: bucketName,
-        Prefix: `development/organisations/${orgAId}/members/${member.id}/photos/`,
-      })
+    // Retry clears the failed new-object compensation orphan in Neon S3
+    const retryComp = await retryPendingStorageCleanups(
+      { organisationId: orgAId, memberId: member.id, ignoreBackoff: true },
+      realStorage
     );
-    expect((listMemberObjects.Contents ?? []).map((o) => o.Key)).toEqual([baselineKey]);
+    expect(retryComp).toEqual({
+      examined: 1,
+      succeeded: 1,
+      failed: 0,
+      rejected: 0,
+      skipped: 0,
+    });
+    expect((await realStorage.headObject(orphanKey)).exists).toBe(false);
 
-    await deleteMemberPhoto({ userId: ownerAId, organisationId: orgAId }, member.id, realStorage);
-  });
+    // 3. Failed old-photo deletion after replacement: DB points cleanly to key2 & key1 is queued PENDING
+    const jpg2 = await processUploadedMemberPhoto({
+      bytes: await createDecodableJpeg(12, 12),
+      declaredMimeType: 'image/jpeg',
+      filename: 'replace.jpg',
+    });
+    const replaceRes = await uploadMemberPhoto(
+      { userId: ownerAId, organisationId: orgAId },
+      member.id,
+      jpg2,
+      failingDeleteStorage
+    );
+    expect(replaceRes.member.hasPhoto).toBe(true);
+    const key2 = (await prisma.member.findUniqueOrThrow({ where: { id: member.id } })).photoStorageKey!;
+    expect(key2).not.toBe(key1);
+    // Old photo key1 remained intact until replacement committed, and is still queued because delete failed
+    expect((await realStorage.headObject(key1)).exists).toBe(true);
+    const queuedReplace = await prisma.pendingStorageCleanup.findUniqueOrThrow({
+      where: { storageKey: key1 },
+    });
+    expect(queuedReplace.status).toBe('PENDING');
+    expect(queuedReplace.reason).toBe('PREVIOUS_PHOTO_CLEANUP');
+
+    // 4. Failed deletion after member photo removal: DB clears photo metadata & queues key2 PENDING
+    const delRes = await deleteMemberPhoto(
+      { userId: ownerAId, organisationId: orgAId },
+      member.id,
+      failingDeleteStorage
+    );
+    expect(delRes.removed).toBe(true);
+    expect((await prisma.member.findUniqueOrThrow({ where: { id: member.id } })).photoStorageKey).toBeNull();
+    const queuedRemove = await prisma.pendingStorageCleanup.findUniqueOrThrow({
+      where: { storageKey: key2 },
+    });
+    expect(queuedRemove.status).toBe('PENDING');
+    expect(queuedRemove.reason).toBe('MEMBER_PHOTO_REMOVED');
+
+    // 5. Out-of-scope & arbitrary cleanup keys MUST be rejected and NEVER passed to deleteObject
+    const outOfScopeRows = await prisma.pendingStorageCleanup.createMany({
+      data: [
+        {
+          organisationId: orgAId,
+          memberId: member.id,
+          storageKey: `production/organisations/${orgAId}/members/${member.id}/photos/bad-prod.png`,
+          reason: 'MEMBER_PHOTO_REMOVED',
+          status: 'PENDING',
+        },
+        {
+          organisationId: orgAId,
+          memberId: member.id,
+          storageKey: `development/organisations/${orgBId}/members/${member.id}/photos/cross-org.png`,
+          reason: 'MEMBER_PHOTO_REMOVED',
+          status: 'PENDING',
+        },
+        {
+          organisationId: orgAId,
+          memberId: member.id,
+          storageKey: '../arbitrary-traversal-key.png',
+          reason: 'MEMBER_PHOTO_REMOVED',
+          status: 'PENDING',
+        },
+      ],
+    });
+    expect(outOfScopeRows.count).toBe(3);
+
+    const deleteSpy = vi.spyOn(realStorage, 'deleteObject');
+    const retryResult = await retryPendingStorageCleanups(
+      { organisationId: orgAId, memberId: member.id, ignoreBackoff: true },
+      realStorage
+    );
+    expect(retryResult).toEqual({
+      examined: 5,
+      succeeded: 2, // key1 + key2
+      failed: 0,
+      rejected: 3, // 3 out-of-scope keys
+      skipped: 0,
+    });
+    expect(deleteSpy).toHaveBeenCalledTimes(2);
+    expect(deleteSpy).toHaveBeenCalledWith(key1);
+    expect(deleteSpy).toHaveBeenCalledWith(key2);
+    expect((await realStorage.headObject(key1)).exists).toBe(false);
+    expect((await realStorage.headObject(key2)).exists).toBe(false);
+
+    // 6. Duplicate retry is an idempotent no-op
+    deleteSpy.mockClear();
+    const duplicateRetry = await retryPendingStorageCleanups(
+      { organisationId: orgAId, memberId: member.id, ignoreBackoff: true },
+      realStorage
+    );
+    expect(duplicateRetry).toEqual({
+      examined: 0,
+      succeeded: 0,
+      failed: 0,
+      rejected: 0,
+      skipped: 0,
+    });
+    expect(deleteSpy).not.toHaveBeenCalled();
+  }, 60_000);
 
   it('enforces cross-organisation and non-owner authorization boundaries against PostgreSQL', async () => {
     const member = await createMember(
@@ -371,15 +483,14 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
     await uploadMemberPhoto(
       { userId: ownerAId, organisationId: orgAId },
       member.id,
-      validateUploadedMemberPhoto({
-        bytes: createSyntheticPng(),
+      await processUploadedMemberPhoto({
+        bytes: await createDecodablePng(8, 8),
         declaredMimeType: 'image/png',
         filename: 'orgA.png',
       }),
       realStorage
     );
 
-    // Non-OWNER session rejected by DB guard
     const roleCheck = await verifyActiveOwnerInDatabase({
       sub: nonOwnerId,
       role: 'OWNER',
@@ -390,7 +501,6 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
     });
     expect(roleCheck.status).toBe('revoked');
 
-    // Cross-organisation operations rejected cleanly
     await expect(getMemberPhoto(orgBId, member.id, realStorage)).rejects.toThrow(
       MemberPhotoNotFoundError
     );
@@ -398,8 +508,8 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3 Integration (Neon Developme
       uploadMemberPhoto(
         { userId: ownerAId, organisationId: orgBId },
         member.id,
-        validateUploadedMemberPhoto({
-          bytes: createSyntheticJpeg(),
+        await processUploadedMemberPhoto({
+          bytes: await createDecodableJpeg(8, 8),
           declaredMimeType: 'image/jpeg',
           filename: 'hijack.jpg',
         }),

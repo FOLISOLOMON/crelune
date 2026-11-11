@@ -125,8 +125,10 @@ Verified against `neon orgs list -o json` (`org-lucky-leaf-77881525` is on the *
 
 ## 9. Known Limitations & Production Deployment Requirements
 
-### Known Limitations
-- **Image Format Re-Encoding / EXIF Stripping**: Stage 3.3 validates and stores original verified JPEG/PNG/WebP bytes cleanly without native C++ image-processing dependencies (`sharp`), meaning camera EXIF metadata inside uploaded JPEGs is preserved rather than stripped/re-encoded. Add server-side re-encoding/EXIF stripping if future threat models require stripping GPS/device EXIF tags.
+### Known Limitations & Stage 3.3.1 Hardening
+- **Superseded in Stage 3.3.1 (`fix: harden private member photo storage`)**: Exact runtime storage allowlisting (`getObjectStorageConfig()`), pre-parse streaming body size bounds (`readBoundedMultipartFormData`), EXIF/GPS/XMP/IPTC/comment stripping & orientation-normalized re-encoding via `sharp` (`0.35.5`), and durable `PendingStorageCleanup` retries were added in Stage 3.3.1. See [`MILESTONE_3_3_1_PHOTO_STORAGE_HARDENING.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_3_3_1_PHOTO_STORAGE_HARDENING.md).
+- **Hosting Request-Size Limits**: Next.js App Router route handlers rely on Node stream bounding (`10 MiB + 256 KiB`) rather than Pages Router `bodyParser` config; managed serverless hosts with lower platform body limits (e.g., Vercel's `4.5 MB` payload cap) or reverse proxies must align ingress limits accordingly.
+- **Native Runtime Requirement (`sharp`)**: `sharp >= 0.35.x` requires `Node >= 20.9.0` and target OS/architecture prebuilt `libvips` binaries (`serverExternalPackages: ['sharp']` configured in `next.config.mjs`).
 - **Streaming Cache Budget**: `GET /api/members/[id]/photo` intentionally enforces `Cache-Control: private, no-store` to maximize privacy revocation speed; this increases Neon Object Storage egress compared to browser private caching (`max-age`), which is acceptable for single-owner directory traffic but should be monitored against the `5 GB/month` Free plan transfer cap.
 - **No Database-Level Audit Triggers**: Audit immutability remains enforced in `audit-service.ts` rather than PostgreSQL row triggers.
 

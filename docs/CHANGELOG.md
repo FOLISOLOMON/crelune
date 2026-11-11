@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.8] - 2026-11-11
+
+### Milestone 3, Stage 3.3.1: Photo Storage Security & Reliability Hardening
+- Enforced exact runtime storage allowlisting in [`storage-config.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts) (`br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech`, `us-east-2`, `crelune-dev-member-photos`, `development`, `NEON_BRANCH`, `NEON_BRANCH_ID`) and unconditional fail-closed gating on unapproved production configs.
+- Added bounded streaming multipart reader [`bounded-multipart.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/bounded-multipart.ts) enforcing a pre-parse `10 MiB + 256 KiB` ceiling directly on `request.body` streams so missing or falsely small `Content-Length` headers still abort with HTTP `413` before buffering.
+- Added `sharp` (`0.35.5`) decoding, EXIF orientation baking, EXIF/GPS/XMP/IPTC/comment stripping, transparency-preserving canonical re-encoding, and post-encode re-validation in [`image-processor.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/image-processor.ts), enforcing `ProcessedMemberPhoto` in [`member-photo-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-photo-service.ts).
+- Added durable `PendingStorageCleanup` schema/retry mechanism in [`schema.prisma`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma) and [`retryPendingStorageCleanups`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-photo-service.ts) with idempotent completion, sanitized error tracking, active-photo protection, and strict environment/organisation/member key scope rejection (`REJECTED`).
+
+---
+
 ## [0.3.7] - 2026-11-11
 
 ### Milestone 3, Stage 3.3: Private Member Photo Storage

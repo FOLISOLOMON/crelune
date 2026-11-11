@@ -18,6 +18,12 @@ import {
   type MemberPhotoMimeType,
 } from '@crelune/shared';
 
+export interface UploadValidationInput {
+  bytes: Uint8Array;
+  declaredMimeType?: string;
+  filename?: string;
+}
+
 export interface ValidatedMemberPhoto {
   bytes: Uint8Array;
   mimeType: MemberPhotoMimeType;
@@ -394,7 +400,8 @@ function parseAndVerifyJpeg(bytes: Uint8Array): { width: number; height: number 
 
     if (marker === 0xda) {
       sawSos = true;
-      // Scan entropy-coded bitstream until terminating EOI marker (FF D9)
+      // Scan entropy-coded bitstream until terminating EOI marker (FF D9) or next scan marker (progressive JPEG)
+      let hitNextMarker = false;
       while (offset < buf.length - 1) {
         if (buf[offset] === 0xff) {
           const next = buf[offset + 1]!;
@@ -411,13 +418,21 @@ function parseAndVerifyJpeg(bytes: Uint8Array): { width: number; height: number 
             offset += 2;
             continue;
           }
+          // Non-stuffing, non-RST marker (e.g. DHT/SOS in progressive JPEG): resume outer marker parser
+          hitNextMarker = true;
+          break;
         }
         offset += 1;
       }
-      if (!sawEoi || offset !== buf.length) {
+      if (sawEoi) {
+        if (offset !== buf.length) {
+          throw new ImageValidationError('Unexpected trailing bytes after JPEG EOI.');
+        }
+        break;
+      }
+      if (!hitNextMarker) {
         throw new ImageValidationError('Truncated or malformed JPEG image stream.');
       }
-      break;
     }
   }
 
@@ -538,11 +553,9 @@ function detectMimeFromMagicBytes(bytes: Uint8Array): MemberPhotoMimeType | null
 /**
  * Validates an untrusted binary upload as JPEG, PNG, or WebP and extracts safe dimensions.
  */
-export function validateUploadedMemberPhoto(input: {
-  bytes: Uint8Array;
-  declaredMimeType?: string;
-  filename?: string;
-}): ValidatedMemberPhoto {
+export function validateUploadedMemberPhoto(
+  input: UploadValidationInput
+): ValidatedMemberPhoto {
   const { bytes, declaredMimeType, filename } = input;
 
   if (bytes.byteLength < MIN_MEMBER_PHOTO_BYTES) {

@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import sharp from 'sharp';
 import { MAX_MEMBER_PHOTO_BYTES } from '@crelune/shared';
 import type { OwnerAuthState } from '@/lib/auth/owner-guard';
 import type { ObjectStorageProvider } from '@/lib/storage/object-storage';
 import {
-  createSyntheticJpeg,
+  createDecodablePng,
+  createDecodableWebp,
+  createSyntheticExifGpsJpeg,
   createSyntheticPng,
-  createSyntheticWebp,
 } from '@/test/synthetic-images';
 
 const mockState = vi.hoisted(() => ({
@@ -37,6 +39,7 @@ const mockState = vi.hoisted(() => ({
   >(),
   objects: new Map<string, { body: Uint8Array; contentType: string }>(),
   auditLogs: [] as Array<Record<string, unknown>>,
+  pendingCleanups: new Map<string, Record<string, unknown>>(),
   forceStorageErrorMessage: null as string | null,
   forceDbFailure: false,
 }));
@@ -94,6 +97,7 @@ vi.mock('@crelune/database', () => {
         for (const m of mockState.members.values()) {
           if (where.id && m.id !== where.id) continue;
           if (where.organisationId && m.organisationId !== where.organisationId) continue;
+          if (where.photoStorageKey && m.photoStorageKey !== where.photoStorageKey) continue;
           return { ...m };
         }
         return null;
@@ -120,16 +124,38 @@ vi.mock('@crelune/database', () => {
         return entry;
       }),
     },
+    pendingStorageCleanup: {
+      upsert: vi.fn(
+        async ({
+          where,
+          create,
+          update,
+        }: {
+          where: { storageKey: string };
+          create: Record<string, unknown>;
+          update: Record<string, unknown>;
+        }) => {
+          const existing = mockState.pendingCleanups.get(where.storageKey);
+          const next = existing ? { ...existing, ...update } : { id: `cln_${mockState.pendingCleanups.size + 1}`, ...create };
+          mockState.pendingCleanups.set(where.storageKey, next);
+          return next;
+        }
+      ),
+      findMany: vi.fn(async () => Array.from(mockState.pendingCleanups.values())),
+      updateMany: vi.fn(async () => ({ count: 1 })),
+    },
   };
 
   return {
     prisma: {
       member: txClient.member,
+      pendingStorageCleanup: txClient.pendingStorageCleanup,
       $transaction: vi.fn(async (cb: (tx: typeof txClient) => Promise<unknown>) => cb(txClient)),
     },
   };
 });
 
+import { MAX_MULTIPART_CONTENT_LENGTH } from '@/lib/storage/bounded-multipart';
 import { DELETE, GET, POST } from './route';
 
 function ownerAuth(organisationId: string = 'org_owner'): OwnerAuthState {
@@ -188,7 +214,7 @@ function buildUploadRequest(params: {
   if (params.origin !== null) {
     headers.set('origin', params.origin ?? 'http://localhost:3000');
   }
-  if (params.declaredContentLength) {
+  if (params.declaredContentLength !== undefined) {
     headers.set('content-length', params.declaredContentLength);
   }
   return new Request(params.url ?? 'http://localhost:3000/api/members/mem_1/photo', {
@@ -198,6 +224,68 @@ function buildUploadRequest(params: {
   });
 }
 
+function buildStreamingMultipartRequest(params: {
+  totalBytesToEmit: number;
+  declaredContentLength?: string | null;
+  chunkSize?: number;
+}): { request: Request; getBytesReadFromStream: () => number; wasCancelled: () => boolean } {
+  const boundary = '----creluneStreamBoundary12345';
+  const chunkSize = params.chunkSize ?? 512 * 1024;
+  let emitted = 0;
+  let cancelled = false;
+
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        const preamble = Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="huge.png"\r\nContent-Type: image/png\r\n\r\n`,
+          'utf8'
+        );
+        emitted += preamble.byteLength;
+        controller.enqueue(preamble);
+      },
+      pull(controller) {
+        if (emitted >= params.totalBytesToEmit) {
+          const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+          emitted += epilogue.byteLength;
+          controller.enqueue(epilogue);
+          controller.close();
+          return;
+        }
+        const nextSize = Math.min(chunkSize, params.totalBytesToEmit - emitted);
+        emitted += nextSize;
+        controller.enqueue(new Uint8Array(nextSize));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    new CountQueuingStrategy({ highWaterMark: 0 })
+  );
+
+  const headers = new Headers({
+    host: 'localhost:3000',
+    origin: 'http://localhost:3000',
+    'content-type': `multipart/form-data; boundary=${boundary}`,
+  });
+  if (params.declaredContentLength) {
+    headers.set('content-length', params.declaredContentLength);
+  }
+
+  const request = new Request('http://localhost:3000/api/members/mem_1/photo', {
+    method: 'POST',
+    headers,
+    body: stream,
+    duplex: 'half',
+  } as RequestInit);
+
+  return {
+    request,
+    getBytesReadFromStream: () => emitted,
+    wasCancelled: () => cancelled,
+  };
+}
+
 describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
   beforeEach(() => {
     mockState.authResult = ownerAuth('org_owner');
@@ -205,6 +293,7 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     mockState.members.clear();
     mockState.objects.clear();
     mockState.auditLogs.length = 0;
+    mockState.pendingCleanups.clear();
     mockState.forceStorageErrorMessage = null;
     mockState.forceDbFailure = false;
 
@@ -261,7 +350,6 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
   it('rejects unauthenticated, revoked, CSRF-failing, and cross-organisation requests', async () => {
     const routeCtx = { params: Promise.resolve({ id: 'mem_1' }) };
 
-    // Unauthenticated GET/POST/DELETE -> 401
     mockState.authResult = { status: 'unauthenticated', owner: null };
     expect(
       (await GET(new Request('http://localhost:3000/api/members/mem_1/photo'), routeCtx)).status
@@ -281,7 +369,6 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
       ).status
     ).toBe(401);
 
-    // Revoked session clears cookie and returns 401
     mockState.authResult = { status: 'revoked', owner: null };
     const revokedRes = await GET(
       new Request('http://localhost:3000/api/members/mem_1/photo'),
@@ -290,23 +377,27 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     expect(revokedRes.status).toBe(401);
     expect(mockState.clearCookieCalls).toBe(1);
 
-    // Authenticated owner without/wrong Origin -> 403 CSRF
     mockState.authResult = ownerAuth('org_owner');
-    const missingOriginPost = await POST(
-      buildUploadRequest({ origin: null, bytes: createSyntheticPng() }),
-      routeCtx
-    );
-    expect(missingOriginPost.status).toBe(403);
-    const evilOriginDelete = await DELETE(
-      new Request('http://localhost:3000/api/members/mem_1/photo', {
-        method: 'DELETE',
-        headers: { host: 'localhost:3000', origin: 'https://evil.example.com' },
-      }),
-      routeCtx
-    );
-    expect(evilOriginDelete.status).toBe(403);
+    expect(
+      (
+        await POST(
+          buildUploadRequest({ origin: null, bytes: createSyntheticPng() }),
+          routeCtx
+        )
+      ).status
+    ).toBe(403);
+    expect(
+      (
+        await DELETE(
+          new Request('http://localhost:3000/api/members/mem_1/photo', {
+            method: 'DELETE',
+            headers: { host: 'localhost:3000', origin: 'https://evil.example.com' },
+          }),
+          routeCtx
+        )
+      ).status
+    ).toBe(403);
 
-    // Cross-organisation member -> 404 on GET, POST, DELETE
     const otherCtx = { params: Promise.resolve({ id: 'mem_other_org' }) };
     expect(
       (
@@ -340,13 +431,103 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     ).toBe(404);
   });
 
-  it('rejects client-supplied object keys, SVG/spoofed uploads, oversized payloads, and leaks zero internal secrets', async () => {
+  it('enforces pre-parse request-body limits even when Content-Length is missing or falsely small, and rejects malformed multipart', async () => {
     const routeCtx = { params: Promise.resolve({ id: 'mem_1' }) };
 
-    // Arbitrary storage key / bucket fields rejected cleanly
+    // 1. Missing Content-Length on normal valid upload succeeds cleanly
+    const validPng = await createDecodablePng(10, 10);
+    const validBoundary = '----creluneValidBoundary';
+    const validPayload = Buffer.concat([
+      Buffer.from(
+        `--${validBoundary}\r\nContent-Disposition: form-data; name="file"; filename="ok.png"\r\nContent-Type: image/png\r\n\r\n`,
+        'utf8'
+      ),
+      Buffer.from(validPng),
+      Buffer.from(`\r\n--${validBoundary}--\r\n`, 'utf8'),
+    ]);
+    const noContentLenReq = new Request('http://localhost:3000/api/members/mem_1/photo', {
+      method: 'POST',
+      headers: {
+        host: 'localhost:3000',
+        origin: 'http://localhost:3000',
+        'content-type': `multipart/form-data; boundary=${validBoundary}`,
+      },
+      body: new ReadableStream({
+        start(c) {
+          c.enqueue(validPayload);
+          c.close();
+        },
+      }),
+      duplex: 'half',
+    } as RequestInit);
+    expect((await POST(noContentLenReq, routeCtx)).status).toBe(200);
+
+    // 2. Missing Content-Length on huge stream (> 10.25 MB) cancels stream mid-flight with 413
+    const hugeNoHeader = buildStreamingMultipartRequest({
+      totalBytesToEmit: 32 * 1024 * 1024,
+      declaredContentLength: null,
+      chunkSize: 512 * 1024,
+    });
+    const hugeNoHeaderRes = await POST(hugeNoHeader.request, routeCtx);
+    expect(hugeNoHeaderRes.status).toBe(413);
+    expect(hugeNoHeader.wasCancelled()).toBe(true);
+    expect(hugeNoHeader.getBytesReadFromStream()).toBeLessThanOrEqual(
+      MAX_MULTIPART_CONTENT_LENGTH + 512 * 1024
+    );
+
+    // 3. Falsely small Content-Length (128 bytes) on 20 MB stream STILL aborts at limit with 413
+    const spoofedSmallHeader = buildStreamingMultipartRequest({
+      totalBytesToEmit: 20 * 1024 * 1024,
+      declaredContentLength: '128',
+      chunkSize: 512 * 1024,
+    });
+    const spoofedRes = await POST(spoofedSmallHeader.request, routeCtx);
+    expect(spoofedRes.status).toBe(413);
+    expect(spoofedSmallHeader.wasCancelled()).toBe(true);
+    expect(spoofedSmallHeader.getBytesReadFromStream()).toBeLessThanOrEqual(
+      MAX_MULTIPART_CONTENT_LENGTH + 512 * 1024
+    );
+
+    // 4. Body within MAX_MULTIPART_CONTENT_LENGTH but inner Blob > 10 MB still rejected with 413
+    const overImageCap = new Uint8Array(MAX_MEMBER_PHOTO_BYTES + 64);
+    const overImageRes = await POST(
+      buildUploadRequest({
+        bytes: overImageCap,
+      }),
+      routeCtx
+    );
+    expect(overImageRes.status).toBe(413);
+
+    // 5. Body above MAX_MULTIPART_CONTENT_LENGTH with large Content-Length rejected before read
+    const declaredHugeRes = await POST(
+      buildUploadRequest({
+        bytes: validPng,
+        declaredContentLength: String(MAX_MEMBER_PHOTO_BYTES + 1024 * 1024),
+      }),
+      routeCtx
+    );
+    expect(declaredHugeRes.status).toBe(413);
+
+    // 6. Malformed multipart boundary / truncated multipart body -> 400
+    const malformedReq = new Request('http://localhost:3000/api/members/mem_1/photo', {
+      method: 'POST',
+      headers: {
+        host: 'localhost:3000',
+        origin: 'http://localhost:3000',
+        'content-type': 'multipart/form-data; boundary=----badBoundary',
+      },
+      body: 'not-even-a-valid-multipart-frame',
+    });
+    expect((await POST(malformedReq, routeCtx)).status).toBe(400);
+  });
+
+  it('rejects client-supplied object keys, SVG/spoofed uploads, and leaks zero internal secrets', async () => {
+    const routeCtx = { params: Promise.resolve({ id: 'mem_1' }) };
+    const pngBytes = await createDecodablePng(8, 8);
+
     const arbitraryKeyRes = await POST(
       buildUploadRequest({
-        bytes: createSyntheticPng(),
+        bytes: pngBytes,
         extraFields: { storageKey: 'production/organisations/hack/evil.png' },
       }),
       routeCtx
@@ -355,14 +536,13 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
 
     const arbitraryBucketRes = await POST(
       buildUploadRequest({
-        bytes: createSyntheticPng(),
+        bytes: pngBytes,
         extraFields: { bucket: 'other-bucket' },
       }),
       routeCtx
     );
     expect(arbitraryBucketRes.status).toBe(400);
 
-    // SVG upload disguised as JPEG -> 400
     const svgRes = await POST(
       buildUploadRequest({
         bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
@@ -373,22 +553,11 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     );
     expect(svgRes.status).toBe(400);
 
-    // Oversized Content-Length -> 413
-    const hugeRes = await POST(
-      buildUploadRequest({
-        bytes: createSyntheticPng(),
-        declaredContentLength: String(MAX_MEMBER_PHOTO_BYTES + 1024 * 1024),
-      }),
-      routeCtx
-    );
-    expect(hugeRes.status).toBe(413);
-
-    // Storage error containing fake AWS/secret string -> sanitized 500
     mockState.forceStorageErrorMessage =
       'S3 Error against https://br-withered-moon.storage.neon.tech using AWS_SECRET_ACCESS_KEY=nsk_live_secret';
     const failRes = await POST(
       buildUploadRequest({
-        bytes: createSyntheticPng(),
+        bytes: pngBytes,
       }),
       routeCtx
     );
@@ -398,14 +567,18 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     expect(failText).not.toContain('br-withered-moon');
   });
 
-  it('executes full upload, private streaming retrieval with security headers, replacement, archived policy, and idempotent removal', async () => {
+  it('strips EXIF/GPS, stores re-encoded bytes, streams private photo, enforces archival policy, and removes idempotently', async () => {
     const routeCtx = { params: Promise.resolve({ id: 'mem_1' }) };
-    const jpegBytes = createSyntheticJpeg(16, 12);
+    const exifJpeg = await createSyntheticExifGpsJpeg({
+      width: 24,
+      height: 16,
+      orientation: '6',
+    });
 
-    // 1. Initial upload
+    // 1. Upload EXIF+GPS rotated JPEG
     const uploadRes = await POST(
       buildUploadRequest({
-        bytes: jpegBytes,
+        bytes: exifJpeg,
         mimeType: 'image/jpeg',
         filename: 'original-camera-name.jpg',
       }),
@@ -414,23 +587,24 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     expect(uploadRes.status).toBe(200);
     const uploadJson = await uploadRes.json();
     expect(uploadJson.member.hasPhoto).toBe(true);
+    // Upright rotated dimensions: 16x24
     expect(uploadJson.photo).toMatchObject({
       url: '/api/members/mem_1/photo',
       mimeType: 'image/jpeg',
       width: 16,
-      height: 12,
+      height: 24,
     });
-    // Raw object storage key or filename must never leak in API JSON
     const uploadText = JSON.stringify(uploadJson);
     expect(uploadText).not.toContain('original-camera-name');
     expect(uploadText).not.toContain('development/organisations');
 
     const storedAfterUpload = mockState.members.get('mem_1')!;
-    expect(storedAfterUpload.photoStorageKey).toMatch(
+    const firstKey = storedAfterUpload.photoStorageKey!;
+    expect(firstKey).toMatch(
       /^development\/organisations\/org_owner\/members\/mem_1\/photos\/[a-zA-Z0-9-]+\.jpg$/
     );
 
-    // 2. Private retrieval streams exact bytes + strict security headers
+    // 2. Private retrieval streams re-encoded bytes with ZERO EXIF/GPS/XMP/COM metadata
     const getRes = await GET(
       new Request('http://localhost:3000/api/members/mem_1/photo'),
       routeCtx
@@ -440,11 +614,18 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     expect(getRes.headers.get('cache-control')).toBe('private, no-store');
     expect(getRes.headers.get('x-content-type-options')).toBe('nosniff');
     expect(getRes.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive');
-    expect(Buffer.from(await getRes.arrayBuffer())).toEqual(Buffer.from(jpegBytes));
+
+    const streamedBuf = Buffer.from(await getRes.arrayBuffer());
+    expect(streamedBuf).not.toEqual(Buffer.from(exifJpeg));
+    expect(streamedBuf.toString('latin1')).not.toContain('SecretGPSLocation');
+    expect(streamedBuf.toString('latin1')).not.toContain('SyntheticCam');
+    const streamedMeta = await sharp(streamedBuf).metadata();
+    expect(streamedMeta.exif).toBeUndefined();
+    expect(streamedMeta.width).toBe(16);
+    expect(streamedMeta.height).toBe(24);
 
     // 3. Replacement with WebP removes previous JPEG object
-    const oldKey = storedAfterUpload.photoStorageKey!;
-    const webpBytes = createSyntheticWebp(20, 20);
+    const webpBytes = await createDecodableWebp(20, 20);
     const replaceRes = await POST(
       buildUploadRequest({
         bytes: webpBytes,
@@ -455,8 +636,8 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     );
     expect(replaceRes.status).toBe(200);
     const newKey = mockState.members.get('mem_1')!.photoStorageKey!;
-    expect(newKey).not.toBe(oldKey);
-    expect(mockState.objects.has(oldKey)).toBe(false);
+    expect(newKey).not.toBe(firstKey);
+    expect(mockState.objects.has(oldKey(firstKey))).toBe(false);
     expect(mockState.objects.has(newKey)).toBe(true);
 
     // 4. Archived member policy: GET & DELETE permitted, POST rejected (409)
@@ -467,7 +648,10 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     expect(
       (
         await POST(
-          buildUploadRequest({ bytes: createSyntheticPng(), filename: 'archived.png' }),
+          buildUploadRequest({
+            bytes: await createDecodablePng(),
+            filename: 'archived.png',
+          }),
           routeCtx
         )
       ).status
@@ -496,3 +680,7 @@ describe('Member Photo API Routes (/api/members/[id]/photo)', () => {
     expect((await delAgainRes.json()).removed).toBe(false);
   });
 });
+
+function oldKey(k: string): string {
+  return k;
+}
