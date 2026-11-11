@@ -73,7 +73,8 @@ export async function middleware(request: NextRequest) {
   const isPublicRoute =
     pathname === '/login' ||
     (pathname === '/api/auth/login' && request.method === 'POST') ||
-    (pathname === '/api/auth/logout' && request.method === 'POST');
+    (pathname === '/api/auth/logout' && request.method === 'POST') ||
+    (pathname === '/api/cron/birthday-reminders' && request.method === 'POST');
 
   // 6. If already authenticated with valid token signature and accessing login, redirect to dashboard
   if (pathname === '/login') {

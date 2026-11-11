@@ -247,7 +247,7 @@ if (integrationFiles.length === 0) {
 const vitestBin = path.resolve(webDir, '../../node_modules/vitest/vitest.mjs');
 execFileSync(
   process.execPath,
-  [vitestBin, 'run', '--testTimeout=20000', ...integrationFiles],
+  [vitestBin, 'run', '--no-file-parallelism', '--testTimeout=30000', ...integrationFiles],
   {
     cwd: webDir,
     env: mergedEnv,

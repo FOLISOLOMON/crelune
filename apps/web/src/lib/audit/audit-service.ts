@@ -17,6 +17,9 @@ export const AUDIT_ACTIONS = {
   MEMBER_PHOTO_UPLOADED: 'MEMBER_PHOTO_UPLOADED',
   MEMBER_PHOTO_REPLACED: 'MEMBER_PHOTO_REPLACED',
   MEMBER_PHOTO_REMOVED: 'MEMBER_PHOTO_REMOVED',
+  BIRTHDAY_PREFERENCES_UPDATED: 'BIRTHDAY_PREFERENCES_UPDATED',
+  BIRTHDAY_REMINDER_FAILED: 'BIRTHDAY_REMINDER_FAILED',
+  NOTIFICATION_READ_ALL: 'NOTIFICATION_READ_ALL',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
@@ -55,9 +58,9 @@ const MAX_ARRAY_ITEMS = 25;
 
 export interface RecordAuditEventInput {
   organisationId: string;
-  actorUserId: string;
+  actorUserId?: string | null;
   action: AuditAction;
-  entityType: 'Member';
+  entityType: 'Member' | 'BirthdayReminder' | 'Notification' | 'UserPreference';
   entityId: string;
   metadata?: Record<string, unknown> | null;
 }
@@ -157,8 +160,8 @@ export async function recordAuditEvent(
   tx: Prisma.TransactionClient,
   input: RecordAuditEventInput
 ) {
-  if (!input.organisationId || !input.actorUserId || !input.action || !input.entityId) {
-    throw new Error('AuditLog requires valid organisationId, actorUserId, action, and entityId.');
+  if (!input.organisationId || !input.action || !input.entityId) {
+    throw new Error('AuditLog requires valid organisationId, action, and entityId.');
   }
 
   const cleanMetadata = sanitizeAuditMetadata(input.metadata);
@@ -166,7 +169,7 @@ export async function recordAuditEvent(
   return tx.auditLog.create({
     data: {
       organisationId: input.organisationId,
-      actorUserId: input.actorUserId,
+      actorUserId: input.actorUserId ?? null,
       action: input.action,
       entityType: input.entityType,
       entityId: input.entityId,

@@ -124,6 +124,28 @@ describe('Middleware Route Protection & Edge Security (Milestone 2.1 & 2.1.1)', 
       const res = await middleware(req);
       expect(res.status).toBe(401);
     });
+
+    it('passes POST /api/cron/birthday-reminders through to route CRON_SECRET verification while rejecting GET without session', async () => {
+      const cronPost = await middleware(
+        createMockRequest('/api/cron/birthday-reminders', { method: 'POST' })
+      );
+      expect(cronPost.status).toBe(200);
+
+      const cronGet = await middleware(
+        createMockRequest('/api/cron/birthday-reminders', { method: 'GET' })
+      );
+      expect(cronGet.status).toBe(401);
+
+      const syncPost = await middleware(
+        createMockRequest('/api/birthdays/sync', { method: 'POST' })
+      );
+      expect(syncPost.status).toBe(401);
+
+      const notifGet = await middleware(
+        createMockRequest('/api/notifications', { method: 'GET' })
+      );
+      expect(notifGet.status).toBe(401);
+    });
   });
 
   describe('Protected Pages Redirection', () => {

@@ -14,10 +14,12 @@ import {
   getTodayCivilDate,
   isLeapYear,
   isValidCalendarDay,
+  isValidIanaTimeZone,
   parseCivilDateIso,
   resolveCelebrationDateForYear,
   utcDateOnlyToCivilDate,
   validateBirthdayTuple,
+  validateReminderLeadDays,
 } from './birthday-date.js';
 
 describe('Birthday Date Core — Gregorian Calendar & Leap-Year Rules', () => {
@@ -305,5 +307,32 @@ describe('Birthday Date Core — Reminder Schedules & Date-Only Timezone Boundar
     expect(buildBirthdayReminderIdempotencyKey('mem_123', 2027, 7)).toBe(
       'bday:mem_123:2027:7'
     );
+  });
+
+  it('validates canonical IANA timezones and reminder lead-day intervals strictly', () => {
+    expect(isValidIanaTimeZone('Africa/Accra')).toBe(true);
+    expect(isValidIanaTimeZone('America/New_York')).toBe(true);
+    expect(isValidIanaTimeZone('UTC')).toBe(true);
+    expect(isValidIanaTimeZone('Etc/UTC')).toBe(true);
+
+    expect(isValidIanaTimeZone('')).toBe(false);
+    expect(isValidIanaTimeZone(' Africa/Accra ')).toBe(false);
+    expect(isValidIanaTimeZone('Invalid/Zone')).toBe(false);
+    expect(isValidIanaTimeZone('EST')).toBe(false);
+    expect(isValidIanaTimeZone('GMT+1')).toBe(false);
+
+    expect(validateReminderLeadDays([7, 3, 1, 0])).toEqual({
+      valid: true,
+      leadDays: [7, 3, 1, 0],
+    });
+    expect(validateReminderLeadDays([])).toEqual({
+      valid: true,
+      leadDays: [],
+    });
+    expect(validateReminderLeadDays([-1]).valid).toBe(false);
+    expect(validateReminderLeadDays([366]).valid).toBe(false);
+    expect(validateReminderLeadDays([1.5]).valid).toBe(false);
+    expect(validateReminderLeadDays([7, 7]).valid).toBe(false);
+    expect(validateReminderLeadDays('invalid').valid).toBe(false);
   });
 });

@@ -12,8 +12,76 @@ export const SUPPORTED_LEAP_DAY_POLICIES = ['FEB_28', 'MAR_1'] as const;
 export const DEFAULT_REMINDER_LEAD_DAYS = [7, 3, 1, 0] as const;
 
 export const MIN_BIRTH_YEAR = 1900;
+export const MAX_REMINDER_LEAD_DAY = 365;
+export const MAX_REMINDER_INTERVAL_COUNT = 16;
 
 export type LeapDayPolicy = (typeof SUPPORTED_LEAP_DAY_POLICIES)[number];
+
+export type LeadDaysValidationResult =
+  | { valid: true; leadDays: number[] }
+  | { valid: false; reason: string };
+
+/**
+ * Validates an IANA timezone identifier without silently falling back to a default.
+ * Requires canonical zone syntax (`Region/Locality`, `UTC`, or `Etc/UTC`) recognized by `Intl.DateTimeFormat`.
+ */
+export function isValidIanaTimeZone(timezone: string): boolean {
+  if (typeof timezone !== 'string') return false;
+  if (timezone.length === 0 || timezone.trim() !== timezone || /\s/.test(timezone)) {
+    return false;
+  }
+  if (timezone !== 'UTC' && timezone !== 'Etc/UTC' && !timezone.includes('/')) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates configured reminder lead-day intervals (`0..365`, unique integers, bounded count).
+ */
+export function validateReminderLeadDays(
+  leadDaysList: unknown
+): LeadDaysValidationResult {
+  if (!Array.isArray(leadDaysList)) {
+    return {
+      valid: false,
+      reason: 'birthdayReminderDays must be an array of reminder lead days.',
+    };
+  }
+  if (leadDaysList.length > MAX_REMINDER_INTERVAL_COUNT) {
+    return {
+      valid: false,
+      reason: `birthdayReminderDays must not exceed ${MAX_REMINDER_INTERVAL_COUNT} intervals.`,
+    };
+  }
+
+  const seen = new Set<number>();
+  for (const item of leadDaysList) {
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < 0 || item > MAX_REMINDER_LEAD_DAY) {
+      return {
+        valid: false,
+        reason: `Invalid reminder lead day "${String(item)}": expected integer between 0 and ${MAX_REMINDER_LEAD_DAY}.`,
+      };
+    }
+    if (seen.has(item)) {
+      return {
+        valid: false,
+        reason: `Duplicate reminder lead day "${item}" in configuration.`,
+      };
+    }
+    seen.add(item);
+  }
+
+  return {
+    valid: true,
+    leadDays: Array.from(seen).sort((a, b) => b - a),
+  };
+}
 
 export interface CivilDate {
   year: number;
