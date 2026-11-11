@@ -261,3 +261,20 @@ Verified for Milestone 3 Preparation:
    - Real PostgreSQL integration suite verified against `development`: `5` tests passed (`0` failures, `0` skipped), leaving `auth_throttles` at `0` rows.
 3. **Unit & Helper Test Suite (`cmd /c npm test`)**:
    - Added [`apps/web/src/test/assert-dev-db.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.test.ts) (`5` tests) covering valid `development` targets, missing `DATABASE_URL`, missing/mismatched `NEON_BRANCH`, and explicit production endpoint rejection.
+
+---
+
+## 10. Milestone 3, Stage 3.2 Testing Evidence (Member Directory API, Duplicate Detection & Audit Logging)
+
+Verified for Stage 3.2 against local workspaces and Neon `development` (`br-nameless-silence-bexjp44k`, endpoint `ep-muddy-math-ben8e8p7`):
+1. **Unit & Route Suites (`cmd /c npm test`)**:
+   - `@crelune/web`: `10` test files, `109` tests passing (`audit-service.test.ts` `3`, `member-service.test.ts` `2`, `members-routes.test.ts` `5`, plus existing auth, session, middleware, password, and DB guard suites).
+   - `@crelune/shared`: `4` test files, `33` tests passing (`member.test.ts` `4`, `birthday-date.test.ts` `13`, `member.test.ts` domain `2`, `schemas.test.ts` `14`).
+   - `@crelune/ui`: `1` test file, `3` tests passing.
+   - **Total**: `145` passed, `0` failed, `0` skipped (`PASS`).
+2. **TypeScript & Production Build (`cmd /c npm run type-check`, `cmd /c npm run build`)**:
+   - Zero TypeScript errors across all `4` workspaces and clean Next.js 15.5.29 + workspace `tsc -b` builds (`PASS`).
+3. **Neon `development` PostgreSQL Integration (`cmd /c npm run test:integration:db`)**:
+   - Guard verified `development` (`br-nameless-silence-bexjp44k`), pooled `ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech`, direct `ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech`, `/neondb`.
+   - `3` test files, `13` tests passed (`0` failed, `0` skipped), including `5` Stage 3.2 tests in [`member-directory.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/member-directory.pg.integration.test.ts) verifying atomic CRUD + audit rollback, pagination/search/filtering and `notes` omission on lists, cross-organisation isolation and non-`OWNER` revocation (`401`), exact normalized name/phone/archived duplicate detection (`409` + `confirmDuplicate`), and concurrent advisory-lock duplicate race prevention.
+   - Post-test row counts verified clean (`members: 0`, `auditLogs: 0`, `authThrottles: 0`) and `production` `written_data_bytes: 0`.

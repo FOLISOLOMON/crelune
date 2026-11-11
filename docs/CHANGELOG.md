@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.6] - 2026-11-11
+
+### Milestone 3, Stage 3.2: Member Directory API, Duplicate Detection & Audit Logging
+
+#### Shared Contracts & Backend (`@crelune/shared`, `@crelune/web`)
+- **Member Validation Schemas & DTOs**: Added strict Zod contracts and DTO types in [`packages/shared/src/schemas/member.ts`](file:///d:/Projects/Crelune/packages/shared/src/schemas/member.ts) (`createMemberSchema`, `updateMemberSchema`, `memberListQuerySchema`, `memberIdParamSchema`, `MemberDirectoryItem`, `MemberDetail`, `DuplicateCandidateSummary`), rejecting client-controlled `organisationId`/`archivedAt`/`isActive` keys, normalizing phone/email/whitespace, and enforcing calendar birthday integrity via `validateBirthdayTuple` (`4` new tests in `@crelune/shared`, `33` total).
+- **Organisation-Scoped Member Directory APIs**: Implemented [`api-owner-guard.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/api-owner-guard.ts), [`member-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-service.ts), [`member-http.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-http.ts), and Next.js App Router endpoints [`GET/POST /api/members`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/route.ts), [`GET/PATCH /api/members/[id]`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/%5Bid%5D/route.ts), [`POST /api/members/[id]/archive`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/%5Bid%5D/archive/route.ts), and [`POST /api/members/[id]/restore`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/%5Bid%5D/restore/route.ts). Enforced server-side active owner verification (`401`), Origin/Referer CSRF checks (`403`), `16 KB` JSON payload limits (`413`), `Cache-Control: private, no-store`, bounded pagination (`max 100`), merged birthday re-validation on `PATCH`, and omission of `notes` / `photoStorageKey` from list items.
+- **Duplicate Detection & Transactional Audit Logging**: Implemented exact normalized name/phone duplicate detection across active and archived members protected by an organisation-scoped PostgreSQL transaction advisory lock (`pg_advisory_xact_lock`) with `409 Conflict` candidate summaries and explicit `confirmDuplicate: true` override. Added transactional append-only application-level [`audit-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/audit/audit-service.ts) (`MEMBER_CREATED`, `MEMBER_UPDATED`, `MEMBER_ARCHIVED`, `MEMBER_RESTORED`) with PII/credential redaction and transaction rollback on audit failure.
+- **Verification & Safety**: Verified `145` unit/route tests, `4`-workspace TypeScript check, `13` real Neon `development` PostgreSQL integration tests (including concurrent duplicate race prevention, cross-organisation isolation, and non-owner revocation), and full production build; confirmed Neon `production` branch (`br-withered-moon-be8coj8h`) remains unmodified (`written_data_bytes: 0`). Documented in [`MILESTONE_3_2_MEMBER_DIRECTORY_API.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_3_2_MEMBER_DIRECTORY_API.md).
+
+---
+
 ## [0.3.5] - 2026-11-11
 
 ### Milestone 3, Stage 3.1: Member & Birthday Database Foundation and Civil Date Core
