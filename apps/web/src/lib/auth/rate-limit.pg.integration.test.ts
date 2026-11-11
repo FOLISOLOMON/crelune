@@ -38,11 +38,20 @@ describe('PostgreSQL auth_throttles Integration Verification (Milestone 2.1.2)',
   beforeAll(async () => {
     assertSafeDevDatabaseEnvironment(process.env);
     // Wake Neon compute & verify database identity before timing concurrency tests
-    const rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
-    if (rows[0]?.db !== 'neondb') {
-      throw new Error(`Unexpected database name "${rows[0]?.db}" for integration test.`);
+    let rows: Array<{ db: string }> | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
+        break;
+      } catch (err) {
+        if (attempt === 3) throw err;
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
     }
-  }, 30_000);
+    if (rows?.[0]?.db !== 'neondb') {
+      throw new Error(`Unexpected database name "${rows?.[0]?.db}" for integration test.`);
+    }
+  }, 45_000);
 
   afterEach(async () => {
     await cleanupTrackedRows();

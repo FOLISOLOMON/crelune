@@ -3,10 +3,15 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { ArrowLeft, Users } from 'lucide-react';
 import { EmptyState } from '@crelune/ui';
-import { memberIdParamSchema, type MemberDetail } from '@crelune/shared';
+import {
+  memberIdParamSchema,
+  type DesignJobSummary,
+  type MemberDetail,
+} from '@crelune/shared';
 import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
 import { MemberProfileClient } from '@/components/members/MemberProfileClient';
 import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { listDesignJobs } from '@/lib/designs/design-job-service';
 import { getMemberById, MemberNotFoundError } from '@/lib/members/member-service';
 
 export const dynamic = 'force-dynamic';
@@ -63,6 +68,22 @@ export default async function MemberProfilePage({
     );
   }
 
-  return <MemberProfileClient initialMember={member} />;
+  const linkedDesigns = await listDesignJobs(auth.owner.profile.organisationId, {
+    status: 'all',
+    category: 'ALL',
+    priority: 'ALL',
+    memberId: member.id,
+    page: 1,
+    limit: 25,
+  });
+
+  const initialDesignJobs: DesignJobSummary[] = linkedDesigns.jobs;
+
+  return (
+    <MemberProfileClient
+      initialMember={member}
+      initialDesignJobs={initialDesignJobs}
+    />
+  );
 }
 

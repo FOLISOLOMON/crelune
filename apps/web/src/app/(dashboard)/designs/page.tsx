@@ -1,21 +1,53 @@
 import React from 'react';
-import { Palette } from 'lucide-react';
-import { Header, EmptyState } from '@crelune/ui';
+import { redirect } from 'next/navigation';
+import { prisma } from '@crelune/database';
+import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
+import { DesignJobsClient } from '@/components/designs/DesignJobsClient';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { listDesignJobs } from '@/lib/designs/design-job-service';
 
-export default function DesignsPage() {
+export const dynamic = 'force-dynamic';
+
+export default async function DesignsPage() {
+  const auth = await resolveAuthenticatedOwner();
+
+  if (auth.status === 'unauthenticated') {
+    redirect('/login');
+  }
+
+  if (auth.status === 'revoked') {
+    return <SessionRevokedNotice />;
+  }
+
+  const organisationId = auth.owner.profile.organisationId;
+  const [designData, memberOptions] = await Promise.all([
+    listDesignJobs(organisationId, {
+      status: 'active',
+      category: 'ALL',
+      priority: 'ALL',
+      page: 1,
+      limit: 25,
+    }),
+    prisma.member.findMany({
+      where: {
+        organisationId,
+        archivedAt: null,
+      },
+      orderBy: [{ fullName: 'asc' }],
+      select: {
+        id: true,
+        fullName: true,
+        preferredName: true,
+      },
+    }),
+  ]);
+
   return (
-    <div className="space-y-6">
-      <Header
-        title="Design Management"
-        description="Creative job tracking, status pipeline, and approval workflow"
-      />
-
-      <EmptyState
-        icon={<Palette className="w-6 h-6" />}
-        badgeText="Scheduled for Milestone 4"
-        title="Design Job Management Activates in Milestone 4"
-        description="The design management module will track creative jobs across standard status transitions (Draft, In Progress, In Review, Approved, Exported). It connects members and events to templates and orchestrates production."
-      />
-    </div>
+    <DesignJobsClient
+      initialJobs={designData.jobs}
+      initialPagination={designData.pagination}
+      initialStatusCounts={designData.statusCounts}
+      memberOptions={memberOptions}
+    />
   );
 }

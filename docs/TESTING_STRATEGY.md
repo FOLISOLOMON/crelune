@@ -305,3 +305,26 @@ Verified for Stage 3.2 against local workspaces and Neon `development` (`br-name
 3. **Neon `development` PG + Object Storage Integration (`cmd /c npm run test:integration:db`)**:
    - `4` test files, `17` tests passed (`0` failed, `0` skipped), including live Neon S3 + Postgres verification in [`member-photo.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/member-photo.pg.integration.test.ts) for EXIF/GPS stripped uploads, failed compensation cleanup queueing, failed replacement/removal cleanup queueing without blocking committed DB state, idempotent retries, duplicate retry no-ops, out-of-scope cleanup key `REJECTED` blocking, and sanitized error messages.
    - Post-test row counts (`members: 0`, `auditLogs: 0`, `authThrottles: 0`, `pendingStorageCleanups: 0`), `development` bucket objects (`0`), and `production` isolation (`written_data_bytes: 0`, `[]` buckets) verified clean.
+
+
+---
+
+## 13. Stage 3.5 Review, Stage 3.6 & Milestone 4 Testing Evidence (Birthdays UI, Notifications, Preferences & Design Management)
+
+Verified for Stage 3.5 Review Fixes, Stage 3.6, and Milestone 4 against local workspaces, React DOM (`jsdom` + `@testing-library/react`), and Neon `development` (`br-nameless-silence-bexjp44k`):
+1. **TypeScript & Workspace ESLint (`npm run type-check`, `npm run lint`)**:
+   - Zero TypeScript errors across `@crelune/web`, `@crelune/database`, `@crelune/shared`, and `@crelune/ui` (`PASS`).
+   - Added [`apps/web/.eslintrc.json`](file:///d:/Projects/Crelune/apps/web/.eslintrc.json) (`next/core-web-vitals`, `next/typescript`) so non-interactive `npm run lint` executes cleanly (`✔ No ESLint warnings or errors`, `PASS`).
+2. **Unit, Route & Interactive DOM Suites (`npm test`)**:
+   - `@crelune/web`: `22` test files, `176` tests passed (`0` failed, `0` skipped) — adding [`member-interactions.test.tsx`](file:///d:/Projects/Crelune/apps/web/src/components/members/member-interactions.test.tsx) (`2` DOM workflow tests), [`stage36-m4-ui.test.tsx`](file:///d:/Projects/Crelune/apps/web/src/components/workflows/stage36-m4-ui.test.tsx) (`4` interactive DOM workflow tests), [`birthday-stage36-routes.test.ts`](file:///d:/Projects/Crelune/apps/web/src/app/api/birthdays/birthday-stage36-routes.test.ts) (`5` API route tests), and [`design-routes.test.ts`](file:///d:/Projects/Crelune/apps/web/src/app/api/designs/design-routes.test.ts) (`5` API route tests).
+   - `@crelune/shared`: `6` test files, `44` tests passed (`0` failed, `0` skipped) — adding [`design-job.test.ts`](file:///d:/Projects/Crelune/packages/shared/src/domain/design-job.test.ts) (`4` domain state-transition tests) and [`design-job.test.ts`](file:///d:/Projects/Crelune/packages/shared/src/schemas/design-job.test.ts) (`6` Zod contract tests).
+   - `@crelune/ui`: `1` test file, `3` tests passed (`0` failed, `0` skipped).
+   - **Total**: `29` test files, `223` tests passed, `0` failed, `0` skipped (`PASS`).
+3. **Neon `development` PostgreSQL + Object Storage Integration (`npm run test:integration:db`)**:
+   - Guard verified `development` (`br-nameless-silence-bexjp44k`), pooled `ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech`, direct `ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech`, `/neondb`.
+   - `6` test files, `35` tests passed (`0` failed, `0` skipped), adding `3` Stage 3.6 + Milestone 4 end-to-end DB tests in [`design-birthday-bundle.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/design-birthday-bundle.pg.integration.test.ts) covering Birthday Overview leap-day/archive filtering, preparation status mutations, Birthday Preferences schedule reconciliation without rewriting `SENT` history, full `DesignJob` lifecycle transitions, `BirthdayPreparation.designJobId` linking, `EXPORTED` vs `PUBLISHED` distinction, and cross-organisation isolation.
+   - Post-run Neon `development` confirmed `0` residual synthetic integration-test rows and Neon `production` (`br-withered-moon-be8coj8h`) confirmed untouched (`written_data_bytes: 0`).
+4. **Production Build (`npm run build`)**:
+   - Clean Next.js `15.5.29` and workspace `tsc -b` builds after clearing `.next` cache (`PASS`), compiling `/`, `/birthdays`, `/designs`, `/designs/[id]`, `/members`, `/members/[id]`, `/notifications`, `/settings`, and all API routes.
+5. **Known Automated Coverage Scope**:
+   - Real interactive React component DOM flows are verified under `jsdom` via `@testing-library/react`; full headless Chromium browser E2E (Playwright/Cypress) and automated cron scheduling in Vercel/external infrastructure remain `NOT RUN` / Milestone 9 scope.

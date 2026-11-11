@@ -35,9 +35,13 @@ const ICON_MAP: Record<string, React.ReactNode> = {
 
 interface MobileNavProps {
   profile?: OwnerProfile | null;
+  unreadNotificationCount?: number;
 }
 
-export function MobileNav({ profile }: MobileNavProps) {
+export function MobileNav({
+  profile,
+  unreadNotificationCount = 0,
+}: MobileNavProps) {
   const [isOpen, setIsOpen] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
@@ -68,10 +72,17 @@ export function MobileNav({ profile }: MobileNavProps) {
         <div className="flex items-center gap-2">
           <Link
             href="/notifications"
-            className="p-2 rounded-lg text-[#77727F] hover:bg-[#F8F7FA]"
-            aria-label="Notifications"
+            className="relative p-2 rounded-lg text-[#77727F] hover:bg-[#F8F7FA]"
+            aria-label={
+              unreadNotificationCount > 0
+                ? `Notifications (${unreadNotificationCount} unread)`
+                : 'Notifications'
+            }
           >
             <Bell className="w-5 h-5" />
+            {unreadNotificationCount > 0 && (
+              <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-[#6541A5]" />
+            )}
           </Link>
           <button
             onClick={() => setIsOpen(true)}
@@ -132,10 +143,16 @@ export function MobileNav({ profile }: MobileNavProps) {
                   </span>
                   <span>{item.label}</span>
                 </div>
-                {item.badge && (
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[#F3F2F6] text-[#77727F]">
-                    {item.badge}
+                {item.key === 'notifications' && unreadNotificationCount > 0 ? (
+                  <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-[#EFEBF8] text-[#6541A5] tabular-nums">
+                    {unreadNotificationCount}
                   </span>
+                ) : (
+                  item.badge && (
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[#F3F2F6] text-[#77727F]">
+                      {item.badge}
+                    </span>
+                  )
                 )}
               </Link>
             );

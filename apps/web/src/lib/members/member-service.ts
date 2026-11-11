@@ -247,7 +247,7 @@ export async function createMember(
     });
 
     return mapMemberDetail(created);
-  });
+  }, { maxWait: 10000, timeout: 15000 });
 }
 
 function buildMemberOrderBy(
@@ -457,7 +457,7 @@ export async function updateMember(
     });
 
     return mapMemberDetail(updated);
-  });
+  }, { maxWait: 10000, timeout: 15000 });
 }
 
 async function setMemberArchiveState(
@@ -505,7 +505,7 @@ async function setMemberArchiveState(
     });
 
     return { member: mapMemberDetail(updated), changed: true };
-  });
+  }, { maxWait: 10000, timeout: 15000 });
 }
 
 /**

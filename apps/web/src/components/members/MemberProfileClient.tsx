@@ -9,8 +9,10 @@ import {
   Calendar,
   CheckCircle2,
   Mail,
+  Palette,
   Pencil,
   Phone,
+  Plus,
   RotateCcw,
 } from 'lucide-react';
 import {
@@ -22,7 +24,13 @@ import {
   CardHeader,
   CardTitle,
 } from '@crelune/ui';
-import type { MemberDetail } from '@crelune/shared';
+import {
+  DESIGN_CATEGORY_LABELS,
+  DESIGN_JOB_STATUS_LABELS,
+  type DesignJobDetail,
+  type DesignJobSummary,
+  type MemberDetail,
+} from '@crelune/shared';
 import {
   archiveMemberRequest,
   MemberApiError,
@@ -38,18 +46,28 @@ import {
   type MemberFormField,
   type MemberFormValues,
 } from '@/lib/members/member-form-utils';
+import {
+  formatCivilIsoDisplay,
+  getDesignStatusBadgeVariant,
+} from '@/lib/designs/design-form-utils';
 import { MemberAvatar } from './MemberAvatar';
 import { MemberFormFields } from './MemberFormFields';
 import { MemberPhotoManager } from './MemberPhotoManager';
+import { DesignJobModal } from '@/components/designs/DesignJobModal';
 
 export interface MemberProfileClientProps {
   initialMember: MemberDetail;
+  initialDesignJobs?: DesignJobSummary[];
 }
 
 export function MemberProfileClient({
   initialMember,
+  initialDesignJobs = [],
 }: MemberProfileClientProps) {
   const [member, setMember] = useState<MemberDetail>(initialMember);
+  const [designJobs, setDesignJobs] =
+    useState<DesignJobSummary[]>(initialDesignJobs);
+  const [isDesignModalOpen, setIsDesignModalOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [formValues, setFormValues] = useState<MemberFormValues>(() =>
     memberDetailToFormValues(initialMember)
@@ -539,14 +557,95 @@ export function MemberProfileClient({
           </Card>
         </div>
 
-        {/* Right Column: Private Photo Manager */}
+        {/* Right Column: Private Photo Manager & Linked Design Jobs */}
         <div className="space-y-6">
           <MemberPhotoManager
             member={member}
             onMemberUpdated={(updated) => setMember(updated)}
           />
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Palette className="h-4 w-4 text-[#6541A5]" />
+                  <CardTitle>Linked Design Jobs</CardTitle>
+                </div>
+                {member.isActive && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setIsDesignModalOpen(true)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    New Design Job
+                  </Button>
+                )}
+              </div>
+              <CardDescription>
+                Flyers and creative requests linked to {member.fullName}.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {designJobs.length === 0 ? (
+                <p className="text-xs text-[#77727F]">
+                  No design jobs linked to this member yet.
+                </p>
+              ) : (
+                <ul className="space-y-2.5">
+                  {designJobs.map((job) => (
+                    <li key={job.id}>
+                      <Link
+                        href={`/designs/${job.id}`}
+                        className="block rounded-lg border border-[#E8E5ED] p-3 hover:border-[#A99AD1] hover:bg-[#F8F7FA]/60 transition-colors"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-xs font-semibold text-[#24212B]">
+                            {job.title}
+                          </span>
+                          <Badge
+                            variant={getDesignStatusBadgeVariant(job.status)}
+                            size="sm"
+                          >
+                            {DESIGN_JOB_STATUS_LABELS[job.status]}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-[11px] text-[#77727F]">
+                          {DESIGN_CATEGORY_LABELS[job.category]} · Due{' '}
+                          {formatCivilIsoDisplay(job.dueDate)}
+                        </p>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
+
+      <DesignJobModal
+        isOpen={isDesignModalOpen}
+        onClose={() => setIsDesignModalOpen(false)}
+        onCreated={(created: DesignJobDetail) => {
+          setIsDesignModalOpen(false);
+          setDesignJobs((prev) => [created, ...prev]);
+          setStatusBanner(`Created linked design job "${created.title}".`);
+        }}
+        initialPrefill={{
+          memberId: member.id,
+          category:
+            member.birthMonth !== null && member.birthDay !== null
+              ? 'BIRTHDAY_FLYER'
+              : 'GENERAL_GRAPHIC_DESIGN',
+          title:
+            member.birthMonth !== null && member.birthDay !== null
+              ? `${member.fullName} Birthday Flyer`
+              : `${member.fullName} Design Brief`,
+        }}
+        lockedMemberLabel={member.fullName}
+      />
     </div>
   );
 }

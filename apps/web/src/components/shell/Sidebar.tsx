@@ -33,9 +33,13 @@ const ICON_MAP: Record<string, React.ReactNode> = {
 
 interface SidebarProps {
   profile?: OwnerProfile | null;
+  unreadNotificationCount?: number;
 }
 
-export function Sidebar({ profile }: SidebarProps) {
+export function Sidebar({
+  profile,
+  unreadNotificationCount = 0,
+}: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -107,10 +111,19 @@ export function Sidebar({ profile }: SidebarProps) {
                 </span>
                 <span>{item.label}</span>
               </div>
-              {item.badge && (
-                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[#F3F2F6] text-[#77727F] border border-[#E8E5ED]/80">
-                  {item.badge}
+              {item.key === 'notifications' && unreadNotificationCount > 0 ? (
+                <span
+                  aria-label={`${unreadNotificationCount} unread notifications`}
+                  className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-[#EFEBF8] text-[#6541A5] tabular-nums"
+                >
+                  {unreadNotificationCount}
                 </span>
+              ) : (
+                item.badge && (
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[#F3F2F6] text-[#77727F] border border-[#E8E5ED]/80">
+                    {item.badge}
+                  </span>
+                )
               )}
             </Link>
           );

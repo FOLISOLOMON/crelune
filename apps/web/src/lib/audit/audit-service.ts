@@ -18,8 +18,12 @@ export const AUDIT_ACTIONS = {
   MEMBER_PHOTO_REPLACED: 'MEMBER_PHOTO_REPLACED',
   MEMBER_PHOTO_REMOVED: 'MEMBER_PHOTO_REMOVED',
   BIRTHDAY_PREFERENCES_UPDATED: 'BIRTHDAY_PREFERENCES_UPDATED',
+  BIRTHDAY_PREP_UPDATED: 'BIRTHDAY_PREP_UPDATED',
   BIRTHDAY_REMINDER_FAILED: 'BIRTHDAY_REMINDER_FAILED',
   NOTIFICATION_READ_ALL: 'NOTIFICATION_READ_ALL',
+  DESIGN_JOB_CREATED: 'DESIGN_JOB_CREATED',
+  DESIGN_JOB_UPDATED: 'DESIGN_JOB_UPDATED',
+  DESIGN_JOB_STATUS_CHANGED: 'DESIGN_JOB_STATUS_CHANGED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
@@ -60,7 +64,13 @@ export interface RecordAuditEventInput {
   organisationId: string;
   actorUserId?: string | null;
   action: AuditAction;
-  entityType: 'Member' | 'BirthdayReminder' | 'Notification' | 'UserPreference';
+  entityType:
+    | 'Member'
+    | 'BirthdayPreparation'
+    | 'BirthdayReminder'
+    | 'Notification'
+    | 'UserPreference'
+    | 'DesignJob';
   entityId: string;
   metadata?: Record<string, unknown> | null;
 }

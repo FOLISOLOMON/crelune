@@ -53,6 +53,38 @@ enum StorageCleanupReason {
 }
 
 // -----------------------------------------------------------------------------
+// ENUMS (Milestone 4 Design Management Domain)
+// -----------------------------------------------------------------------------
+
+enum DesignCategory {
+  BIRTHDAY_FLYER
+  CHURCH_PROGRAMME_FLYER
+  EVENT_ANNOUNCEMENT
+  SERVICE_FLYER
+  SOCIAL_MEDIA_GRAPHIC
+  SPECIAL_EVENT_ARTWORK
+  GENERAL_GRAPHIC_DESIGN
+}
+
+enum DesignJobStatus {
+  DRAFT
+  PENDING
+  IN_PROGRESS
+  AWAITING_REVIEW
+  APPROVED
+  EXPORTED
+  PUBLISHED
+  CANCELLED
+}
+
+enum DesignPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// -----------------------------------------------------------------------------
 // CORE ORGANISATION & USER MANAGEMENT (Milestone 2 Web Foundation)
 // -----------------------------------------------------------------------------
 
@@ -71,6 +103,7 @@ model Organisation {
   notifications        Notification[]
   auditLogs            AuditLog[]
   pendingCleanups      PendingStorageCleanup[]
+  designJobs           DesignJob[]
 
   @@map("organisations")
 }
@@ -95,6 +128,7 @@ model User {
   preferences         UserPreference?
   notifications       Notification[]
   auditLogs           AuditLog[]
+  designJobChanges    DesignJobHistory[]
 
   @@index([organisationId])
   @@map("users")
@@ -165,6 +199,7 @@ model Member {
   birthdayPreparations BirthdayPreparation[]
   birthdayReminders    BirthdayReminder[]
   notifications        Notification[]
+  designJobs           DesignJob[]
 
   @@index([organisationId, archivedAt, birthMonth, birthDay])
   @@index([organisationId, normalizedName])
@@ -180,6 +215,7 @@ model BirthdayPreparation {
   targetYear      Int                @map("target_year")
   celebrationDate DateTime           @map("celebration_date") @db.Date
   status          BirthdayPrepStatus @default(UPCOMING)
+  designJobId     String?            @map("design_job_id")
   notes           String?
   statusUpdatedAt DateTime           @default(now()) @map("status_updated_at")
   createdAt       DateTime           @default(now()) @map("created_at")
@@ -187,10 +223,12 @@ model BirthdayPreparation {
 
   organisation    Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
   member          Member             @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  designJob       DesignJob?         @relation(fields: [designJobId], references: [id], onDelete: SetNull)
 
   @@unique([memberId, targetYear])
   @@index([organisationId, targetYear, status])
   @@index([organisationId, celebrationDate])
+  @@index([designJobId])
   @@map("birthday_preparations")
 }
 
@@ -282,4 +320,59 @@ model PendingStorageCleanup {
   @@index([organisationId, status, nextRetryAt])
   @@index([memberId])
   @@map("pending_storage_cleanups")
+}
+
+// -----------------------------------------------------------------------------
+// DESIGN MANAGEMENT PIPELINE (Milestone 4)
+// -----------------------------------------------------------------------------
+
+model DesignJob {
+  id                    String                @id @default(cuid())
+  organisationId        String                @map("organisation_id")
+  memberId              String?               @map("member_id")
+  birthdayTargetYear    Int?                  @map("birthday_target_year")
+  title                 String
+  category              DesignCategory        @default(GENERAL_GRAPHIC_DESIGN)
+  status                DesignJobStatus       @default(DRAFT)
+  priority              DesignPriority        @default(NORMAL)
+  requiredText          String?               @map("required_text")
+  dimensions            String?
+  targetPlatform        String?               @map("target_platform")
+  preferredTemplateNote String?               @map("preferred_template_note")
+  referenceNotes        String?               @map("reference_notes")
+  notes                 String?
+  dueDate               DateTime?             @map("due_date") @db.Date
+  approvedAt            DateTime?             @map("approved_at")
+  exportedAt            DateTime?             @map("exported_at")
+  publishedAt           DateTime?             @map("published_at")
+  cancelledAt           DateTime?             @map("cancelled_at")
+  createdAt             DateTime              @default(now()) @map("created_at")
+  updatedAt             DateTime              @updatedAt @map("updated_at")
+
+  organisation          Organisation          @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  member                Member?               @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  birthdayPreparations  BirthdayPreparation[]
+  history               DesignJobHistory[]
+
+  @@index([organisationId, status])
+  @@index([organisationId, memberId])
+  @@index([organisationId, dueDate])
+  @@map("design_jobs")
+}
+
+model DesignJobHistory {
+  id              String           @id @default(cuid())
+  organisationId  String           @map("organisation_id")
+  designJobId     String           @map("design_job_id")
+  previousStatus  DesignJobStatus? @map("previous_status")
+  newStatus       DesignJobStatus  @map("new_status")
+  note            String?
+  changedByUserId String?          @map("changed_by_user_id")
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  designJob       DesignJob        @relation(fields: [designJobId], references: [id], onDelete: Cascade)
+  changedByUser   User?            @relation(fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, designJobId, createdAt])
+  @@map("design_job_history")
 }

@@ -34,8 +34,6 @@ export const NAVIGATION_ITEMS: readonly NavItem[] = [
     label: 'Members',
     href: APP_ROUTES.MEMBERS,
     icon: 'users',
-    badge: 'Milestone 3',
-    plannedMilestone: 'Milestone 3',
     description: 'Member directory, contact details, and pastoral milestones',
   },
   {
@@ -43,8 +41,6 @@ export const NAVIGATION_ITEMS: readonly NavItem[] = [
     label: 'Birthdays',
     href: APP_ROUTES.BIRTHDAYS,
     icon: 'cake',
-    badge: 'Milestone 3',
-    plannedMilestone: 'Milestone 3',
     description: 'Birthday calendar, date-only records, and automated lead-time reminders',
   },
   {
@@ -52,8 +48,6 @@ export const NAVIGATION_ITEMS: readonly NavItem[] = [
     label: 'Design Management',
     href: APP_ROUTES.DESIGNS,
     icon: 'palette',
-    badge: 'Milestone 4',
-    plannedMilestone: 'Milestone 4',
     description: 'Creative job queue, status pipeline, and approval workflows',
   },
   {
@@ -88,8 +82,6 @@ export const NAVIGATION_ITEMS: readonly NavItem[] = [
     label: 'Notifications',
     href: APP_ROUTES.NOTIFICATIONS,
     icon: 'bell',
-    badge: 'Milestone 3',
-    plannedMilestone: 'Milestone 3',
     description: 'Reminder delivery history and channel alert preferences',
   },
   {

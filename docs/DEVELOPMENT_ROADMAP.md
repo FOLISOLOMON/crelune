@@ -1,4 +1,4 @@
-﻿# CRELUNE — Phased Development Roadmap
+# CRELUNE — Phased Development Roadmap
 
 **Document:** Milestone Sequence, Deliverables, and Completion Criteria  
 **Project:** CRELUNE  
@@ -59,25 +59,25 @@ flowchart LR
   - Local owner provisioning CLI script (`scripts/create-owner.mjs`).
 - **Exit Criteria**: Owner can log in, view responsive dashboard shell, navigate module foundations, and verify database connectivity. Automated vitest and Next.js production builds pass.
 
-### Milestone 3 — Members & Birthdays *(Next Milestone)*
+### Milestone 3 — Members & Birthdays *(Completed)*
 - **Objective**: Implement member directory, birthday calendar, and automated reminder calculation.
 - **Key Deliverables**:
-  - Member management UI (Add, Edit, Soft-delete, View Member Profile).
-  - Member photograph upload pipeline with size validation.
-  - Birthday calendar view with monthly filtering and upcoming window calculation (7/14/30 days).
-  - Leap year (February 29) birthday logic and timezone-safe date calculations.
-  - Automated reminder generation preventing duplicate triggers.
-- **Exit Criteria**: Complete end-to-end test of member registration, birthday recording, and reminder generation.
+  - Member management UI (Add, Edit, Soft-delete/Archive, Restore, View Member Profile, Duplicate Confirmation).
+  - Private member photograph upload pipeline on Neon Object Storage (`sharp` re-encoding, EXIF stripping, magic-byte validation, private authenticated streaming).
+  - Birthday calendar and operational windows with monthly filtering and upcoming window calculation (Today / Next 7 Days / Current Month / Next 30 Days).
+  - Leap year (February 29 `FEB_28` / `MAR_1`) birthday logic and timezone-safe civil date calculations.
+  - Automated reminder generation, due-reminder processor (`POST /api/cron/birthday-reminders` + manual sync), in-app notifications centre, and birthday preferences settings.
+- **Exit Criteria**: Verified end-to-end member registration, birthday recording, calendar operations, preparation status updates, and reminder generation.
 
-### Milestone 4 — Design Management
-- **Objective**: Implement the design job tracking pipeline from requirement to final review.
+### Milestone 4 — Design Management *(Completed)*
+- **Objective**: Implement the design job tracking pipeline from brief to review, export confirmation, and explicit publication.
 - **Key Deliverables**:
-  - `DesignJob` state machine (`PENDING` $\rightarrow$ `DISPATCHED` $\rightarrow$ `IN_PROGRESS` $\rightarrow$ `AWAITING_APPROVAL` $\rightarrow$ `COMPLETED`).
-  - Design job creation connected to members (birthday flyers) and events.
-  - Visual status kanban/table view on Web dashboard.
-  - `DesignJobHistory` immutable audit logging.
-  - Review and approval workflow interface.
-- **Exit Criteria**: Job created, transitioned through valid status gates, and logged in audit history.
+  - Authoritative `DesignJob` state machine (`DRAFT`, `PENDING`, `IN_PROGRESS`, `AWAITING_REVIEW`, `APPROVED`, `EXPORTED`, `PUBLISHED`, `CANCELLED` per `PRODUCT_MASTER_SPECIFICATION.md` Module 4) keeping `EXPORTED` and `PUBLISHED` strictly separate.
+  - Design job creation and editing connected to members and `BirthdayPreparation` flyer workflows (`BirthdayTargetYear`).
+  - Visual status board & table list views on Web dashboard with search, category, priority, and status filtering.
+  - `DesignJobHistory` immutable audit logging with actor attribution and transition notes.
+  - Design brief detail, review, export confirmation, and publication workflow interface.
+- **Exit Criteria**: Job created, linked to members/birthdays, transitioned through valid status gates, and logged in immutable audit history.
 
 ### Milestone 5 — Templates & Affinity Integration
 - **Objective**: Register templates, map placeholder fields, and integrate the Windows Creative Agent.

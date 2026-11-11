@@ -39,7 +39,7 @@ describe('PostgreSQL + Neon Object Storage Stage 3.3.1 Integration (Neon Develop
   let orgBId = '';
   let ownerAId = '';
   let nonOwnerId = '';
-  let createdMemberIds: string[] = [];
+  const createdMemberIds: string[] = [];
   let endpointOrigin = '';
   let bucketName = '';
   let s3RawClient: S3Client;

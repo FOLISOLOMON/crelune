@@ -72,7 +72,14 @@ export function MemberDirectoryClient({
     photoWarning: string | null;
   } | null>(null);
 
-  const isFirstRender = useRef(true);
+  const initialQueryKey = JSON.stringify({
+    q: '',
+    status: 'active',
+    birthMonth: '',
+    sort: 'name_asc',
+    page: initialPagination.page || 1,
+  });
+  const lastFetchedQueryKeyRef = useRef<string>(initialQueryKey);
   const abortRef = useRef<AbortController | null>(null);
 
   const loadDirectory = useCallback(
@@ -144,10 +151,17 @@ export function MemberDirectoryClient({
 
   // Fetch updated directory whenever active query parameters change.
   useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
+    const queryKey = JSON.stringify({
+      q: appliedQuery,
+      status: statusFilter,
+      birthMonth: birthMonthFilter,
+      sort: sortOption,
+      page,
+    });
+    if (queryKey === lastFetchedQueryKeyRef.current) {
       return;
     }
+    lastFetchedQueryKeyRef.current = queryKey;
     void loadDirectory({
       q: appliedQuery,
       status: statusFilter,
@@ -182,6 +196,14 @@ export function MemberDirectoryClient({
   ) => {
     setIsAddModalOpen(false);
     setCreatedNotice({ member, photoWarning: options.photoWarning });
+    const nextKey = JSON.stringify({
+      q: appliedQuery,
+      status: statusFilter,
+      birthMonth: birthMonthFilter,
+      sort: sortOption,
+      page: 1,
+    });
+    lastFetchedQueryKeyRef.current = nextKey;
     setPage(1);
     void loadDirectory({
       q: appliedQuery,

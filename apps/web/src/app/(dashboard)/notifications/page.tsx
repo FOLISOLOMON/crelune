@@ -1,21 +1,30 @@
 import React from 'react';
-import { Bell } from 'lucide-react';
-import { Header, EmptyState } from '@crelune/ui';
+import { redirect } from 'next/navigation';
+import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
+import { NotificationsClient } from '@/components/notifications/NotificationsClient';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { listOwnerNotifications } from '@/lib/notifications/notification-service';
 
-export default function NotificationsPage() {
-  return (
-    <div className="space-y-6">
-      <Header
-        title="Notifications Center"
-        description="Delivery logs, reminder dispatches, and alert preferences"
-      />
+export const dynamic = 'force-dynamic';
 
-      <EmptyState
-        icon={<Bell className="w-6 h-6" />}
-        badgeText="Scheduled for Milestone 3 & 6"
-        title="Notification System Activates in Milestone 3"
-        description="The notification center will record upcoming birthday reminder dispatches, job completion alerts, and push notification preferences across web and mobile."
-      />
-    </div>
+export default async function NotificationsPage() {
+  const auth = await resolveAuthenticatedOwner();
+
+  if (auth.status === 'unauthenticated') {
+    redirect('/login');
+  }
+
+  if (auth.status === 'revoked') {
+    return <SessionRevokedNotice />;
+  }
+
+  const initialData = await listOwnerNotifications(
+    {
+      userId: auth.owner.profile.id,
+      organisationId: auth.owner.profile.organisationId,
+    },
+    { unreadOnly: false, page: 1, limit: 25 }
   );
+
+  return <NotificationsClient initialData={initialData} />;
 }

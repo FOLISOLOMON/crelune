@@ -54,23 +54,34 @@ describe('PostgreSQL Stage 3.2 Member Directory, Duplicate Detection & Audit Int
   async function cleanupTestOrgs() {
     if (createdOrgIds.size === 0) return;
     const orgIds = Array.from(createdOrgIds);
-    await prisma.auditLog.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.notification.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.birthdayReminder.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.birthdayPreparation.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.member.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.user.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.organisation.deleteMany({ where: { id: { in: orgIds } } });
+    await prisma.$transaction([
+      prisma.auditLog.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.notification.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.birthdayReminder.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.birthdayPreparation.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.member.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.user.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.organisation.deleteMany({ where: { id: { in: orgIds } } }),
+    ]);
     createdOrgIds.clear();
   }
 
   beforeAll(async () => {
     assertSafeDevDatabaseEnvironment(process.env);
-    const rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
-    if (rows[0]?.db !== 'neondb') {
-      throw new Error(`Unexpected database "${rows[0]?.db}" for integration test.`);
+    let rows: Array<{ db: string }> | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
+        break;
+      } catch (err) {
+        if (attempt === 3) throw err;
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
     }
-  }, 30_000);
+    if (rows?.[0]?.db !== 'neondb') {
+      throw new Error(`Unexpected database "${rows?.[0]?.db}" for integration test.`);
+    }
+  }, 45_000);
 
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -144,7 +155,7 @@ describe('PostgreSQL Stage 3.2 Member Directory, Duplicate Detection & Audit Int
     expect(serializedMeta).not.toContain('Updated private note');
     expect(serializedMeta).not.toContain('024 555 0101');
     expect(serializedMeta).not.toContain('ama@example.com');
-  }, 25_000);
+  }, 60_000);
 
   it('lists members with pagination, search, status/birthMonth filters, sorting, and omits notes', async () => {
     const { actor } = await createTestOrgAndUser('listing');
@@ -217,7 +228,7 @@ describe('PostgreSQL Stage 3.2 Member Directory, Duplicate Detection & Audit Int
     );
     expect(archivedList.members.map((m) => m.id)).toEqual([m3.id]);
     expect(archivedList.members[0]!.isActive).toBe(false);
-  }, 25_000);
+  }, 60_000);
 
   it('enforces organisation isolation and non-owner role rejection', async () => {
     const { actor: orgAActor } = await createTestOrgAndUser('org-a', 'OWNER');
@@ -270,7 +281,7 @@ describe('PostgreSQL Stage 3.2 Member Directory, Duplicate Detection & Audit Int
       exp: nowSec + 600,
     });
     expect(nonOwnerAuth.status).toBe('revoked');
-  }, 25_000);
+  }, 60_000);
 
   it('detects name, phone, and archived-member duplicates cleanly while allowing confirmDuplicate=true', async () => {
     const { actor } = await createTestOrgAndUser('dups');
@@ -321,7 +332,7 @@ describe('PostgreSQL Stage 3.2 Member Directory, Duplicate Detection & Audit Int
       })
     );
     expect(confirmedSecond.id).not.toBe(first.id);
-  }, 25_000);
+  }, 60_000);
 
   it('prevents concurrent duplicate creation races via advisory lock and rolls back member writes if audit logging fails', async () => {
     const { actor } = await createTestOrgAndUser('concurrency-rollback');
@@ -380,5 +391,5 @@ describe('PostgreSQL Stage 3.2 Member Directory, Duplicate Detection & Audit Int
       where: { id: existingMemberId },
     });
     expect(untouchedMember?.archivedAt).toBeNull();
-  }, 25_000);
+  }, 60_000);
 });

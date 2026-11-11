@@ -156,6 +156,15 @@
   4. **Timing-Safe `CRON_SECRET` Fail-Closed Endpoint**: `POST /api/cron/birthday-reminders` passes middleware route matching only for exact path/method and is guarded by [`verifyCronBearerRequest`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/cron-auth.ts) (`503` when `CRON_SECRET` is unset/placeholder, `401` on URL query-string secrets or timing-safe SHA-256 Bearer mismatch) while returning aggregate non-PII counters only. Hosting scheduler provider provisioning remains deferred.
 - **Consequences**: Duplicate schedules and duplicate in-app notifications are prevented by PostgreSQL locks, unique constraints, and transactional ordering; delayed reminders still deliver up to the celebration day; owner notifications stay strictly privacy-safe and organisation/user isolated.
 
+### ADR 014: Authoritative Milestone 4 Design Job Pipeline & Non-Inferred Publication
+- **Status**: Accepted & Implemented (Stage 3.6 + Milestone 4 Bundle)
+- **Context**: Two pre-implementation draft docs (`DEVELOPMENT_ROADMAP.md` and `DATABASE_DESIGN.md`) used condensed placeholder statuses (`PENDING`, `DISPATCHED`, `IN_PROGRESS`, `AWAITING_APPROVAL`, `COMPLETED`, `FAILED`) including Windows Agent states from Milestone 5, whereas the authoritative [`PRODUCT_MASTER_SPECIFICATION.md`](file:///d:/Projects/Crelune/docs/PRODUCT_MASTER_SPECIFICATION.md) Module 4 and `.agents/AGENTS.md` Section 16 explicitly require 8 statuses (`DRAFT`, `PENDING`, `IN_PROGRESS`, `AWAITING_REVIEW`, `APPROVED`, `EXPORTED`, `PUBLISHED`, `CANCELLED`), 7 categories (`BIRTHDAY_FLYER`, `CHURCH_PROGRAMME_FLYER`, `EVENT_ANNOUNCEMENT`, `SERVICE_FLYER`, `SOCIAL_MEDIA_GRAPHIC`, `SPECIAL_EVENT_ARTWORK`, `GENERAL_GRAPHIC_DESIGN`), and strictly non-inferred publication after export.
+- **Decisions**:
+  1. **Follow Authoritative Master Specification States**: Implemented `DesignCategory`, `DesignJobStatus`, and `DesignPriority` in PostgreSQL (`schema.prisma`) and [`design-job.ts`](file:///d:/Projects/Crelune/packages/shared/src/domain/design-job.ts) with an explicit server-enforced transition matrix (`ALLOWED_DESIGN_JOB_TRANSITIONS`) wrapped in `FOR UPDATE` PostgreSQL transactions and append-only [`DesignJobHistory`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma) logs.
+  2. **Separate Export & Publication**: `APPROVED -> EXPORTED -> PUBLISHED` requires two distinct explicit owner transitions; `EXPORTED` stamps `exportedAt` only and never sets `publishedAt` or `PUBLISHED`.
+  3. **Milestone Scope Discipline**: Deferred Milestone 5 (`Template`, `CreativeAgent`, `DISPATCHED`), Milestone 7 (`Event`), and Milestone 8 (`Asset`) relations cleanly without creating speculative tables early, linking `BirthdayPreparation.designJobId` (`onDelete: SetNull`) cleanly to `DesignJob`.
+- **Consequences**: Web Design Management and Birthday Flyer workflows are immediately coherent, auditable, and strictly faithful to CRELUNE's master specification without breaking future Windows Agent integration in Milestone 5.
+
 ---
 
 ## 2. Unresolved Technical Decisions (Awaiting Milestone Evaluation)

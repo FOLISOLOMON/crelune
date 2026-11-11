@@ -1,21 +1,28 @@
 import React from 'react';
-import { Cake } from 'lucide-react';
-import { Header, EmptyState } from '@crelune/ui';
+import { redirect } from 'next/navigation';
+import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
+import { BirthdayOperationsClient } from '@/components/birthdays/BirthdayOperationsClient';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { getBirthdayOverview } from '@/lib/birthdays/birthday-overview-service';
 
-export default function BirthdaysPage() {
-  return (
-    <div className="space-y-6">
-      <Header
-        title="Birthday Operations"
-        description="Birthday calendar, upcoming anniversaries, and automated reminder triggers"
-      />
+export const dynamic = 'force-dynamic';
 
-      <EmptyState
-        icon={<Cake className="w-6 h-6" />}
-        badgeText="Scheduled for Milestone 3"
-        title="Birthday Operations Activate in Milestone 3"
-        description="The birthday management subsystem will provide calendar views, leap-day handling, lead-time reminder generation (e.g. 14 days before), and automated creation of birthday design jobs."
-      />
-    </div>
+export default async function BirthdaysPage() {
+  const auth = await resolveAuthenticatedOwner();
+
+  if (auth.status === 'unauthenticated') {
+    redirect('/login');
+  }
+
+  if (auth.status === 'revoked') {
+    return <SessionRevokedNotice />;
+  }
+
+  const overview = await getBirthdayOverview(
+    auth.owner.profile.organisationId,
+    auth.owner.profile.id,
+    { prepStatus: 'ALL' }
   );
+
+  return <BirthdayOperationsClient initialOverview={overview} />;
 }

@@ -112,13 +112,15 @@ describe('PostgreSQL Stage 3.4 Birthday Engine, Reminder Processing & Notificati
   async function cleanupTestOrgs() {
     if (createdOrgIds.size === 0) return;
     const orgIds = Array.from(createdOrgIds);
-    await prisma.auditLog.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.notification.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.birthdayReminder.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.birthdayPreparation.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.member.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.user.deleteMany({ where: { organisationId: { in: orgIds } } });
-    await prisma.organisation.deleteMany({ where: { id: { in: orgIds } } });
+    await prisma.$transaction([
+      prisma.auditLog.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.notification.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.birthdayReminder.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.birthdayPreparation.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.member.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.user.deleteMany({ where: { organisationId: { in: orgIds } } }),
+      prisma.organisation.deleteMany({ where: { id: { in: orgIds } } }),
+    ]);
     createdOrgIds.clear();
   }
 

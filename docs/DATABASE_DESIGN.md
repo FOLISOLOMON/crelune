@@ -263,58 +263,87 @@ model Event {
 }
 
 // -----------------------------------------------------------------------------
-// DESIGN JOB & WORKFLOW TRACKING
+// DESIGN JOB & WORKFLOW TRACKING (Authoritative Milestone 4 Implementation)
 // -----------------------------------------------------------------------------
 
-enum JobStatus {
+enum DesignCategory {
+  BIRTHDAY_FLYER
+  CHURCH_PROGRAMME_FLYER
+  EVENT_ANNOUNCEMENT
+  SERVICE_FLYER
+  SOCIAL_MEDIA_GRAPHIC
+  SPECIAL_EVENT_ARTWORK
+  GENERAL_GRAPHIC_DESIGN
+}
+
+enum DesignJobStatus {
+  DRAFT
   PENDING
-  DISPATCHED
   IN_PROGRESS
-  AWAITING_APPROVAL
-  COMPLETED
+  AWAITING_REVIEW
+  APPROVED
+  EXPORTED
+  PUBLISHED
   CANCELLED
-  FAILED
+}
+
+enum DesignPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
 }
 
 model DesignJob {
-  id             String             @id @default(cuid())
-  organisationId String             @map("organisation_id")
-  memberId       String?            @map("member_id")
-  eventId        String?            @map("event_id")
-  templateId     String?            @map("template_id")
-  title          String
-  status         JobStatus          @default(PENDING)
-  priority       String             @default("NORMAL") // LOW, NORMAL, HIGH, URGENT
-  jobManifest    Json               @map("job_manifest") // Text substitutions, photo paths, dimensions
-  dueDate        DateTime?          @map("due_date")
-  completedAt    DateTime?          @map("completed_at")
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
+  id                    String             @id @default(cuid())
+  organisationId        String             @map("organisation_id")
+  memberId              String?            @map("member_id")
+  birthdayTargetYear    Int?               @map("birthday_target_year")
+  title                 String
+  category              DesignCategory     @default(GENERAL_GRAPHIC_DESIGN)
+  status                DesignJobStatus    @default(DRAFT)
+  priority              DesignPriority     @default(NORMAL)
+  requiredText          String?            @map("required_text")
+  dimensions            String?
+  targetPlatform        String?            @map("target_platform")
+  preferredTemplateNote String?            @map("preferred_template_note")
+  referenceNotes        String?            @map("reference_notes")
+  notes                 String?
+  dueDate               DateTime?          @map("due_date") @db.Date
+  approvedAt            DateTime?          @map("approved_at")
+  exportedAt            DateTime?          @map("exported_at")
+  publishedAt           DateTime?          @map("published_at")
+  cancelledAt           DateTime?          @map("cancelled_at")
+  createdAt             DateTime           @default(now()) @map("created_at")
+  updatedAt             DateTime           @updatedAt @map("updated_at")
+  // Note: eventId (Milestone 7) and templateId (Milestone 5) attach cleanly in future milestones.
 
-  organisation   Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  member         Member?            @relation(fields: [memberId], references: [id], onDelete: SetNull)
-  event          Event?             @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  template       Template?          @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  history        DesignJobHistory[]
-  exports        ExportRecord[]
+  organisation          Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  member                Member?            @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  birthdayPreparations  BirthdayPreparation[]
+  history               DesignJobHistory[]
 
   @@index([organisationId, status])
+  @@index([organisationId, memberId])
   @@index([dueDate])
   @@map("design_jobs")
 }
 
 model DesignJobHistory {
-  id             String    @id @default(cuid())
-  designJobId    String    @map("design_job_id")
-  previousStatus JobStatus @map("previous_status")
-  newStatus      JobStatus @map("new_status")
-  note           String?
-  changedBy      String?   @map("changed_by") // User ID or Agent ID
-  createdAt      DateTime  @default(now()) @map("created_at")
+  id              String           @id @default(cuid())
+  organisationId  String           @map("organisation_id")
+  designJobId     String           @map("design_job_id")
+  previousStatus  DesignJobStatus? @map("previous_status")
+  newStatus       DesignJobStatus  @map("new_status")
+  note            String?
+  changedByUserId String?          @map("changed_by_user_id")
+  createdAt       DateTime         @default(now()) @map("created_at")
 
-  designJob      DesignJob @relation(fields: [designJobId], references: [id], onDelete: Cascade)
+  organisation    Organisation     @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  designJob       DesignJob        @relation(fields: [designJobId], references: [id], onDelete: Cascade)
+  changedByUser   User?            @relation(fields: [changedByUserId], references: [id], onDelete: SetNull)
 
-  @@index([designJobId])
+  @@index([organisationId, designJobId, createdAt])
   @@map("design_job_history")
 }
 

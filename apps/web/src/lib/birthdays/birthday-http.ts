@@ -10,6 +10,10 @@ import {
 } from '@crelune/shared';
 import { DEFAULT_MAX_API_BODY_BYTES } from '@/lib/auth/api-owner-guard';
 import { InvalidBirthdayPreferencesError } from '@/lib/birthdays/birthday-preferences';
+import {
+  MemberNotFoundError,
+  MemberValidationError,
+} from '@/lib/members/member-service';
 import { NotificationNotFoundError } from '@/lib/notifications/notification-service';
 
 const PRIVATE_NO_STORE_HEADERS = {
@@ -115,6 +119,14 @@ export function handleBirthdayRouteError(
 ): NextResponse {
   if (err instanceof NotificationNotFoundError) {
     return privateJsonResponse({ error: 'Notification not found' }, 404);
+  }
+
+  if (err instanceof MemberNotFoundError) {
+    return privateJsonResponse({ error: 'Member not found' }, 404);
+  }
+
+  if (err instanceof MemberValidationError) {
+    return privateJsonResponse({ error: err.message, code: 'VALIDATION_ERROR' }, 400);
   }
 
   if (err instanceof InvalidBirthdayPreferencesError) {

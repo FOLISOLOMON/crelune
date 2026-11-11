@@ -45,11 +45,20 @@ describe('PostgreSQL Stage 3.1 Member & Birthday Schema Integration (Neon Develo
 
   beforeAll(async () => {
     assertSafeDevDatabaseEnvironment(process.env);
-    const rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
-    if (rows[0]?.db !== 'neondb') {
-      throw new Error(`Unexpected database "${rows[0]?.db}" for integration test.`);
+    let rows: Array<{ db: string }> | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
+        break;
+      } catch (err) {
+        if (attempt === 3) throw err;
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
     }
-  }, 30_000);
+    if (rows?.[0]?.db !== 'neondb') {
+      throw new Error(`Unexpected database "${rows?.[0]?.db}" for integration test.`);
+    }
+  }, 45_000);
 
   afterEach(async () => {
     await cleanupTestOrgs();
