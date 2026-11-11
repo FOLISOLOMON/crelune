@@ -178,7 +178,10 @@ export async function createMember(
 
   return prisma.$transaction(async (tx) => {
     // Serialize duplicate-checked member creation per organisation across concurrent requests.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`member_create:${actor.organisationId}`}))`;
+    // Cast void result to text so Prisma $queryRaw deserializes cleanly.
+    await tx.$queryRaw<
+      Array<{ locked: string | null }>
+    >`SELECT CAST(pg_advisory_xact_lock(hashtext(${`member_create:${actor.organisationId}`})) AS text) AS locked`;
 
     const duplicateWhereOr: Prisma.MemberWhereInput[] = [{ normalizedName }];
     if (normalizedPhone) {

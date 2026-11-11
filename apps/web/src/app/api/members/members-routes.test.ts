@@ -76,7 +76,7 @@ vi.mock('@crelune/database', () => {
   }
 
   const txClient = {
-    $executeRaw: vi.fn(async () => 1),
+    $queryRaw: vi.fn(async () => [{ locked: '' }]),
     member: {
       findMany: vi.fn(async ({ where }: { where?: Record<string, unknown> }) => {
         if (mockState.forceDbFailure) {
