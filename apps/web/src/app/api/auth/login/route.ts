@@ -3,16 +3,30 @@ import { prisma } from '@crelune/database';
 import { loginSchema } from '@crelune/shared';
 import { verifyPassword } from '@/lib/auth/password';
 import { createSessionToken, setSessionCookie } from '@/lib/auth/session';
+import { validateRequestOrigin } from '@/lib/auth/csrf';
+import {
+  extractClientIp,
+  checkLoginThrottle,
+  recordFailedLoginAttempt,
+  clearIpAccountThrottle,
+} from '@/lib/auth/rate-limit';
 
 // Constant-time dummy hash: scrypt derived salt and 64-byte key (128 hex chars)
 const DUMMY_HASH = '0123456789abcdef0123456789abcdef:' + 'a'.repeat(128);
 const MAX_PAYLOAD_BYTES = 4096;
-const MAX_FAILED_ATTEMPTS = 5;
-const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
 export async function POST(request: Request) {
   try {
-    // 1. Enforce payload size limit (max 4KB)
+    // 1. CSRF Origin / Referer protection
+    const originCheck = validateRequestOrigin(request);
+    if (!originCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Forbidden: Cross-site request rejected' },
+        { status: 403 }
+      );
+    }
+
+    // 2. Enforce payload size limit (max 4KB)
     const contentLength = request.headers.get('content-length');
     if (contentLength && parseInt(contentLength, 10) > MAX_PAYLOAD_BYTES) {
       return NextResponse.json(
@@ -22,7 +36,7 @@ export async function POST(request: Request) {
     }
 
     const rawBody = await request.text();
-    if (rawBody.length > MAX_PAYLOAD_BYTES) {
+    if (Buffer.byteLength(rawBody, 'utf8') > MAX_PAYLOAD_BYTES) {
       return NextResponse.json(
         { error: 'Payload too large' },
         { status: 413 }
@@ -47,16 +61,21 @@ export async function POST(request: Request) {
       );
     }
 
-    const { email, password } = parsed.data;
+    const normalizedEmail = parsed.data.email.toLowerCase();
+    const { password } = parsed.data;
+    const clientIp = extractClientIp(request);
 
-    // 2. Fetch user by email
-    const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
-      include: { organisation: true },
-    });
-
-    // 3. Prevent account enumeration: run constant-time dummy verification if user not found
-    if (!user || !user.isActive) {
+    // 3. Durable PostgreSQL rate-limit & (IP, account) throttle check BEFORE password lookup
+    const throttle = await checkLoginThrottle(clientIp, normalizedEmail);
+    if (throttle.ipBlocked) {
+      await verifyPassword(password, DUMMY_HASH);
+      return NextResponse.json(
+        { error: 'Too many requests. Please try again later.' },
+        { status: 429 }
+      );
+    }
+    if (throttle.ipAccountBlocked) {
+      // Externally indistinguishable from invalid credentials (prevents enumeration and lock disclosure)
       await verifyPassword(password, DUMMY_HASH);
       return NextResponse.json(
         { error: 'Invalid email or password' },
@@ -64,59 +83,41 @@ export async function POST(request: Request) {
       );
     }
 
-    // 4. Check durable account lockout
-    const now = new Date();
-    if (user.lockedUntil && user.lockedUntil > now) {
-      return NextResponse.json(
-        { error: 'Account is temporarily locked due to multiple failed login attempts. Please try again in 15 minutes.' },
-        { status: 429 }
-      );
-    }
+    // 4. Fetch user by email
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      include: { organisation: true },
+    });
 
-    // 5. Verify password
-    const passwordMatch = await verifyPassword(password, user.passwordHash);
-
-    if (!passwordMatch) {
-      const newAttempts = user.failedLoginAttempts + 1;
-      const isLockThreshold = newAttempts >= MAX_FAILED_ATTEMPTS;
-      const lockedUntil = isLockThreshold ? new Date(now.getTime() + LOCKOUT_DURATION_MS) : null;
-
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          failedLoginAttempts: newAttempts,
-          lockedUntil,
-        },
-      });
-
-      if (isLockThreshold) {
-        return NextResponse.json(
-          { error: 'Account is temporarily locked due to multiple failed login attempts. Please try again in 15 minutes.' },
-          { status: 429 }
-        );
-      }
-
+    // 5. Prevent account enumeration: run constant-time dummy verification & record failure uniformly
+    if (!user || !user.isActive || user.role !== 'OWNER') {
+      await verifyPassword(password, DUMMY_HASH);
+      await recordFailedLoginAttempt(clientIp, normalizedEmail);
       return NextResponse.json(
         { error: 'Invalid email or password' },
         { status: 401 }
       );
     }
 
-    // 6. Reset failed attempts on successful login
-    if (user.failedLoginAttempts > 0 || user.lockedUntil) {
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-        },
-      });
+    // 6. Verify password
+    const passwordMatch = await verifyPassword(password, user.passwordHash);
+
+    if (!passwordMatch) {
+      await recordFailedLoginAttempt(clientIp, normalizedEmail);
+      return NextResponse.json(
+        { error: 'Invalid email or password' },
+        { status: 401 }
+      );
     }
 
-    // 7. Create signed session token with minimal claims (no PII)
+    // 7. Clear (IP, account) throttle on successful owner authentication
+    await clearIpAccountThrottle(clientIp, normalizedEmail);
+
+    // 8. Create signed session token with minimal claims and active sessionVersion
     const token = createSessionToken({
       id: user.id,
       organisationId: user.organisationId,
+      sessionVersion: user.sessionVersion,
     });
     await setSessionCookie(token);
 

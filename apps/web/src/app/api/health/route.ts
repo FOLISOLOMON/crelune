@@ -1,19 +1,25 @@
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth/session';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
 import { checkDatabaseConnection } from '@crelune/database';
 
 export async function GET() {
-  const session = await getSession();
+  let isActiveOwner = false;
+  try {
+    const auth = await resolveAuthenticatedOwner();
+    isActiveOwner = auth.status === 'authenticated';
+  } catch {
+    isActiveOwner = false;
+  }
 
-  // Public unauthenticated view: return minimal status only (zero diagnostic leakage)
-  if (!session) {
+  // Public unauthenticated (or deactivated/revoked) view: minimal liveness status only
+  if (!isActiveOwner) {
     return NextResponse.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
     });
   }
 
-  // Authenticated Owner view: detailed operational diagnostics
+  // Authenticated active Owner view: detailed operational diagnostics
   const dbHealth = await checkDatabaseConnection();
 
   return NextResponse.json({

@@ -2,39 +2,52 @@
  * CRELUNE — Web Crypto Universal Session Verifier
  *
  * Compatible with Next.js Middleware Edge and Node.js runtimes.
- * Cryptographically verifies HMAC-SHA256 session token signatures.
+ * Uses Web Crypto `crypto.subtle.verify()` for cryptographic HMAC-SHA256 verification.
  */
 
 import type { OwnerSession } from '@crelune/shared';
+import { validateSessionPayload } from '@crelune/shared';
 
 export const SESSION_COOKIE_NAME = 'crelune_session';
 
-function base64UrlDecode(str: string): string {
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const HMAC_SHA256_BYTES = 32;
+
+function decodeBase64UrlStrict(str: string): Uint8Array | null {
+  if (!str || !BASE64URL_PATTERN.test(str)) {
+    return null;
+  }
+
   let padded = str.replace(/-/g, '+').replace(/_/g, '/');
+  const remainder = padded.length % 4;
+  if (remainder === 1) {
+    return null;
+  }
   while (padded.length % 4) {
     padded += '=';
   }
-  return atob(padded);
-}
 
-function base64UrlEncodeBytes(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  try {
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
   }
-  return btoa(binary)
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
 }
 
 /**
- * Verifies a session token using Web Crypto API.
- * Fails closed (returns null) if secretKey is missing or shorter than 32 characters.
+ * Verifies a session token using Web Crypto `crypto.subtle.verify()`.
+ * Fails closed (returns null) if secretKey is missing, shorter than 32 characters,
+ * signature verification fails, or payload/lifetime constraints are violated.
  */
 export async function verifySessionTokenEdge(
   token: string | undefined,
-  secretKey: string | undefined
+  secretKey: string | undefined,
+  nowSeconds?: number
 ): Promise<OwnerSession | null> {
   // Fail closed if secret key is missing or shorter than 32 characters
   if (!secretKey || secretKey.length < 32) {
@@ -48,6 +61,12 @@ export async function verifySessionTokenEdge(
 
   const [payloadEncoded, signature] = parts;
   if (!payloadEncoded || !signature) return null;
+  if (!BASE64URL_PATTERN.test(payloadEncoded)) return null;
+
+  const signatureBytes = decodeBase64UrlStrict(signature);
+  if (!signatureBytes || signatureBytes.byteLength !== HMAC_SHA256_BYTES) {
+    return null;
+  }
 
   try {
     const encoder = new TextEncoder();
@@ -58,45 +77,30 @@ export async function verifySessionTokenEdge(
       keyData,
       { name: 'HMAC', hash: 'SHA-256' },
       false,
-      ['verify', 'sign']
+      ['verify']
     );
 
     const signedData = encoder.encode(payloadEncoded);
-    const expectedSigBytes = await crypto.subtle.sign('HMAC', cryptoKey, signedData);
-    const expectedSignature = base64UrlEncodeBytes(new Uint8Array(expectedSigBytes));
+    const isValidSignature = await crypto.subtle.verify(
+      'HMAC',
+      cryptoKey,
+      signatureBytes as BufferSource,
+      signedData
+    );
 
-    // Constant-time check: Web Crypto subtle.verify could be used, or byte comparison
-    if (signature !== expectedSignature) {
+    if (!isValidSignature) {
       return null;
     }
 
-    const payloadJson = base64UrlDecode(payloadEncoded);
+    const payloadBytes = decodeBase64UrlStrict(payloadEncoded);
+    if (!payloadBytes) {
+      return null;
+    }
+
+    const payloadJson = new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes);
     const parsed = JSON.parse(payloadJson);
 
-    // Validate structure strictly matching sessionTokenPayloadSchema
-    if (
-      !parsed ||
-      typeof parsed !== 'object' ||
-      typeof parsed.sub !== 'string' ||
-      !parsed.sub ||
-      parsed.role !== 'OWNER' ||
-      typeof parsed.org !== 'string' ||
-      !parsed.org ||
-      typeof parsed.iat !== 'number' ||
-      !Number.isInteger(parsed.iat) ||
-      typeof parsed.exp !== 'number' ||
-      !Number.isInteger(parsed.exp)
-    ) {
-      return null;
-    }
-
-    const now = Math.floor(Date.now() / 1000);
-    // exp > iat, exp >= now, iat <= now + 60
-    if (parsed.exp <= parsed.iat) return null;
-    if (parsed.exp < now) return null;
-    if (parsed.iat > now + 60) return null;
-
-    return parsed as OwnerSession;
+    return validateSessionPayload(parsed, nowSeconds);
   } catch {
     return null;
   }

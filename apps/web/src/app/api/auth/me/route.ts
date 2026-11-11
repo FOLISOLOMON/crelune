@@ -1,32 +1,31 @@
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth/session';
-import { prisma } from '@crelune/database';
+import { clearSessionCookie } from '@/lib/auth/session';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
 
 export async function GET() {
-  const session = await getSession();
-  if (!session) {
+  const auth = await resolveAuthenticatedOwner();
+
+  if (auth.status === 'revoked') {
+    await clearSessionCookie();
+    return NextResponse.json({ error: 'Unauthorized: Session inactive or revoked' }, { status: 401 });
+  }
+
+  if (auth.status !== 'authenticated') {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 });
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: session.sub },
-    include: { organisation: true },
-  });
-
-  if (!user) {
-    return NextResponse.json({ error: 'User not found' }, { status: 404 });
-  }
+  const { profile } = auth.owner;
 
   return NextResponse.json({
     authenticated: true,
     user: {
-      userId: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      role: user.role,
-      organisationId: user.organisationId,
-      organisationName: user.organisation.name,
+      userId: profile.id,
+      email: profile.email,
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      role: profile.role,
+      organisationId: profile.organisationId,
+      organisationName: profile.organisationName,
     },
   });
 }

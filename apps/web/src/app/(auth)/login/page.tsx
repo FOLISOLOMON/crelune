@@ -4,11 +4,13 @@ import React, { useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Sparkles, Shield, AlertCircle } from 'lucide-react';
 import { Button, Input, Card, CardHeader, CardTitle, CardDescription, CardContent } from '@crelune/ui';
+import { isValidCallbackUrl } from '@crelune/shared';
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get('callbackUrl') || '/';
+  const rawCallbackUrl = searchParams.get('callbackUrl');
+  const callbackUrl = isValidCallbackUrl(rawCallbackUrl) ? (rawCallbackUrl as string) : '/';
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');

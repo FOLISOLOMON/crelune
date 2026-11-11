@@ -125,7 +125,7 @@ flowchart TD
 - **Technology Stack**: Node.js, TypeScript, Next.js API Routes / Hono server handlers.
 - **Data Access**: Prisma ORM with PostgreSQL.
 - **Hosted Environment**: Neon Lakebase Postgres (AWS region: `us-east-2`), utilizing pooled connection strings for serverless application queries and unpooled direct strings for migrations.
-- **Authentication**: Cryptographically signed cookie-based sessions (HMAC-SHA256, zero PII claims) with dual Node/Edge Web Crypto validation for Web; Bearer JWT tokens for Mobile; hashed API keys for Windows Creative Agent. Mandatory `SESSION_SECRET` ($\ge 32$ chars, fail-closed).
+- **Authentication**: Cryptographically signed cookie-based sessions (HMAC-SHA256, zero PII claims, `SESSION_TTL_SECONDS = 604800`, `ver` claim) with dual Node/`crypto.subtle.verify` Edge validation, database-backed active-owner & `sessionVersion` revocation checks, Origin/Referer CSRF validation on auth mutations, and durable PostgreSQL `(IP, account)` + `IP` throttling (`auth_throttles`) for Web; Bearer JWT tokens for Mobile; hashed API keys for Windows Creative Agent. Mandatory `SESSION_SECRET` ($\ge 32$ chars, fail-closed `503`).
 
 ---
 

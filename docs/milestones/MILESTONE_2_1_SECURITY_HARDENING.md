@@ -3,7 +3,7 @@
 **Document:** Formal Milestone 2.1 Completion & Security Hardening Report
 **Project:** CRELUNE — Personal Creative and Media Operations Platform
 **Version:** 1.0
-**Status:** Verification Complete & Ready for Review
+**Status:** Superseded in part by Milestone 2.1.1 — see [`MILESTONE_2_1_1_FINAL_SECURITY_CORRECTIONS.md`](./MILESTONE_2_1_1_FINAL_SECURITY_CORRECTIONS.md) for final remediation of login CSRF, scoped PostgreSQL rate limiting, Edge `SubtleCrypto` verification, fail-closed `503` middleware handling, DB `sessionVersion`/`isActive` revocation, and session lifetime bounds.
 **Authoritative References:**
 - Central Agent Operating Instructions: [`.agents/AGENTS.md`](file:///d:/Projects/Crelune/.agents/AGENTS.md)
 - Security Specification: [`docs/SECURITY.md`](file:///d:/Projects/Crelune/docs/SECURITY.md)

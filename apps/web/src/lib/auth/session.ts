@@ -8,10 +8,16 @@
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
 import type { OwnerSession } from '@crelune/shared';
-import { sessionTokenPayloadSchema } from '@crelune/shared';
+import {
+  SESSION_TTL_SECONDS,
+  validateSessionPayload,
+} from '@crelune/shared';
 
 export const SESSION_COOKIE_NAME = 'crelune_session';
-export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+export { SESSION_TTL_SECONDS };
+
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const HMAC_SHA256_BYTES = 32;
 
 export function getSecretKey(): string {
   const secret = process.env.SESSION_SECRET;
@@ -23,56 +29,67 @@ export function getSecretKey(): string {
   return secret;
 }
 
-function base64UrlEncode(str: string): string {
-  return Buffer.from(str, 'utf8')
+function base64UrlEncodeBytes(buf: Buffer): string {
+  return buf
     .toString('base64')
     .replace(/=/g, '')
     .replace(/\+/g, '-')
     .replace(/\//g, '_');
 }
 
-function base64UrlDecode(str: string): string {
+function decodeBase64UrlStrict(str: string): Buffer | null {
+  if (!str || !BASE64URL_PATTERN.test(str)) {
+    return null;
+  }
   let padded = str.replace(/-/g, '+').replace(/_/g, '/');
+  if (padded.length % 4 === 1) {
+    return null;
+  }
   while (padded.length % 4) {
     padded += '=';
   }
-  return Buffer.from(padded, 'base64').toString('utf8');
+  return Buffer.from(padded, 'base64');
 }
 
-function sign(payloadStr: string, secret: string): string {
+function signDigest(payloadStr: string, secret: string): Buffer {
   return crypto
     .createHmac('sha256', secret)
-    .update(payloadStr)
-    .digest('base64')
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
+    .update(payloadStr, 'utf8')
+    .digest();
 }
 
 /**
  * Creates a signed, tamper-evident session token with minimal claims (no PII).
  */
-export function createSessionToken(user: { id: string; organisationId: string }): string {
+export function createSessionToken(user: {
+  id: string;
+  organisationId: string;
+  sessionVersion?: number;
+}): string {
   const secret = getSecretKey();
   const now = Math.floor(Date.now() / 1000);
   const session: OwnerSession = {
     sub: user.id,
     role: 'OWNER',
     org: user.organisationId,
+    ver: user.sessionVersion ?? 1,
     iat: now,
     exp: now + SESSION_TTL_SECONDS,
   };
 
-  const payloadEncoded = base64UrlEncode(JSON.stringify(session));
-  const signature = sign(payloadEncoded, secret);
+  const payloadEncoded = base64UrlEncodeBytes(Buffer.from(JSON.stringify(session), 'utf8'));
+  const signature = base64UrlEncodeBytes(signDigest(payloadEncoded, secret));
   return `${payloadEncoded}.${signature}`;
 }
 
 /**
- * Verifies a session token signature, structure, and timestamps.
+ * Verifies a session token signature, structure, and lifetime bounds.
  * Fails closed and returns null on any discrepancy or missing secret.
  */
-export function verifySessionToken(token: string | undefined): OwnerSession | null {
+export function verifySessionToken(
+  token: string | undefined,
+  nowSeconds?: number
+): OwnerSession | null {
   if (!token || typeof token !== 'string') return null;
 
   const parts = token.split('.');
@@ -80,34 +97,31 @@ export function verifySessionToken(token: string | undefined): OwnerSession | nu
 
   const [payloadEncoded, signature] = parts;
   if (!payloadEncoded || !signature) return null;
+  if (!BASE64URL_PATTERN.test(payloadEncoded)) return null;
+
+  const sigBytes = decodeBase64UrlStrict(signature);
+  if (!sigBytes || sigBytes.byteLength !== HMAC_SHA256_BYTES) {
+    return null;
+  }
 
   try {
     const secret = getSecretKey();
-    const expectedSignature = sign(payloadEncoded, secret);
+    const expectedSigBytes = signDigest(payloadEncoded, secret);
 
-    const sigBuf = Buffer.from(signature);
-    const expBuf = Buffer.from(expectedSignature);
-    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    if (
+      sigBytes.byteLength !== expectedSigBytes.byteLength ||
+      !crypto.timingSafeEqual(sigBytes, expectedSigBytes)
+    ) {
       return null;
     }
 
-    const payloadJson = base64UrlDecode(payloadEncoded);
-    const parsedJson = JSON.parse(payloadJson);
-    const parseResult = sessionTokenPayloadSchema.safeParse(parsedJson);
-    if (!parseResult.success) {
+    const payloadBytes = decodeBase64UrlStrict(payloadEncoded);
+    if (!payloadBytes) {
       return null;
     }
 
-    const session = parseResult.data;
-    const now = Math.floor(Date.now() / 1000);
-
-    // Timestamp validations
-    if (session.exp <= session.iat) return null;
-    if (session.exp < now) return null;
-    if (session.iat > now + 60) return null; // Clock skew protection (max 60 seconds future)
-    if (session.role !== 'OWNER') return null;
-
-    return session;
+    const parsedJson = JSON.parse(payloadBytes.toString('utf8'));
+    return validateSessionPayload(parsedJson, nowSeconds);
   } catch {
     return null;
   }

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] - 2026-11-11
+
+### Milestone 2.1.1: Final Authentication Security Corrections
+
+#### Security & Reliability
+- **Login CSRF Enforcement & Safe Proxy Configuration**: Applied Origin/Referer host validation (`validateRequestOrigin`) to `POST /api/auth/login` and removed the `NODE_ENV !== 'test'` bypass on `POST /api/auth/logout`. Added explicit `TRUST_PROXY=true` gating and optional `APP_URL` / `ALLOWED_ORIGINS` support in `.env.example` so spoofed forwarded host headers are ignored by default.
+- **Anti-Lockout Durable PostgreSQL Rate Limiting**: Added `AuthThrottle` (`auth_throttles`) model in Prisma and implemented race-safe atomic `INSERT ... ON CONFLICT (bucket_key) DO UPDATE` throttling scoped by `(IP, normalized email)` (5 attempts / 15m -> indistinguishable `401 Invalid email or password`) and `IP` (20 attempts / 15m -> `429`), preventing remote attackers from locking out the legitimate owner while guaranteeing block expiry recovery without extending `blocked_until` on retries.
+- **Fail-Closed `503` Middleware Handling**: Fixed `/login` infinite self-redirect loop when `SESSION_SECRET` is missing or `< 32` characters by returning static `503` HTML for pages and `503` JSON for non-health APIs (`Cache-Control: no-store`), preserving public `GET /api/health` liveness.
+- **Edge Cryptographic Verification Parity**: Replaced custom string comparison in `verifySessionTokenEdge()` with Web Crypto `crypto.subtle.verify()` over raw HMAC-SHA256 bytes, strict base64url decoding, 32-byte signature length verification, and fatal UTF-8 decoding.
+- **Real-Time Database Session Revocation**: Added `User.sessionVersion` (`ver` session claim) and server-side [`resolveAuthenticatedOwner`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/owner-guard.ts) enforcing `isActive`, `role === 'OWNER'`, `organisationId`, and `sessionVersion` across dashboard SSR pages, `/api/auth/me`, and `/api/health`, rendering [`SessionRevokedNotice`](file:///d:/Projects/Crelune/apps/web/src/components/auth/SessionRevokedNotice.tsx) to avoid Edge/SSR redirect loops.
+- **Consistent Session Lifetime Validation**: Centralized `SESSION_TTL_SECONDS = 604800` and shared [`validateSessionPayload`](file:///d:/Projects/Crelune/packages/shared/src/schemas/auth.ts) enforcing `exp > iat`, `exp - iat <= SESSION_TTL_SECONDS`, `exp > now`, and `iat <= now + 60` across Node and Edge runtimes.
+- **Test & Documentation Updates**: Expanded automated test coverage to 95 passing tests across 7 files, synchronized Prisma schema to Neon (`db:push`), verified live HTTP `next start` behavior, and documented ADR 011 plus `MILESTONE_2_1_1_FINAL_SECURITY_CORRECTIONS.md`.
+
+---
+
 ## [0.3.1] - 2026-11-10
 
 ### Milestone 2.1: Authentication and Security Hardening

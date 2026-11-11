@@ -3,14 +3,14 @@ import { NextRequest } from 'next/server';
 import { middleware } from './middleware';
 import { createSessionToken } from './lib/auth/session';
 
-describe('Middleware Route Protection & Edge Security (Milestone 2.1)', () => {
+describe('Middleware Route Protection & Edge Security (Milestone 2.1 & 2.1.1)', () => {
   const TEST_SECRET = 'a'.repeat(32);
   const originalSecret = process.env.SESSION_SECRET;
 
   const mockUser = {
     id: 'usr_cln_123',
     organisationId: 'org_cln_123',
-    role: 'OWNER' as const,
+    sessionVersion: 1,
   };
 
   beforeEach(() => {
@@ -21,7 +21,10 @@ describe('Middleware Route Protection & Edge Security (Milestone 2.1)', () => {
     process.env.SESSION_SECRET = originalSecret;
   });
 
-  function createMockRequest(path: string, options: { method?: string; cookie?: string; headers?: Record<string, string> } = {}) {
+  function createMockRequest(
+    path: string,
+    options: { method?: string; cookie?: string; headers?: Record<string, string> } = {}
+  ) {
     const url = `http://localhost:3000${path}`;
     const headers = new Headers(options.headers || {});
     if (options.cookie) {
@@ -139,22 +142,49 @@ describe('Middleware Route Protection & Edge Security (Milestone 2.1)', () => {
     });
   });
 
-  describe('Cryptographic Configuration Failure (Fail Closed)', () => {
-    it('returns 503 for APIs if SESSION_SECRET is missing', async () => {
+  describe('Cryptographic Configuration Failure (Fail Closed with Zero Redirect Loop)', () => {
+    it('returns 503 JSON for private APIs and auth endpoints if SESSION_SECRET is missing', async () => {
       delete process.env.SESSION_SECRET;
-      const req = createMockRequest('/api/members');
-      const res = await middleware(req);
-      expect(res.status).toBe(503);
-      const json = await res.json();
-      expect(json.error).toContain('Missing cryptographic configuration');
+      for (const path of ['/api/members', '/api/auth/me', '/api/auth/login']) {
+        const req = createMockRequest(path, { method: path.endsWith('/login') ? 'POST' : 'GET' });
+        const res = await middleware(req);
+        expect(res.status).toBe(503);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        const json = await res.json();
+        expect(json.error).toContain('cryptographic configuration');
+      }
     });
 
-    it('redirects to /login?error=server_configuration for pages if SESSION_SECRET is missing', async () => {
+    it('returns static 503 HTML for /login without redirecting to itself (no redirect loop)', async () => {
       delete process.env.SESSION_SECRET;
-      const req = createMockRequest('/members');
+      const req = createMockRequest('/login');
       const res = await middleware(req);
-      expect(res.status).toBe(307);
-      expect(res.headers.get('location')).toContain('error=server_configuration');
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get('location')).toBeNull();
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      const body = await res.text();
+      expect(body).toContain('Authentication Configuration Error');
+    });
+
+    it('returns static 503 HTML for protected pages when SESSION_SECRET is short or missing', async () => {
+      process.env.SESSION_SECRET = 'too-short';
+      for (const path of ['/', '/settings', '/members']) {
+        const req = createMockRequest(path);
+        const res = await middleware(req);
+        expect(res.status).toBe(503);
+        expect(res.headers.get('location')).toBeNull();
+      }
+    });
+
+    it('deliberately allows GET /api/health liveness endpoint while blocking POST /api/health when SESSION_SECRET is missing', async () => {
+      delete process.env.SESSION_SECRET;
+      const getHealth = await middleware(createMockRequest('/api/health', { method: 'GET' }));
+      expect(getHealth.status).toBe(200);
+
+      const postHealth = await middleware(createMockRequest('/api/health', { method: 'POST' }));
+      expect(postHealth.status).toBe(503);
     });
   });
 });

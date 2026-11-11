@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { validatePasswordStrength, isValidCallbackUrl } from '@crelune/shared';
-import { isAllowedOrigin } from './csrf';
+import { isAllowedOrigin, validateRequestOriginDetails } from './csrf';
 
-describe('Security Hardening Validations (Milestone 2.1)', () => {
+describe('Security Hardening Validations (Milestone 2.1 & 2.1.1)', () => {
   describe('Password Strength Validation', () => {
     it('accepts a strong, non-trivial password', () => {
       expect(validatePasswordStrength('cReLuNe_OpS#2026!Master')).toBeNull();
@@ -68,24 +68,140 @@ describe('Security Hardening Validations (Milestone 2.1)', () => {
     });
 
     it('allows requests when Referer host matches Host header if Origin is null', () => {
-      expect(isAllowedOrigin(null, 'http://localhost:3000/dashboard', HOST)).toBe(true);
+      expect(isAllowedOrigin(null, 'http://localhost:3000/login', HOST)).toBe(true);
     });
 
-    it('rejects cross-site origins', () => {
-      expect(isAllowedOrigin('http://attacker.com', null, HOST)).toBe(false);
-      expect(isAllowedOrigin('https://malicious.org', null, HOST)).toBe(false);
+    it('rejects mismatched origins and does not fall back to a valid referer', () => {
+      expect(
+        validateRequestOriginDetails({
+          originHeader: 'https://attacker.com',
+          refererHeader: 'http://localhost:3000/login',
+          hostHeader: HOST,
+        })
+      ).toEqual({ allowed: false, reason: 'origin_host_mismatch' });
     });
 
-    it('rejects cross-site referers', () => {
+    it('rejects cross-site referers when Origin is null', () => {
       expect(isAllowedOrigin(null, 'http://attacker.com/evil', HOST)).toBe(false);
     });
 
     it('rejects when both Origin and Referer are absent', () => {
-      expect(isAllowedOrigin(null, null, HOST)).toBe(false);
+      expect(
+        validateRequestOriginDetails({
+          originHeader: null,
+          refererHeader: null,
+          hostHeader: HOST,
+        })
+      ).toEqual({ allowed: false, reason: 'missing_origin_and_referer' });
     });
 
-    it('rejects when Host header is absent', () => {
+    it('rejects malformed Origin headers (null literal, paths, userinfo, schemes)', () => {
+      for (const badOrigin of [
+        '',
+        'null',
+        'not-a-url',
+        'javascript:alert(1)',
+        'http://localhost:3000/path',
+        'http://user:pass@localhost:3000',
+        'http://localhost:3000 ',
+      ]) {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: badOrigin,
+            refererHeader: 'http://localhost:3000/login',
+            hostHeader: HOST,
+          }).allowed
+        ).toBe(false);
+      }
+    });
+
+    it('rejects malformed Referer headers', () => {
+      for (const badRef of ['', 'not-a-url', 'javascript:alert(1)', 'http://user:pass@localhost:3000/login']) {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: null,
+            refererHeader: badRef,
+            hostHeader: HOST,
+          }).allowed
+        ).toBe(false);
+      }
+    });
+
+    it('rejects when Host header is missing or malformed', () => {
       expect(isAllowedOrigin('http://localhost:3000', null, null)).toBe(false);
+      expect(isAllowedOrigin('http://localhost:3000', null, 'evil.com/path')).toBe(false);
+    });
+
+    describe('Reverse-Proxy & Deployment Configuration', () => {
+      it('ignores arbitrary X-Forwarded-Host headers when trustProxy is disabled', () => {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: 'https://evil.com',
+            refererHeader: null,
+            hostHeader: 'crelune.internal',
+            forwardedHostHeader: 'evil.com',
+            forwardedProtoHeader: 'https',
+            trustProxy: false,
+          })
+        ).toEqual({ allowed: false, reason: 'origin_host_mismatch' });
+      });
+
+      it('allows matching X-Forwarded-Host and X-Forwarded-Proto when trustProxy is enabled', () => {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: 'https://crelune.example.com',
+            refererHeader: null,
+            hostHeader: '127.0.0.1:3000',
+            forwardedHostHeader: 'crelune.example.com',
+            forwardedProtoHeader: 'https',
+            trustProxy: true,
+          })
+        ).toEqual({ allowed: true });
+      });
+
+      it('rejects protocol downgrade mismatch under trusted reverse proxy', () => {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: 'http://crelune.example.com',
+            refererHeader: null,
+            hostHeader: '127.0.0.1:3000',
+            forwardedHostHeader: 'crelune.example.com',
+            forwardedProtoHeader: 'https',
+            trustProxy: true,
+          })
+        ).toEqual({ allowed: false, reason: 'origin_protocol_mismatch' });
+      });
+
+      it('enforces explicit ALLOWED_ORIGINS allowlist strictly over Host/Forwarded headers', () => {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: 'https://app.crelune.example',
+            refererHeader: null,
+            hostHeader: '127.0.0.1:3000',
+            allowedOrigins: 'https://app.crelune.example, https://admin.crelune.example',
+          })
+        ).toEqual({ allowed: true });
+
+        expect(
+          validateRequestOriginDetails({
+            originHeader: 'http://127.0.0.1:3000',
+            refererHeader: null,
+            hostHeader: '127.0.0.1:3000',
+            allowedOrigins: 'https://app.crelune.example',
+          })
+        ).toEqual({ allowed: false, reason: 'origin_not_allowlisted' });
+      });
+
+      it('supports APP_URL canonical origin match behind reverse proxy', () => {
+        expect(
+          validateRequestOriginDetails({
+            originHeader: 'https://studio.crelune.example',
+            refererHeader: null,
+            hostHeader: '127.0.0.1:3000',
+            appUrl: 'https://studio.crelune.example',
+          })
+        ).toEqual({ allowed: true });
+      });
     });
   });
 });

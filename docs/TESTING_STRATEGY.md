@@ -1,4 +1,4 @@
-﻿# CRELUNE — Quality Assurance & Testing Strategy
+# CRELUNE — Quality Assurance & Testing Strategy
 
 **Document:** Comprehensive Testing Framework, Verification Workflows, and Quality Standards  
 **Project:** CRELUNE  
@@ -192,3 +192,31 @@ Automated tests verified for Milestone 2.1 Authentication & Security Hardening:
 3. **Production Build (`npm run build`)**:
    - `next build` compiled 17 routes and middleware (34.9 kB) with zero errors (`PASS`).
    - `tsc -b` succeeded for all workspace packages (`PASS`).
+
+---
+
+## 7. Milestone 2.1.1 Testing Evidence (Final Authentication Security Corrections)
+
+Automated and live HTTP verification executed for Milestone 2.1.1:
+1. **Unit & Integration Testing (`cmd /c npm test`)**:
+   - `@crelune/web` (78 tests across 5 files):
+     - `src/lib/auth/security-hardening.test.ts` (22 tests): password strength validation, `callbackUrl` open redirect defenses, strict `Origin`/`Referer` validation, malformed headers, `ALLOWED_ORIGINS`, `APP_URL`, and `TRUST_PROXY` proxy header gating.
+     - `src/lib/auth/session.test.ts` (15 tests): fail-closed secret enforcement, zero-PII claims with `ver`, Node vs. Web Crypto Edge verification parity (`crypto.subtle.verify`), base64url/UTF-8 tamper rejection, and consistent boundary tests for `exp > iat`, `exp > now`, `iat <= now + 60`, and `exp - iat <= SESSION_TTL_SECONDS`.
+     - `src/middleware.test.ts` (19 tests): strict static whitelist, dotted private endpoint interception (`401`), HTTP method enforcement, `/login` redirect handling, and fail-closed `503` HTML/JSON responses (no `/login` self-redirect loop) with intentional `GET /api/health` liveness exception.
+     - `src/lib/auth/password.test.ts` (4 tests): scrypt hashing, random salt uniqueness, constant-time verification, malformed hash rejection.
+     - `src/app/api/auth/auth-routes.test.ts` (18 tests): `POST /api/auth/login` CSRF + payload limit + indistinguishable `401 Invalid email or password` + concurrent race-safe PostgreSQL `(IP, account)` throttling + IP isolation + `429` IP flood + block expiry auto-recovery, `POST /api/auth/logout` strict CSRF (`403` without `NODE_ENV=test` bypass), `GET /api/auth/me` & `GET /api/health` server-side `isActive` / `sessionVersion` revocation, and direct `verifyActiveOwnerInDatabase` guard tests (with mocked Prisma/cookie store).
+   - `@crelune/shared`:
+     - `src/schemas/schemas.test.ts` (14 tests): Zod schemas and shared `validateSessionPayload` lifetime boundary validation.
+   - `@crelune/ui`:
+     - `src/tokens/tokens.test.ts` (3 tests): palette, typography, and layout tokens.
+   - **Total**: 95 automated tests passing across 7 test files with 0 failures (`PASS`).
+2. **Type Checking (`cmd /c npm run type-check`)**:
+   - `tsc --noEmit` passed with 0 errors across `@crelune/web`, `@crelune/database`, `@crelune/shared`, and `@crelune/ui` (`PASS`).
+3. **Production Build (`cmd /c npm run build`)**:
+   - `next build` compiled 17 routes and Middleware (`52.3 kB`) plus `tsc -b` across `@crelune/database`, `@crelune/shared`, and `@crelune/ui` with exit code `0` (`PASS`).
+4. **Live HTTP Server Verification (`next start` on loopback ports `3109` / `3110`)**:
+   - With valid `SESSION_SECRET`: verified unauthenticated `GET /` (`307` to `/login?callbackUrl=%2F`), `GET /login` (`200`), `GET /api/auth/me` (`401`), `GET /api/export.json` (`401`), `GET /api/health` (`200`, keys `["status","timestamp"]`, `status: "ok"`), `GET /api/auth/logout` (`401`), `POST /api/auth/login` without Origin (`403`), mismatched Origin (`403`), spoofed `X-Forwarded-Host` (`403`), and `POST /api/auth/logout` without Origin (`403`) (`PASS`).
+   - With missing `SESSION_SECRET`: verified `GET /login` (`503`, no redirect loop), `GET /` (`503`), `GET /api/auth/me` (`503`), and `GET /api/health` (`200`, `status: "ok"`) (`PASS`).
+5. **Checks Not Executed / Not Configured**:
+   - `npm run lint`: ESLint config not initialized in `apps/web` (`next lint` prompts interactively and exits `1`; Next.js built-in type/lint validation still runs during `next build`).
+   - Browser E2E UI suite (Playwright/headless browser): `NOT RUN` (not configured in Milestone 2.1.1; HTTP/SSR/middleware behavior verified via Vitest and live `next start` `fetch` harness).

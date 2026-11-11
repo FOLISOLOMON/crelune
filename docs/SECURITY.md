@@ -1,4 +1,4 @@
-﻿# CRELUNE — Security, Privacy & Compliance Specification
+# CRELUNE — Security, Privacy & Compliance Specification
 
 **Document:** Security Posture, Data Privacy Controls, and Threat Defense Architecture  
 **Project:** CRELUNE  
@@ -192,3 +192,38 @@ Implemented as part of Milestone 2.1 corrective hardening:
    - Trivial or common passwords are systematically rejected.
    - Default timezone is established as `Africa/Accra`.
    - Database connection teardown (`prisma.$disconnect()`) is guaranteed on all execution branches.
+
+---
+
+## 9. Milestone 2.1.1 Final Authentication Security Corrections
+
+Implemented in Milestone 2.1.1 following Product Owner source review:
+
+1. **Login & Logout CSRF Origin Protection ([`apps/web/src/lib/auth/csrf.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/csrf.ts))**:
+   - Applied [`validateRequestOrigin`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/csrf.ts) to both `POST /api/auth/login` and `POST /api/auth/logout` unconditionally across all environments (removed test-mode bypass on logout).
+   - Rejects requests missing both `Origin` and `Referer`, malformed origins/referers, or cross-origin mismatches with `403 Forbidden`.
+   - Ignores `x-forwarded-host` / `x-forwarded-proto` unless `TRUST_PROXY=true` is explicitly configured; supports optional `APP_URL` and comma-separated `ALLOWED_ORIGINS` allowlists.
+
+2. **Durable PostgreSQL Throttling & Anti-Lockout Isolation ([`apps/web/src/lib/auth/rate-limit.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts))**:
+   - Replaced global `User.lockedUntil` login blocking with race-safe atomic `INSERT ... ON CONFLICT (bucket_key) DO UPDATE` operations on PostgreSQL table `auth_throttles` ([`AuthThrottle`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma)).
+   - Tracks two SHA-256-hashed buckets:
+     - `(IP, normalized email)`: max 5 failures in 15 minutes → 15-minute block returning an indistinguishable `401 Invalid email or password` (prevents both credential enumeration and block-state disclosure).
+     - `(IP)` aggregate: max 20 failures in 15 minutes → 15-minute IP block returning `429 Too many requests. Please try again later.`.
+   - Retries during an active block do not extend `blocked_until`, expired windows/blocks auto-reset cleanly, and external attackers on IP A cannot lock out the legitimate owner on IP B.
+   - Proxy client IP headers (`x-forwarded-for`, `x-real-ip`) are ignored unless `TRUST_PROXY=true`.
+
+3. **Fail-Closed Middleware Configuration Error Handling ([`apps/web/src/middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts))**:
+   - Missing or short (`< 32` chars) `SESSION_SECRET` no longer redirects `/login` to `/login` (eliminating redirect loops).
+   - Protected/login HTML routes fail closed with static `503 Service Unavailable` (`Cache-Control: no-store`); non-public API routes fail closed with `503` JSON; `GET /api/health` intentionally remains reachable and returns minimal `{"status": "ok", "timestamp": "..."}`.
+
+4. **Edge Cryptographic Verification Parity ([`apps/web/src/lib/auth/edge-session.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/edge-session.ts))**:
+   - Replaced custom string equality with native Web Crypto `crypto.subtle.verify('HMAC', cryptoKey, signatureBytes, signedData)` over raw bytes.
+   - Added strict base64url validation, 32-byte HMAC signature length enforcement, and fatal UTF-8 payload decoding, matching Node's `timingSafeEqual` verification semantics.
+
+5. **Real-Time Server-Side Revocation & Account Status Enforcement ([`apps/web/src/lib/auth/owner-guard.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/owner-guard.ts))**:
+   - Protected dashboard layout/pages, `/api/auth/me`, and `/api/health` execute [`resolveAuthenticatedOwner`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/owner-guard.ts) against PostgreSQL.
+   - Verifies `user.isActive === true`, `user.role === 'OWNER'`, `user.organisationId === session.org`, and `user.sessionVersion === session.ver`.
+   - When a signed cookie is revoked via `sessionVersion` bump or `isActive = false`, APIs clear the session cookie and return `401` (or minimal `ok` on `/api/health`), while SSR pages render [`SessionRevokedNotice`](file:///d:/Projects/Crelune/apps/web/src/components/auth/SessionRevokedNotice.tsx) instead of redirecting to `/login` (preventing Edge middleware redirect loops).
+
+6. **Consistent Session Lifetime Validation ([`packages/shared/src/schemas/auth.ts`](file:///d:/Projects/Crelune/packages/shared/src/schemas/auth.ts))**:
+   - Shared [`validateSessionPayload`](file:///d:/Projects/Crelune/packages/shared/src/schemas/auth.ts) enforces `SESSION_TTL_SECONDS = 604800` (`7` days), `exp > iat`, `exp - iat <= SESSION_TTL_SECONDS`, `exp > now`, and `iat <= now + 60` identically across Node and Edge runtimes.

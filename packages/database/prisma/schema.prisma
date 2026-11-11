@@ -26,21 +26,23 @@ model Organisation {
 }
 
 model User {
-  id             String          @id @default(cuid())
-  organisationId String          @map("organisation_id")
-  email          String          @unique
-  passwordHash   String          @map("password_hash")
-  firstName      String          @map("first_name")
-  lastName       String          @map("last_name")
-  role           String          @default("OWNER")
-  isActive       Boolean         @default(true) @map("is_active")
-  failedLoginAttempts Int      @default(0) @map("failed_login_attempts")
-  lockedUntil    DateTime?       @map("locked_until")
-  createdAt      DateTime        @default(now()) @map("created_at")
-  updatedAt      DateTime        @updatedAt @map("updated_at")
+  id                  String          @id @default(cuid())
+  organisationId      String          @map("organisation_id")
+  email               String          @unique
+  passwordHash        String          @map("password_hash")
+  firstName           String          @map("first_name")
+  lastName            String          @map("last_name")
+  role                String          @default("OWNER")
+  isActive            Boolean         @default(true) @map("is_active")
+  sessionVersion      Int             @default(1) @map("session_version")
+  // Retained non-destructively from Milestone 2.1; superseded by AuthThrottle in Milestone 2.1.1
+  failedLoginAttempts Int             @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime?       @map("locked_until")
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
 
-  organisation   Organisation    @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  preferences    UserPreference?
+  organisation        Organisation    @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  preferences         UserPreference?
 
   @@index([organisationId])
   @@map("users")
@@ -60,4 +62,19 @@ model UserPreference {
   user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_preferences")
+}
+
+// -----------------------------------------------------------------------------
+// DURABLE AUTHENTICATION RATE LIMITING & THROTTLING (Milestone 2.1.1)
+// -----------------------------------------------------------------------------
+
+model AuthThrottle {
+  bucketKey    String    @id @map("bucket_key")
+  attempts     Int       @default(0)
+  windowStart  DateTime  @default(now()) @map("window_start")
+  blockedUntil DateTime? @map("blocked_until")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@index([blockedUntil])
+  @@map("auth_throttles")
 }

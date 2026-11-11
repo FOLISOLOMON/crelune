@@ -1,5 +1,6 @@
 import React from 'react';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import {
   Users,
   Cake,
@@ -12,28 +13,25 @@ import {
   ArrowRight,
   ShieldCheck,
 } from 'lucide-react';
-import { getSession } from '@/lib/auth/session';
-import { prisma, checkDatabaseConnection } from '@crelune/database';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { checkDatabaseConnection } from '@crelune/database';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, Badge, Header } from '@crelune/ui';
+import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
 
 export default async function DashboardPage() {
-  const session = await getSession();
-  const dbHealth = await checkDatabaseConnection();
+  const auth = await resolveAuthenticatedOwner();
 
-  let ownerName = 'Workspace Owner';
-  let ownerEmail = 'owner@crelune.app';
-  if (session?.sub) {
-    const user = await prisma.user.findUnique({
-      where: { id: session.sub },
-      select: { firstName: true, email: true },
-    });
-    if (user?.firstName) {
-      ownerName = user.firstName;
-    }
-    if (user?.email) {
-      ownerEmail = user.email;
-    }
+  if (auth.status === 'unauthenticated') {
+    redirect('/login');
   }
+
+  if (auth.status === 'revoked') {
+    return <SessionRevokedNotice />;
+  }
+
+  const dbHealth = await checkDatabaseConnection();
+  const ownerName = auth.owner.profile.firstName || 'Workspace Owner';
+  const ownerEmail = auth.owner.profile.email;
 
   const operationalCards = [
     {
