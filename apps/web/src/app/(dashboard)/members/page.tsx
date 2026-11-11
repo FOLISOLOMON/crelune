@@ -1,21 +1,35 @@
 import React from 'react';
-import { Users } from 'lucide-react';
-import { Header, EmptyState } from '@crelune/ui';
+import { redirect } from 'next/navigation';
+import { MEMBER_LIST_DEFAULT_LIMIT } from '@crelune/shared';
+import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
+import { MemberDirectoryClient } from '@/components/members/MemberDirectoryClient';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { listMembers } from '@/lib/members/member-service';
 
-export default function MembersPage() {
+export const dynamic = 'force-dynamic';
+
+export default async function MembersPage() {
+  const auth = await resolveAuthenticatedOwner();
+
+  if (auth.status === 'unauthenticated') {
+    redirect('/login');
+  }
+
+  if (auth.status === 'revoked') {
+    return <SessionRevokedNotice />;
+  }
+
+  const initialData = await listMembers(auth.owner.profile.organisationId, {
+    status: 'active',
+    sort: 'name_asc',
+    page: 1,
+    limit: MEMBER_LIST_DEFAULT_LIMIT,
+  });
+
   return (
-    <div className="space-y-6">
-      <Header
-        title="Members Directory"
-        description="Pastoral directory, member profiles, and contact records"
-      />
-
-      <EmptyState
-        icon={<Users className="w-6 h-6" />}
-        badgeText="Scheduled for Milestone 3"
-        title="Member Management Activates in Milestone 3"
-        description="The member directory module is scheduled for implementation in Milestone 3 (Members & Birthdays). It will support personal details, date-only birthday records, pastoral contacts, and photo association."
-      />
-    </div>
+    <MemberDirectoryClient
+      initialMembers={initialData.members}
+      initialPagination={initialData.pagination}
+    />
   );
 }
