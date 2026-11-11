@@ -1,79 +1,113 @@
 /**
  * Fails closed if PostgreSQL integration tests target a production database,
- * an unverified branch, a mismatched endpoint, or fallback configuration.
+ * an unverified branch, a mismatched/lookalike hostname, a wrong database name,
+ * or conflicting shell environment configuration.
  */
 
 export const APPROVED_DEV_BRANCH_NAME = 'development';
 export const APPROVED_DEV_BRANCH_ID = 'br-nameless-silence-bexjp44k';
-export const APPROVED_DEV_ENDPOINT = 'ep-muddy-math-ben8e8p7';
+export const APPROVED_DEV_POOLED_HOST =
+  'ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech';
+export const APPROVED_DEV_DIRECT_HOST =
+  'ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech';
+export const APPROVED_DEV_DATABASE = 'neondb';
 
 const KNOWN_PRODUCTION_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
 const KNOWN_PRODUCTION_BRANCH_IDS = new Set(['br-withered-moon-be8coj8h']);
-const KNOWN_PRODUCTION_ENDPOINTS = ['ep-mute-forest-bepsjmsu'];
+const KNOWN_PRODUCTION_HOSTS = new Set([
+  'ep-mute-forest-bepsjmsu-pooler.c-9.us-east-2.aws.neon.tech',
+  'ep-mute-forest-bepsjmsu.c-9.us-east-2.aws.neon.tech',
+]);
+const KNOWN_PRODUCTION_ENDPOINT_ID = 'ep-mute-forest-bepsjmsu';
+const PROTECTED_ENV_KEYS = [
+  'DATABASE_URL',
+  'DATABASE_URL_UNPOOLED',
+  'NEON_BRANCH',
+  'NEON_BRANCH_ID',
+] as const;
 
 export interface VerifiedDevDatabaseTarget {
   dbHost: string;
   directHost: string;
+  database: string;
   branchName: string;
   branchId: string;
 }
 
-function parseUrlHostname(rawUrl: string | undefined, varName: string): string {
-  if (!rawUrl || !rawUrl.trim()) {
-    throw new Error(
-      `Refusing to run PostgreSQL integration tests: ${varName} is missing.`
-    );
-  }
-  try {
-    return new URL(rawUrl).hostname.toLowerCase();
-  } catch {
-    throw new Error(
-      `Refusing to run PostgreSQL integration tests: invalid ${varName}.`
-    );
-  }
-}
-
-function assertNotProductionEndpoint(hostname: string, varName: string): void {
-  for (const prodEndpoint of KNOWN_PRODUCTION_ENDPOINTS) {
-    if (hostname.includes(prodEndpoint)) {
+/**
+ * Ensures pre-existing shell environment variables do not conflict with `.env.local`.
+ * Never includes variable values or credentials in thrown errors.
+ */
+export function assertNoShellEnvConflict(
+  shellEnv: Record<string, string | undefined>,
+  fileEnv: Record<string, string | undefined>
+): void {
+  for (const key of PROTECTED_ENV_KEYS) {
+    const shellValue = shellEnv[key];
+    if (shellValue && shellValue !== fileEnv[key]) {
       throw new Error(
-        `Refusing to run PostgreSQL integration tests: ${varName} targets production endpoint "${hostname}".`
+        `Refusing to run PostgreSQL integration tests: pre-existing shell ${key} conflicts with .env.local.`
       );
     }
   }
 }
 
-function assertApprovedDevEndpoint(
-  hostname: string,
+function parseValidatedTargetUrl(
+  rawUrl: string | undefined,
   varName: string,
-  options: { allowPooler: boolean }
-): void {
-  assertNotProductionEndpoint(hostname, varName);
-
-  if (!hostname.endsWith('.neon.tech')) {
+  expectedHostname: string
+): { hostname: string; database: string } {
+  if (!rawUrl || !rawUrl.trim()) {
     throw new Error(
-      `Refusing to run PostgreSQL integration tests: ${varName} host "${hostname}" is not an approved Neon endpoint.`
+      `Refusing to run PostgreSQL integration tests: ${varName} is missing.`
     );
   }
 
-  const directPrefix = `${APPROVED_DEV_ENDPOINT}.`;
-  const poolerPrefix = `${APPROVED_DEV_ENDPOINT}-pooler.`;
-
-  if (!options.allowPooler && hostname.startsWith(poolerPrefix)) {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
     throw new Error(
-      `Refusing to run PostgreSQL integration tests: ${varName} must use the direct unpooled endpoint, got "${hostname}".`
+      `Refusing to run PostgreSQL integration tests: malformed ${varName}.`
     );
   }
 
-  const matchesApprovedEndpoint = options.allowPooler
-    ? hostname.startsWith(poolerPrefix) || hostname.startsWith(directPrefix)
-    : hostname.startsWith(directPrefix);
-
-  if (!matchesApprovedEndpoint) {
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
     throw new Error(
-      `Refusing to run PostgreSQL integration tests: ${varName} host "${hostname}" does not match approved development endpoint "${APPROVED_DEV_ENDPOINT}".`
+      `Refusing to run PostgreSQL integration tests: invalid protocol for ${varName}.`
     );
   }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (!hostname) {
+    throw new Error(
+      `Refusing to run PostgreSQL integration tests: missing hostname in ${varName}.`
+    );
+  }
+
+  if (
+    KNOWN_PRODUCTION_HOSTS.has(hostname) ||
+    hostname.includes(KNOWN_PRODUCTION_ENDPOINT_ID)
+  ) {
+    throw new Error(
+      `Refusing to run PostgreSQL integration tests: ${varName} targets production host "${hostname}".`
+    );
+  }
+
+  if (hostname !== expectedHostname) {
+    throw new Error(
+      `Refusing to run PostgreSQL integration tests: ${varName} host "${hostname}" does not match exact approved development host "${expectedHostname}".`
+    );
+  }
+
+  const database = parsed.pathname.replace(/^\//, '');
+  if (database !== APPROVED_DEV_DATABASE) {
+    throw new Error(
+      `Refusing to run PostgreSQL integration tests: ${varName} database "${database || '(empty)'}" must equal "${APPROVED_DEV_DATABASE}".`
+    );
+  }
+
+  return { hostname, database };
 }
 
 export function assertSafeDevDatabaseEnvironment(
@@ -124,16 +158,22 @@ export function assertSafeDevDatabaseEnvironment(
     );
   }
 
-  const dbHost = parseUrlHostname(env.DATABASE_URL, 'DATABASE_URL');
-  assertApprovedDevEndpoint(dbHost, 'DATABASE_URL', { allowPooler: true });
-
-  const directHost = parseUrlHostname(
-    env.DATABASE_URL_UNPOOLED,
-    'DATABASE_URL_UNPOOLED'
+  const pooled = parseValidatedTargetUrl(
+    env.DATABASE_URL,
+    'DATABASE_URL',
+    APPROVED_DEV_POOLED_HOST
   );
-  assertApprovedDevEndpoint(directHost, 'DATABASE_URL_UNPOOLED', {
-    allowPooler: false,
-  });
+  const direct = parseValidatedTargetUrl(
+    env.DATABASE_URL_UNPOOLED,
+    'DATABASE_URL_UNPOOLED',
+    APPROVED_DEV_DIRECT_HOST
+  );
 
-  return { dbHost, directHost, branchName, branchId };
+  return {
+    dbHost: pooled.hostname,
+    directHost: direct.hostname,
+    database: pooled.database,
+    branchName,
+    branchId,
+  };
 }

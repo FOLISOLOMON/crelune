@@ -6,19 +6,31 @@ import dotenv from 'dotenv';
 
 const APPROVED_DEV_BRANCH_NAME = 'development';
 const APPROVED_DEV_BRANCH_ID = 'br-nameless-silence-bexjp44k';
-const APPROVED_DEV_ENDPOINT = 'ep-muddy-math-ben8e8p7';
+const APPROVED_DEV_POOLED_HOST =
+  'ep-muddy-math-ben8e8p7-pooler.c-9.us-east-2.aws.neon.tech';
+const APPROVED_DEV_DIRECT_HOST =
+  'ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech';
+const APPROVED_DEV_DATABASE = 'neondb';
+
+const PRODUCTION_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
 const PRODUCTION_BRANCH_IDS = new Set(['br-withered-moon-be8coj8h']);
-const PRODUCTION_ENDPOINTS = ['ep-mute-forest-bepsjmsu'];
+const PRODUCTION_HOSTS = new Set([
+  'ep-mute-forest-bepsjmsu-pooler.c-9.us-east-2.aws.neon.tech',
+  'ep-mute-forest-bepsjmsu.c-9.us-east-2.aws.neon.tech',
+]);
+const PRODUCTION_ENDPOINT_ID = 'ep-mute-forest-bepsjmsu';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webDir = path.resolve(__dirname, '..');
 const rootEnvPath = path.resolve(webDir, '../../.env.local');
 
-if (!fs.existsSync(rootEnvPath)) {
-  console.error(
-    `[test:integration:db] Aborted: expected environment file not found at ${rootEnvPath}.`
-  );
+function fail(message) {
+  console.error(`[test:integration:db] Aborted: ${message}`);
   process.exit(1);
+}
+
+if (!fs.existsSync(rootEnvPath)) {
+  fail(`expected environment file not found at ${rootEnvPath}.`);
 }
 
 const fileEnv = dotenv.parse(fs.readFileSync(rootEnvPath, 'utf8'));
@@ -31,77 +43,81 @@ for (const key of [
   'NEON_BRANCH_ID',
 ]) {
   if (process.env[key] && process.env[key] !== fileEnv[key]) {
-    console.error(
-      `[test:integration:db] Aborted: pre-existing shell ${key} conflicts with .env.local.`
-    );
-    process.exit(1);
+    fail(`pre-existing shell ${key} conflicts with .env.local.`);
   }
 }
 
 const mergedEnv = { ...process.env, ...fileEnv };
 
 if (mergedEnv.NODE_ENV === 'production') {
-  console.error('[test:integration:db] Aborted: NODE_ENV=production is forbidden.');
-  process.exit(1);
-}
-if (mergedEnv.NEON_BRANCH !== APPROVED_DEV_BRANCH_NAME) {
-  console.error(
-    `[test:integration:db] Aborted: expected NEON_BRANCH="${APPROVED_DEV_BRANCH_NAME}", got "${mergedEnv.NEON_BRANCH || ''}".`
-  );
-  process.exit(1);
-}
-if (PRODUCTION_BRANCH_IDS.has(mergedEnv.NEON_BRANCH_ID || '')) {
-  console.error(
-    '[test:integration:db] Aborted: production Neon branch ID detected.'
-  );
-  process.exit(1);
-}
-if (mergedEnv.NEON_BRANCH_ID !== APPROVED_DEV_BRANCH_ID) {
-  console.error(
-    `[test:integration:db] Aborted: expected NEON_BRANCH_ID="${APPROVED_DEV_BRANCH_ID}", got "${mergedEnv.NEON_BRANCH_ID || ''}".`
-  );
-  process.exit(1);
+  fail('NODE_ENV=production is forbidden.');
 }
 
-let dbHost;
-let directHost;
-try {
-  dbHost = new URL(mergedEnv.DATABASE_URL || '').hostname.toLowerCase();
-  directHost = new URL(mergedEnv.DATABASE_URL_UNPOOLED || '').hostname.toLowerCase();
-} catch {
-  console.error(
-    '[test:integration:db] Aborted: invalid or missing DATABASE_URL / DATABASE_URL_UNPOOLED.'
-  );
-  process.exit(1);
+const branchName = (mergedEnv.NEON_BRANCH || '').trim();
+const branchId = (mergedEnv.NEON_BRANCH_ID || '').trim();
+
+if (!branchName) {
+  fail('NEON_BRANCH is missing.');
+}
+if (PRODUCTION_BRANCH_NAMES.has(branchName.toLowerCase())) {
+  fail(`protected branch "${branchName}" is forbidden.`);
+}
+if (branchName !== APPROVED_DEV_BRANCH_NAME) {
+  fail(`expected NEON_BRANCH="${APPROVED_DEV_BRANCH_NAME}", got "${branchName}".`);
+}
+if (!branchId) {
+  fail('NEON_BRANCH_ID is missing.');
+}
+if (PRODUCTION_BRANCH_IDS.has(branchId)) {
+  fail(`production Neon branch ID "${branchId}" is forbidden.`);
+}
+if (branchId !== APPROVED_DEV_BRANCH_ID) {
+  fail(`expected NEON_BRANCH_ID="${APPROVED_DEV_BRANCH_ID}", got "${branchId}".`);
 }
 
-for (const prodEndpoint of PRODUCTION_ENDPOINTS) {
-  if (dbHost.includes(prodEndpoint) || directHost.includes(prodEndpoint)) {
-    console.error(
-      '[test:integration:db] Aborted: production Neon endpoint detected.'
-    );
-    process.exit(1);
+function validateUrlHost(rawUrl, varName, expectedHost) {
+  if (!rawUrl || !rawUrl.trim()) {
+    fail(`${varName} is missing.`);
   }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    fail(`malformed ${varName}.`);
+  }
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
+    fail(`invalid protocol for ${varName}.`);
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!host) {
+    fail(`missing hostname in ${varName}.`);
+  }
+  if (PRODUCTION_HOSTS.has(host) || host.includes(PRODUCTION_ENDPOINT_ID)) {
+    fail(`${varName} targets production host "${host}".`);
+  }
+  if (host !== expectedHost) {
+    fail(`${varName} host "${host}" does not match exact approved host "${expectedHost}".`);
+  }
+  const database = parsed.pathname.replace(/^\//, '');
+  if (database !== APPROVED_DEV_DATABASE) {
+    fail(`${varName} database "${database || '(empty)'}" must equal "${APPROVED_DEV_DATABASE}".`);
+  }
+  return host;
 }
 
-const validPooled =
-  dbHost.endsWith('.neon.tech') &&
-  (dbHost.startsWith(`${APPROVED_DEV_ENDPOINT}-pooler.`) ||
-    dbHost.startsWith(`${APPROVED_DEV_ENDPOINT}.`));
-const validDirect =
-  directHost.endsWith('.neon.tech') &&
-  !directHost.startsWith(`${APPROVED_DEV_ENDPOINT}-pooler.`) &&
-  directHost.startsWith(`${APPROVED_DEV_ENDPOINT}.`);
-
-if (!validPooled || !validDirect) {
-  console.error(
-    `[test:integration:db] Aborted: endpoints do not match approved development endpoint "${APPROVED_DEV_ENDPOINT}" (pooled="${dbHost}", direct="${directHost}").`
-  );
-  process.exit(1);
-}
+const dbHost = validateUrlHost(
+  mergedEnv.DATABASE_URL,
+  'DATABASE_URL',
+  APPROVED_DEV_POOLED_HOST
+);
+const directHost = validateUrlHost(
+  mergedEnv.DATABASE_URL_UNPOOLED,
+  'DATABASE_URL_UNPOOLED',
+  APPROVED_DEV_DIRECT_HOST
+);
 
 console.log(
-  `[test:integration:db] Verified target branch="${mergedEnv.NEON_BRANCH}" (${mergedEnv.NEON_BRANCH_ID}) pooled="${dbHost}" direct="${directHost}"`
+  `[test:integration:db] Verified target branch="${branchName}" (${branchId}) db="${APPROVED_DEV_DATABASE}" pooled="${dbHost}" direct="${directHost}"`
 );
 
 function findPgIntegrationTests(dir) {
@@ -119,13 +135,16 @@ function findPgIntegrationTests(dir) {
 
 const integrationFiles = findPgIntegrationTests(path.join(webDir, 'src'));
 if (integrationFiles.length === 0) {
-  console.error('[test:integration:db] No *.pg.integration.test.ts files found.');
-  process.exit(1);
+  fail('no *.pg.integration.test.ts files found.');
 }
 
 const vitestBin = path.resolve(webDir, '../../node_modules/vitest/vitest.mjs');
-execFileSync(process.execPath, [vitestBin, 'run', ...integrationFiles], {
-  cwd: webDir,
-  env: mergedEnv,
-  stdio: 'inherit',
-});
+execFileSync(
+  process.execPath,
+  [vitestBin, 'run', '--testTimeout=20000', ...integrationFiles],
+  {
+    cwd: webDir,
+    env: mergedEnv,
+    stdio: 'inherit',
+  }
+);
