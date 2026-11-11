@@ -13,6 +13,8 @@ const NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store',
 };
 
+export const MIN_CRON_SECRET_LENGTH = 32;
+
 export type CronAuthResult =
   | { ok: true }
   | { ok: false; response: NextResponse };
@@ -23,7 +25,13 @@ function sha256Digest(value: string): Buffer {
 
 function isPlaceholderCronSecret(value: string): boolean {
   const lower = value.toLowerCase();
-  return lower.startsWith('replace-with-') || lower === 'changeme' || lower === 'example';
+  return (
+    lower.startsWith('replace-with-') ||
+    lower === 'changeme' ||
+    lower === 'change-me' ||
+    lower === 'example' ||
+    lower === 'placeholder'
+  );
 }
 
 export function verifyCronBearerRequest(
@@ -31,7 +39,10 @@ export function verifyCronBearerRequest(
   env: Record<string, string | undefined> = process.env
 ): CronAuthResult {
   const configuredSecret = (env.CRON_SECRET || '').trim();
-  if (!configuredSecret || isPlaceholderCronSecret(configuredSecret)) {
+  if (
+    configuredSecret.length < MIN_CRON_SECRET_LENGTH ||
+    isPlaceholderCronSecret(configuredSecret)
+  ) {
     return {
       ok: false,
       response: NextResponse.json(

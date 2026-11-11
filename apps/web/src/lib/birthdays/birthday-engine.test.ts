@@ -97,52 +97,83 @@ describe('Birthday Engine Preferences, Notifications & Cron Bearer Security', ()
     expect(formatted).not.toContain('postgresql://');
   });
 
-  it('enforces CRON_SECRET bearer header authentication and blocks query-string secrets or missing config', () => {
-    const missingSecretRes = verifyCronBearerRequest(
-      new Request('http://localhost:3000/api/cron/birthday-reminders', {
+  it('enforces CRON_SECRET strength (>= 32 trimmed chars), bearer header auth, and query-string rejection', async () => {
+    const baseUrl = 'http://localhost:3000/api/cron/birthday-reminders';
+    const postWithAuth = (token: string, url = baseUrl) =>
+      new Request(url, {
         method: 'POST',
-        headers: { authorization: 'Bearer anything' },
-      }),
-      {}
-    );
-    expect(missingSecretRes.ok).toBe(false);
-    if (!missingSecretRes.ok) {
-      expect(missingSecretRes.response.status).toBe(503);
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+    // Missing, blank, placeholder, 1-char, and 31-char secrets must fail closed with 503
+    const invalidConfiguredSecrets: Array<string | undefined> = [
+      undefined,
+      '',
+      '   ',
+      'replace-with-a-secure-random-cron-secret-at-least-32-chars',
+      'changeme',
+      'example',
+      'x',
+      'a'.repeat(31),
+      `   ${'a'.repeat(31)}   `,
+    ];
+
+    for (const configured of invalidConfiguredSecrets) {
+      const token = configured?.trim() || 'any_token_value_32_characters_ok';
+      const res = verifyCronBearerRequest(
+        postWithAuth(token),
+        configured === undefined ? {} : { CRON_SECRET: configured }
+      );
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.response.status).toBe(503);
+        const body = JSON.stringify(await res.response.json());
+        if (configured && configured.trim().length > 0) {
+          expect(body).not.toContain(configured.trim());
+        }
+      }
     }
 
-    const secret = 'cron_secret_value_for_unit_tests_32chars';
+    // Exactly 32-character secret is accepted only with matching Bearer token
+    const exact32 = 'a'.repeat(32);
+    const validExact32 = verifyCronBearerRequest(postWithAuth(exact32), {
+      CRON_SECRET: exact32,
+    });
+    expect(validExact32.ok).toBe(true);
+
+    // Trimming applies to CRON_SECRET value length
+    const validPadded32 = verifyCronBearerRequest(postWithAuth(exact32), {
+      CRON_SECRET: `  ${exact32}  `,
+    });
+    expect(validPadded32.ok).toBe(true);
+
+    const secret = 'cron_secret_value_for_unit_tests_32chars_longer';
 
     const querySecretRes = verifyCronBearerRequest(
-      new Request(`http://localhost:3000/api/cron/birthday-reminders?secret=${secret}`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${secret}` },
-      }),
+      postWithAuth(secret, `${baseUrl}?secret=${secret}`),
       { CRON_SECRET: secret }
     );
     expect(querySecretRes.ok).toBe(false);
     if (!querySecretRes.ok) {
       expect(querySecretRes.response.status).toBe(401);
+      const body = JSON.stringify(await querySecretRes.response.json());
+      expect(body).not.toContain(secret);
     }
 
-    const wrongTokenRes = verifyCronBearerRequest(
-      new Request('http://localhost:3000/api/cron/birthday-reminders', {
-        method: 'POST',
-        headers: { authorization: 'Bearer wrong-token' },
-      }),
-      { CRON_SECRET: secret }
-    );
+    const wrongTokenRes = verifyCronBearerRequest(postWithAuth('wrong-token'), {
+      CRON_SECRET: secret,
+    });
     expect(wrongTokenRes.ok).toBe(false);
     if (!wrongTokenRes.ok) {
       expect(wrongTokenRes.response.status).toBe(401);
+      const body = JSON.stringify(await wrongTokenRes.response.json());
+      expect(body).not.toContain(secret);
+      expect(body).not.toContain('wrong-token');
     }
 
-    const validRes = verifyCronBearerRequest(
-      new Request('http://localhost:3000/api/cron/birthday-reminders', {
-        method: 'POST',
-        headers: { authorization: `Bearer ${secret}` },
-      }),
-      { CRON_SECRET: secret }
-    );
+    const validRes = verifyCronBearerRequest(postWithAuth(secret), {
+      CRON_SECRET: secret,
+    });
     expect(validRes.ok).toBe(true);
   });
 });

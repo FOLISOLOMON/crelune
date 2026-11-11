@@ -178,7 +178,7 @@ export async function processDueBirthdayReminders(
       scheduledForDate: { lte: todayUtc },
     },
     orderBy: [{ scheduledForDate: 'asc' }, { leadDays: 'desc' }, { id: 'asc' }],
-    select: { id: true, attemptCount: true },
+    select: { id: true },
   });
 
   const result: ReminderProcessingResult = {
@@ -189,8 +189,6 @@ export async function processDueBirthdayReminders(
   };
 
   for (const candidate of dueCandidates) {
-    let observedAttemptCount = candidate.attemptCount;
-
     try {
       const outcome = await prisma.$transaction(
         async (tx) => {
@@ -219,8 +217,6 @@ export async function processDueBirthdayReminders(
         if (!current) {
           return 'noop' as const;
         }
-
-        observedAttemptCount = current.attemptCount;
 
         if (
           current.status === 'SENT' ||
@@ -365,26 +361,59 @@ export async function processDueBirthdayReminders(
 
       const safeError = formatSafeReminderError(err);
       const permanent = isPermanentFailure(err);
-      const nextAttemptCount = permanent
-        ? MAX_REMINDER_ATTEMPTS
-        : Math.min(MAX_REMINDER_ATTEMPTS, observedAttemptCount + 1);
 
-      await prisma.$transaction(
+      const recordedFailure = await prisma.$transaction(
         async (errTx) => {
+          // Lock the reminder row so concurrent failures increment atomically without lost updates
+          await errTx.$queryRaw`SELECT id FROM birthday_reminders WHERE id = ${candidate.id} AND organisation_id = ${organisationId} FOR UPDATE`;
+
+          const currentRow = await errTx.birthdayReminder.findFirst({
+            where: { id: candidate.id, organisationId },
+            select: { id: true, status: true, attemptCount: true },
+          });
+
+          if (
+            !currentRow ||
+            (currentRow.status !== 'PENDING' && currentRow.status !== 'FAILED') ||
+            currentRow.attemptCount >= MAX_REMINDER_ATTEMPTS
+          ) {
+            return false;
+          }
+
           const updated = await errTx.birthdayReminder.updateMany({
             where: {
               id: candidate.id,
               organisationId,
               status: { in: ['PENDING', 'FAILED'] },
+              attemptCount: { lt: MAX_REMINDER_ATTEMPTS },
             },
-            data: {
-              status: 'FAILED',
-              attemptCount: nextAttemptCount,
-              lastError: safeError,
-            },
+            data: permanent
+              ? {
+                  status: 'FAILED',
+                  attemptCount: MAX_REMINDER_ATTEMPTS,
+                  lastError: safeError,
+                }
+              : {
+                  status: 'FAILED',
+                  attemptCount: { increment: 1 },
+                  lastError: safeError,
+                },
           });
 
-          if (updated.count > 0 && nextAttemptCount >= MAX_REMINDER_ATTEMPTS) {
+          if (updated.count === 0) {
+            return false;
+          }
+
+          const afterUpdate = await errTx.birthdayReminder.findFirst({
+            where: { id: candidate.id, organisationId },
+            select: { status: true, attemptCount: true },
+          });
+
+          if (
+            afterUpdate &&
+            afterUpdate.status === 'FAILED' &&
+            afterUpdate.attemptCount >= MAX_REMINDER_ATTEMPTS
+          ) {
             await auditService.recordAuditEvent(errTx, {
               organisationId,
               actorUserId: ownerUserId,
@@ -392,18 +421,22 @@ export async function processDueBirthdayReminders(
               entityType: 'BirthdayReminder',
               entityId: candidate.id,
               metadata: {
-                attemptCount: nextAttemptCount,
+                attemptCount: afterUpdate.attemptCount,
                 errorCode: safeError,
                 permanent,
               },
             });
           }
+
+          return true;
         },
         { maxWait: 15_000, timeout: 25_000 }
       );
 
-      result.remindersDue += 1;
-      result.remindersFailed += 1;
+      if (recordedFailure) {
+        result.remindersDue += 1;
+        result.remindersFailed += 1;
+      }
     }
   }
 

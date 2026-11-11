@@ -279,7 +279,7 @@ describe('Birthday Sync, Cron & Notification API Routes', () => {
   });
 
   it('protects POST /api/cron/birthday-reminders with CRON_SECRET bearer auth and returns minimal non-PII stats', async () => {
-    // Fails closed when CRON_SECRET is missing
+    // Fails closed when CRON_SECRET is missing or shorter than 32 characters
     const missingSecret = await cronPost(
       new Request('http://localhost:3000/api/cron/birthday-reminders', {
         method: 'POST',
@@ -287,6 +287,15 @@ describe('Birthday Sync, Cron & Notification API Routes', () => {
       })
     );
     expect(missingSecret.status).toBe(503);
+
+    process.env.CRON_SECRET = 'short_secret_under_32_chars';
+    const shortSecretRes = await cronPost(
+      new Request('http://localhost:3000/api/cron/birthday-reminders', {
+        method: 'POST',
+        headers: { authorization: 'Bearer short_secret_under_32_chars' },
+      })
+    );
+    expect(shortSecretRes.status).toBe(503);
 
     process.env.CRON_SECRET = 'valid_cron_secret_at_least_32_characters_long';
 

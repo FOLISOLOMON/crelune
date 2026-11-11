@@ -746,4 +746,178 @@ describe('PostgreSQL Stage 3.4 Birthday Engine, Reminder Processing & Notificati
     });
     expect(readAllAudits).toHaveLength(1);
   });
+
+  it('counts concurrent transient failures atomically without lost updates, enforces retry cap 3, and records a single terminal audit event', async () => {
+    const now = new Date('2026-09-03T10:00:00.000Z');
+    const { actor } = await createTestOrgAndOwner('concurrent_retry_acc', {
+      timezone: 'Africa/Accra',
+      birthdayReminderDays: [0],
+    });
+
+    const member = await insertMemberFixture(actor.organisationId, {
+      fullName: 'Concurrent Retry Member',
+      birthMonth: 9,
+      birthDay: 3,
+      notes: 'Confidential concurrency test note',
+    });
+
+    const reminder = await prisma.birthdayReminder.create({
+      data: {
+        organisationId: actor.organisationId,
+        memberId: member.id,
+        targetYear: 2026,
+        leadDays: 0,
+        scheduledForDate: new Date('2026-09-03T00:00:00.000Z'),
+        status: 'PENDING',
+        idempotencyKey: `concurrent_retry_${runId}_${member.id}`,
+        attemptCount: 0,
+      },
+    });
+
+    const transientFail = async () => {
+      const err = new Error('Simulated concurrent DB transient failure') as Error & { code?: string };
+      err.code = 'ETIMEDOUT';
+      throw err;
+    };
+
+    // Steps 2-5: Two concurrent transient failures on attemptCount=0 must store attemptCount=2, not 1
+    await Promise.all([
+      processDueBirthdayReminders(actor.organisationId, actor.userId, {
+        now,
+        persistNotification: transientFail,
+      }),
+      processDueBirthdayReminders(actor.organisationId, actor.userId, {
+        now,
+        persistNotification: transientFail,
+      }),
+    ]);
+
+    const afterTwoConcurrentFailures = await prisma.birthdayReminder.findUniqueOrThrow({
+      where: { id: reminder.id },
+    });
+    expect(afterTwoConcurrentFailures.attemptCount).toBe(2);
+    expect(afterTwoConcurrentFailures.attemptCount).toBeLessThan(MAX_REMINDER_ATTEMPTS);
+    expect(afterTwoConcurrentFailures.status).toBe('FAILED');
+    expect(afterTwoConcurrentFailures.lastError).toBe('Error:ETIMEDOUT');
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          organisationId: actor.organisationId,
+          action: AUDIT_ACTIONS.BIRTHDAY_REMINDER_FAILED,
+        },
+      })
+    ).toBe(0);
+
+    // Steps 6-8: Concurrent failures at boundary (attemptCount=2) must cap strictly at 3 and emit 1 audit
+    await Promise.all([
+      processDueBirthdayReminders(actor.organisationId, actor.userId, {
+        now,
+        persistNotification: transientFail,
+      }),
+      processDueBirthdayReminders(actor.organisationId, actor.userId, {
+        now,
+        persistNotification: transientFail,
+      }),
+    ]);
+
+    const afterBoundaryRace = await prisma.birthdayReminder.findUniqueOrThrow({
+      where: { id: reminder.id },
+    });
+    expect(afterBoundaryRace.attemptCount).toBe(MAX_REMINDER_ATTEMPTS);
+    expect(afterBoundaryRace.status).toBe('FAILED');
+
+    const auditsAtCap = await prisma.auditLog.findMany({
+      where: {
+        organisationId: actor.organisationId,
+        action: AUDIT_ACTIONS.BIRTHDAY_REMINDER_FAILED,
+        entityId: reminder.id,
+      },
+    });
+    expect(auditsAtCap).toHaveLength(1);
+    expect(JSON.stringify(auditsAtCap)).not.toContain('Confidential concurrency test note');
+
+    // Step 9: Subsequent processing run cannot exceed cap or duplicate audit
+    const extraRun = await processDueBirthdayReminders(actor.organisationId, actor.userId, {
+      now,
+      persistNotification: transientFail,
+    });
+    expect(extraRun.remindersDue).toBe(0);
+    expect(extraRun.remindersFailed).toBe(0);
+
+    const afterExtraRun = await prisma.birthdayReminder.findUniqueOrThrow({
+      where: { id: reminder.id },
+    });
+    expect(afterExtraRun.attemptCount).toBe(MAX_REMINDER_ATTEMPTS);
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          organisationId: actor.organisationId,
+          action: AUDIT_ACTIONS.BIRTHDAY_REMINDER_FAILED,
+          entityId: reminder.id,
+        },
+      })
+    ).toBe(1);
+  });
+
+  it('prevents a concurrently successful reminder or terminal status from reverting to FAILED', async () => {
+    const now = new Date('2026-09-03T10:00:00.000Z');
+    const { actor } = await createTestOrgAndOwner('concurrent_sent_guard', {
+      timezone: 'Africa/Accra',
+      birthdayReminderDays: [0],
+    });
+
+    const member = await insertMemberFixture(actor.organisationId, {
+      fullName: 'Concurrent Success Member',
+      birthMonth: 9,
+      birthDay: 3,
+    });
+
+    const reminder = await prisma.birthdayReminder.create({
+      data: {
+        organisationId: actor.organisationId,
+        memberId: member.id,
+        targetYear: 2026,
+        leadDays: 0,
+        scheduledForDate: new Date('2026-09-03T00:00:00.000Z'),
+        status: 'PENDING',
+        idempotencyKey: `concurrent_sent_${runId}_${member.id}`,
+        attemptCount: 0,
+      },
+    });
+
+    // Race a failing worker and a succeeding worker on the same due reminder
+    await Promise.all([
+      processDueBirthdayReminders(actor.organisationId, actor.userId, { now }),
+      processDueBirthdayReminders(actor.organisationId, actor.userId, {
+        now,
+        persistNotification: async () => {
+          throw new Error('Late failing attempt must not revert SENT');
+        },
+      }),
+    ]);
+
+    const finalRow = await prisma.birthdayReminder.findUniqueOrThrow({
+      where: { id: reminder.id },
+    });
+    expect(finalRow.status).toBe('SENT');
+    expect(finalRow.lastError).toBeNull();
+    expect(finalRow.sentAt).not.toBeNull();
+    expect(
+      await prisma.notification.count({
+        where: { organisationId: actor.organisationId, birthdayReminderId: reminder.id },
+      })
+    ).toBe(1);
+
+    // Explicitly verify a post-SENT failing run leaves SENT untouched
+    const postSentFail = await processDueBirthdayReminders(actor.organisationId, actor.userId, {
+      now,
+      persistNotification: async () => {
+        throw new Error('Post-SENT failure');
+      },
+    });
+    expect(postSentFail.remindersFailed).toBe(0);
+    expect((await prisma.birthdayReminder.findUniqueOrThrow({ where: { id: reminder.id } })).status).toBe(
+      'SENT'
+    );
+  });
 });
