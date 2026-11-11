@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.4] - 2026-11-11
+
+### Milestone 3 Preparation: Database Isolation, Test Environment Hardening & Implementation Plan
+
+#### Database & Environments
+- **Neon Development Branch Isolation**: Verified `production` (`br-withered-moon-be8coj8h`, endpoint `ep-mute-forest-bepsjmsu`) holds only owner provisioning data and zero member PII. Created dedicated `development` branch (`br-nameless-silence-bexjp44k`, endpoint `ep-muddy-math-ben8e8p7`) and switched local `.neon` and git-ignored `.env.local` to `development` while keeping `production` untouched.
+- **Hardened PostgreSQL Integration Test Runner**: Replaced inline `dotenv/config` flags in [`apps/web/package.json`](file:///d:/Projects/Crelune/apps/web/package.json) with [`apps/web/scripts/run-pg-integration.mjs`](file:///d:/Projects/Crelune/apps/web/scripts/run-pg-integration.mjs) and [`apps/web/src/test/assert-dev-db.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.ts) (`assertSafeDevDatabaseEnvironment`). Integration tests now explicitly require `NEON_BRANCH=development` and reject production branch IDs, endpoints, and conflicting parent shell variables. Added [`assert-dev-db.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.test.ts) (`5` tests) and updated [`rate-limit.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.pg.integration.test.ts) `beforeAll` verification.
+
+#### Planning & Documentation
+- **Milestone 3 Implementation Plan**: Authored [`docs/milestones/MILESTONE_3_IMPLEMENTATION_PLAN.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_3_IMPLEMENTATION_PLAN.md) detailing database isolation evidence, test-env hardening, proposed Prisma schema & ERD (`members`, `member_photos`, `birthdays`, `reminder_rules`, `birthday_reminders`, `notification_deliveries`, `audit_events`), API & service contracts, UI/UX design aligned with `DESIGN_SYSTEM.md`, privacy/security controls, reminder generation/deduplication architecture, staged rollout (`3.1`–`3.6`), testing matrix, complexity estimates, and unresolved Product Owner decisions.
+- **Testing Strategy Record**: Updated [`docs/TESTING_STRATEGY.md`](file:///d:/Projects/Crelune/docs/TESTING_STRATEGY.md) with Milestone 3 preparation database-isolation and test-guard evidence.
+
+---
+
 ## [0.3.3] - 2026-11-11
 
 ### Milestone 2.1.2: Rate-Limit Client Identity & PostgreSQL Verification

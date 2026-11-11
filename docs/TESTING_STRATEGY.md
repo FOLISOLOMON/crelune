@@ -244,3 +244,20 @@ Verified for Milestone 2.1.2:
    - Verified post-test `auth_throttles` count is `0` (`{"totalAuthThrottleRows":0}`).
 3. **Type Checking (`cmd /c npm run type-check`) & Production Build (`cmd /c npm run build`)**:
    - Zero TypeScript errors across all 4 workspaces (`PASS`) and full `next build` + workspace `tsc -b` build succeeded (`PASS`).
+
+---
+
+## 9. Milestone 3 Preparation Testing & Database Isolation Evidence
+
+Verified for Milestone 3 Preparation:
+1. **Isolated Neon `development` Branch**:
+   - Created dedicated Neon branch `development` (`br-nameless-silence-bexjp44k`, endpoint `ep-muddy-math-ben8e8p7`) branched from `production` (`br-withered-moon-be8coj8h`, endpoint `ep-mute-forest-bepsjmsu`, containing only 1 owner/organisation/preference record and zero member PII).
+   - Local `.env.local` and `.neon` point strictly to `development`; both remain excluded from Git via `.gitignore`.
+   - Verified `apps/web` `next start` health check connects to `development` and `production` `written_data_bytes` remains `0`.
+2. **Hardened Integration Test Environment Guard**:
+   - Added [`apps/web/src/test/assert-dev-db.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.ts) (`assertSafeDevDatabaseEnvironment`) enforcing non-production `NODE_ENV`, valid `DATABASE_URL` / `DATABASE_URL_UNPOOLED`, `NEON_BRANCH=development`, explicit rejection of `production` / `prod` / `main` branch names, and explicit rejection of production branch ID (`br-withered-moon-be8coj8h`) and endpoint (`ep-mute-forest-bepsjmsu`).
+   - Added [`apps/web/scripts/run-pg-integration.mjs`](file:///d:/Projects/Crelune/apps/web/scripts/run-pg-integration.mjs) (`npm run test:integration:db`) to load `../../.env.local` explicitly without passing extra positional CLI args to Vitest, abort if parent shell env conflicts with `.env.local`, and run `assertSafeDevDatabaseEnvironment` before executing [`rate-limit.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.pg.integration.test.ts).
+   - Negative guard verified: running `NEON_BRANCH=production` fails immediately with exit code `1`.
+   - Real PostgreSQL integration suite verified against `development`: `5` tests passed (`0` failures, `0` skipped), leaving `auth_throttles` at `0` rows.
+3. **Unit & Helper Test Suite (`cmd /c npm test`)**:
+   - Added [`apps/web/src/test/assert-dev-db.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.test.ts) (`5` tests) covering valid `development` targets, missing `DATABASE_URL`, missing/mismatched `NEON_BRANCH`, and explicit production endpoint rejection.

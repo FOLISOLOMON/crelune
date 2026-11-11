@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
 import { prisma } from '@crelune/database';
+import { assertSafeDevDatabaseEnvironment } from '@/test/assert-dev-db';
 import {
   IP_ACCOUNT_BLOCK_MS,
   IP_ACCOUNT_MAX_ATTEMPTS,
@@ -35,13 +36,12 @@ describe('PostgreSQL auth_throttles Integration Verification (Milestone 2.1.2)',
   }
 
   beforeAll(async () => {
-    if (!process.env.DATABASE_URL) {
-      throw new Error(
-        'DATABASE_URL must be configured (via .env.local) to run PostgreSQL integration tests.'
-      );
+    assertSafeDevDatabaseEnvironment(process.env);
+    // Wake Neon compute & verify database identity before timing concurrency tests
+    const rows = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`;
+    if (rows[0]?.db !== 'neondb') {
+      throw new Error(`Unexpected database name "${rows[0]?.db}" for integration test.`);
     }
-    // Wake Neon compute / establish Prisma pool before timing individual concurrency tests
-    await prisma.$queryRaw`SELECT 1`;
   }, 30_000);
 
   afterEach(async () => {
