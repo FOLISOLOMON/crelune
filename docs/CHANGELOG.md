@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.5] - 2026-11-11
+
+### Milestone 3, Stage 3.1: Member & Birthday Database Foundation and Civil Date Core
+
+#### Database (`@crelune/database`)
+- **Stage 3.1 Schema & Non-Destructive Preference Defaults**: Added `LeapDayPolicy`, `BirthdayPrepStatus`, `ReminderStatus`, and `NotificationType` enums alongside `Member`, `BirthdayPreparation`, `BirthdayReminder`, `Notification`, and `AuditLog` models in [`packages/database/prisma/schema.prisma`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma). Derived active vs archived member status strictly from `archivedAt` (without adding `isActive`), modeled nullable birth fields with optional `birthYear`, stored date-only `@db.Date` reminder/celebration dates, enforced uniqueness per `(memberId, targetYear)` on `BirthdayPreparation` and `(memberId, targetYear, leadDays)` / `idempotencyKey` on `BirthdayReminder`, and added `birthdayReminderDays` (`[7, 3, 1, 0]`) and `leapDayPolicy` (`FEB_28`) on `UserPreference`. Synchronized exclusively to the Neon `development` branch (`br-nameless-silence-bexjp44k`, endpoint `ep-muddy-math-ben8e8p7`), leaving `production` untouched.
+
+#### Domain Core & Test Safety (`@crelune/shared`, `@crelune/web`)
+- **Civil Birthday Date Core**: Implemented pure date utilities in [`packages/shared/src/domain/birthday-date.ts`](file:///d:/Projects/Crelune/packages/shared/src/domain/birthday-date.ts) and member domain helpers in [`packages/shared/src/domain/member.ts`](file:///d:/Projects/Crelune/packages/shared/src/domain/member.ts) covering leap years (including `2100` century rule), unknown birth years, `FEB_28` / `MAR_1` leap-day policies, Dec-to-Jan rollovers, `[7, 3, 1, 0]` calendar reminder math, `Africa/Accra` civil-date extraction, and `archivedAt`-based active status (`29` total tests passing in `@crelune/shared`).
+- **Exact Development Endpoint Test Guard**: Strengthened [`apps/web/src/test/assert-dev-db.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.ts) and [`apps/web/scripts/run-pg-integration.mjs`](file:///d:/Projects/Crelune/apps/web/scripts/run-pg-integration.mjs) to require exact development branch ID (`br-nameless-silence-bexjp44k`) and pooled/unpooled endpoint (`ep-muddy-math-ben8e8p7`) in addition to blocking production targets. Verified `8` PostgreSQL integration tests passing in [`member-birthday-schema.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/member-birthday-schema.pg.integration.test.ts) and `rate-limit.pg.integration.test.ts`.
+- **Stage 3.1 Report & Architecture Record**: Documented verification evidence in [`MILESTONE_3_1_DATABASE_AND_BIRTHDAY_CORE.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_3_1_DATABASE_AND_BIRTHDAY_CORE.md) and recorded Product Owner architectural selection of Neon Object Storage in [`docs/TECHNICAL_DECISIONS.md`](file:///d:/Projects/Crelune/docs/TECHNICAL_DECISIONS.md).
+
+---
+
 ## [0.3.4] - 2026-11-11
 
 ### Milestone 3 Preparation: Database Isolation, Test Environment Hardening & Implementation Plan

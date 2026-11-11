@@ -9,18 +9,54 @@ generator client {
 }
 
 // -----------------------------------------------------------------------------
+// ENUMS (Milestone 3 Stage 3.1 Member & Birthday Domain)
+// -----------------------------------------------------------------------------
+
+enum LeapDayPolicy {
+  FEB_28
+  MAR_1
+}
+
+enum BirthdayPrepStatus {
+  UPCOMING
+  PREPARATION_PENDING
+  DESIGN_IN_PROGRESS
+  AWAITING_APPROVAL
+  PUBLISHED
+  SKIPPED
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  SKIPPED
+  FAILED
+  CANCELLED
+}
+
+enum NotificationType {
+  BIRTHDAY_REMINDER
+  SYSTEM
+}
+
+// -----------------------------------------------------------------------------
 // CORE ORGANISATION & USER MANAGEMENT (Milestone 2 Web Foundation)
 // -----------------------------------------------------------------------------
 
 model Organisation {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  logoUrl   String?  @map("logo_url")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id                   String                @id @default(cuid())
+  name                 String
+  slug                 String                @unique
+  logoUrl              String?               @map("logo_url")
+  createdAt            DateTime              @default(now()) @map("created_at")
+  updatedAt            DateTime              @updatedAt @map("updated_at")
 
-  users     User[]
+  users                User[]
+  members              Member[]
+  birthdayPreparations BirthdayPreparation[]
+  birthdayReminders    BirthdayReminder[]
+  notifications        Notification[]
+  auditLogs            AuditLog[]
 
   @@map("organisations")
 }
@@ -43,23 +79,27 @@ model User {
 
   organisation        Organisation    @relation(fields: [organisationId], references: [id], onDelete: Restrict)
   preferences         UserPreference?
+  notifications       Notification[]
+  auditLogs           AuditLog[]
 
   @@index([organisationId])
   @@map("users")
 }
 
 model UserPreference {
-  id                   String   @id @default(cuid())
-  userId               String   @unique @map("user_id")
-  theme                String   @default("light")
-  dateFormat           String   @default("DD/MM/YYYY") @map("date_format")
-  timezone             String   @default("Africa/Accra")
-  leadTimeDaysBirthday Int      @default(14) @map("lead_time_days_birthday")
-  leadTimeDaysEvent    Int      @default(21) @map("lead_time_days_event")
-  defaultExportFormat  String   @default("PNG") @map("default_export_format")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  id                   String        @id @default(cuid())
+  userId               String        @unique @map("user_id")
+  theme                String        @default("light")
+  dateFormat           String        @default("DD/MM/YYYY") @map("date_format")
+  timezone             String        @default("Africa/Accra")
+  leadTimeDaysBirthday Int           @default(14) @map("lead_time_days_birthday")
+  birthdayReminderDays Int[]         @default([7, 3, 1, 0]) @map("birthday_reminder_days")
+  leapDayPolicy        LeapDayPolicy @default(FEB_28) @map("leap_day_policy")
+  leadTimeDaysEvent    Int           @default(21) @map("lead_time_days_event")
+  defaultExportFormat  String        @default("PNG") @map("default_export_format")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
 
-  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_preferences")
 }
@@ -78,4 +118,130 @@ model AuthThrottle {
   @@index([blockedUntil])
   @@index([windowStart])
   @@map("auth_throttles")
+}
+
+// -----------------------------------------------------------------------------
+// MEMBER & BIRTHDAY DATA FOUNDATION (Milestone 3 Stage 3.1)
+// -----------------------------------------------------------------------------
+
+model Member {
+  id                   String                @id @default(cuid())
+  organisationId       String                @map("organisation_id")
+  fullName             String                @map("full_name")
+  preferredName        String?               @map("preferred_name")
+  normalizedName       String                @map("normalized_name")
+  birthDay             Int?                  @map("birth_day")
+  birthMonth           Int?                  @map("birth_month")
+  birthYear            Int?                  @map("birth_year")
+  phone                String?
+  normalizedPhone      String?               @map("normalized_phone")
+  email                String?
+  notes                String?
+  // Architecture-approved Neon Object Storage object metadata (buckets provisioned in Stage 3.3)
+  photoStorageKey      String?               @map("photo_storage_key")
+  photoMimeType        String?               @map("photo_mime_type")
+  photoByteSize        Int?                  @map("photo_byte_size")
+  photoUpdatedAt       DateTime?             @map("photo_updated_at")
+  // Single source of truth for archival; active records satisfy archivedAt IS NULL
+  archivedAt           DateTime?             @map("archived_at")
+  createdAt            DateTime              @default(now()) @map("created_at")
+  updatedAt            DateTime              @updatedAt @map("updated_at")
+
+  organisation         Organisation          @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  birthdayPreparations BirthdayPreparation[]
+  birthdayReminders    BirthdayReminder[]
+  notifications        Notification[]
+
+  @@index([organisationId, archivedAt, birthMonth, birthDay])
+  @@index([organisationId, normalizedName])
+  @@index([organisationId, normalizedPhone])
+  @@index([organisationId, archivedAt])
+  @@map("members")
+}
+
+model BirthdayPreparation {
+  id              String             @id @default(cuid())
+  organisationId  String             @map("organisation_id")
+  memberId        String             @map("member_id")
+  targetYear      Int                @map("target_year")
+  celebrationDate DateTime           @map("celebration_date") @db.Date
+  status          BirthdayPrepStatus @default(UPCOMING)
+  notes           String?
+  statusUpdatedAt DateTime           @default(now()) @map("status_updated_at")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  organisation    Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  member          Member             @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, targetYear])
+  @@index([organisationId, targetYear, status])
+  @@index([organisationId, celebrationDate])
+  @@map("birthday_preparations")
+}
+
+model BirthdayReminder {
+  id               String         @id @default(cuid())
+  organisationId   String         @map("organisation_id")
+  memberId         String         @map("member_id")
+  targetYear       Int            @map("target_year")
+  leadDays         Int            @map("lead_days")
+  scheduledForDate DateTime       @map("scheduled_for_date") @db.Date
+  status           ReminderStatus @default(PENDING)
+  idempotencyKey   String         @unique @map("idempotency_key")
+  attemptCount     Int            @default(0) @map("attempt_count")
+  lastError        String?        @map("last_error")
+  sentAt           DateTime?      @map("sent_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  organisation     Organisation   @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  member           Member         @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  notification     Notification?
+
+  @@unique([memberId, targetYear, leadDays])
+  @@index([organisationId, scheduledForDate, status])
+  @@map("birthday_reminders")
+}
+
+model Notification {
+  id                 String            @id @default(cuid())
+  organisationId     String            @map("organisation_id")
+  userId             String            @map("user_id")
+  memberId           String?           @map("member_id")
+  birthdayReminderId String?           @unique @map("birthday_reminder_id")
+  type               NotificationType  @default(BIRTHDAY_REMINDER)
+  title              String
+  body               String
+  href               String?
+  readAt             DateTime?         @map("read_at")
+  createdAt          DateTime          @default(now()) @map("created_at")
+
+  organisation       Organisation      @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  member             Member?           @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  birthdayReminder   BirthdayReminder? @relation(fields: [birthdayReminderId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, userId, readAt, createdAt])
+  @@index([memberId])
+  @@map("notifications")
+}
+
+// Append-only at the application-service level (no updatedAt or mutable update workflow).
+model AuditLog {
+  id             String       @id @default(cuid())
+  organisationId String       @map("organisation_id")
+  actorUserId    String?      @map("actor_user_id")
+  action         String
+  entityType     String       @map("entity_type")
+  entityId       String?      @map("entity_id")
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  actorUser      User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, createdAt])
+  @@index([organisationId, entityType, entityId])
+  @@map("audit_logs")
 }

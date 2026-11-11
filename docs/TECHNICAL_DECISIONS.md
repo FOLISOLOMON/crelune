@@ -153,13 +153,13 @@
 The following decisions remain intentionally deferred until their corresponding milestones, with trade-offs outlined below:
 
 ### Decision A: Private Object Storage Provider
+- **Status**: Approved in Stage 3.1 (Architectural Selection Only — Provisioning Deferred to Stage 3.3).
 - **Context**: Needed for storing member photographs and high-resolution creative assets (Milestone 3 & 8).
-- **Options**:
+- **Options Evaluated**:
   1. *AWS S3*: Industry standard, high reliability, standard AWS IAM.
-  2. *Cloudflare R2*: S3-compatible, zero egress fees (highly cost-effective for media).
+  2. *Cloudflare R2*: S3-compatible, zero egress fees.
   3. *Neon Object Storage*: Integrated directly with Neon database branches.
-- **Recommendation**: Evaluate Cloudflare R2 vs Neon Object Storage during Milestone 3 based on integration ease and cost.
-- **Approval Required**: Product Owner decision prior to Milestone 3 implementation.
+- **Decision**: Product Owner approved **Neon Object Storage** for member photo metadata (`Member.photoStorageKey`, `photoMimeType`, `photoByteSize`, `photoUpdatedAt` added in Stage 3.1 schema) so object storage stays aligned with Neon Postgres branching. Bucket provisioning, uploads, and pre-signed URLs remain deferred until Stage 3.3.
 
 ### Decision B: Mobile Push Notification Infrastructure
 - **Context**: Needed for mobile birthday alerts and design job review notifications (Milestone 6).
