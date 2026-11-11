@@ -381,8 +381,21 @@ async function acquireBirthdayDesignJobLocks(
   );
 
   for (const [key1, key2] of ordered) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(CAST(${key1} AS integer), CAST(${key2} AS integer))`;
+    // Cast void result to text so Prisma $queryRaw deserializes cleanly.
+    await tx.$queryRaw<
+      Array<{ locked: string | null }>
+    >`SELECT CAST(pg_advisory_xact_lock(CAST(${key1} AS integer), CAST(${key2} AS integer)) AS text) AS locked`;
   }
+}
+
+async function lockDesignJobForUpdate(
+  tx: Prisma.TransactionClient,
+  jobId: string,
+  organisationId: string
+): Promise<void> {
+  await tx.$queryRaw<
+    Array<{ id: string }>
+  >`SELECT id FROM design_jobs WHERE id = ${jobId} AND organisation_id = ${organisationId} FOR UPDATE`;
 }
 
 function assertValidBirthdayTargetYear(targetYear: number | null | undefined): number {
@@ -714,7 +727,7 @@ export async function updateDesignJob(
   input: UpdateDesignJobInput
 ): Promise<DesignJobDetail> {
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT id FROM design_jobs WHERE id = ${jobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+    await lockDesignJobForUpdate(tx, jobId, actor.organisationId);
 
     const existing = await tx.designJob.findFirst({
       where: {
@@ -948,7 +961,7 @@ export async function transitionDesignJobStatus(
   input: TransitionDesignJobInput
 ): Promise<DesignJobDetail> {
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT id FROM design_jobs WHERE id = ${jobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+    await lockDesignJobForUpdate(tx, jobId, actor.organisationId);
 
     const existing = await tx.designJob.findFirst({
       where: {
