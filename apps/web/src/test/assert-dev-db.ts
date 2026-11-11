@@ -11,6 +11,11 @@ export const APPROVED_DEV_POOLED_HOST =
 export const APPROVED_DEV_DIRECT_HOST =
   'ep-muddy-math-ben8e8p7.c-9.us-east-2.aws.neon.tech';
 export const APPROVED_DEV_DATABASE = 'neondb';
+export const APPROVED_DEV_STORAGE_HOST =
+  'br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech';
+export const APPROVED_DEV_STORAGE_REGION = 'us-east-2';
+export const APPROVED_DEV_STORAGE_BUCKET = 'crelune-dev-member-photos';
+export const APPROVED_DEV_STORAGE_ENV_PREFIX = 'development';
 
 const KNOWN_PRODUCTION_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
 const KNOWN_PRODUCTION_BRANCH_IDS = new Set(['br-withered-moon-be8coj8h']);
@@ -24,7 +29,18 @@ const PROTECTED_ENV_KEYS = [
   'DATABASE_URL_UNPOOLED',
   'NEON_BRANCH',
   'NEON_BRANCH_ID',
+  'AWS_ENDPOINT_URL_S3',
+  'AWS_REGION',
+  'OBJECT_STORAGE_BUCKET',
+  'OBJECT_STORAGE_ENV_PREFIX',
 ] as const;
+
+export interface VerifiedDevStorageTarget {
+  endpointHost: string;
+  region: string;
+  bucket: string;
+  envPrefix: string;
+}
 
 export interface VerifiedDevDatabaseTarget {
   dbHost: string;
@@ -175,5 +191,86 @@ export function assertSafeDevDatabaseEnvironment(
     database: pooled.database,
     branchName,
     branchId,
+  };
+}
+
+/**
+ * Fails closed if storage integration tests target a production Neon branch endpoint,
+ * missing/wrong bucket, wrong environment prefix, or missing storage credentials.
+ */
+export function assertSafeDevStorageEnvironment(
+  env: Record<string, string | undefined> = process.env
+): VerifiedDevStorageTarget {
+  assertSafeDevDatabaseEnvironment(env);
+
+  const rawEndpoint = (env.AWS_ENDPOINT_URL_S3 || '').trim();
+  if (!rawEndpoint) {
+    throw new Error(
+      'Refusing to run storage integration tests: AWS_ENDPOINT_URL_S3 is missing.'
+    );
+  }
+
+  let parsedEndpoint: URL;
+  try {
+    parsedEndpoint = new URL(rawEndpoint);
+  } catch {
+    throw new Error(
+      'Refusing to run storage integration tests: malformed AWS_ENDPOINT_URL_S3.'
+    );
+  }
+
+  if (parsedEndpoint.protocol !== 'https:') {
+    throw new Error(
+      'Refusing to run storage integration tests: AWS_ENDPOINT_URL_S3 must use HTTPS.'
+    );
+  }
+
+  const endpointHost = parsedEndpoint.hostname.toLowerCase();
+  for (const prodBranchId of KNOWN_PRODUCTION_BRANCH_IDS) {
+    if (endpointHost.includes(prodBranchId)) {
+      throw new Error(
+        `Refusing to run storage integration tests: AWS_ENDPOINT_URL_S3 targets production branch "${prodBranchId}".`
+      );
+    }
+  }
+
+  if (endpointHost !== APPROVED_DEV_STORAGE_HOST) {
+    throw new Error(
+      `Refusing to run storage integration tests: AWS_ENDPOINT_URL_S3 host "${endpointHost}" does not match exact approved development host "${APPROVED_DEV_STORAGE_HOST}".`
+    );
+  }
+
+  const region = (env.AWS_REGION || '').trim();
+  if (region !== APPROVED_DEV_STORAGE_REGION) {
+    throw new Error(
+      `Refusing to run storage integration tests: AWS_REGION must equal "${APPROVED_DEV_STORAGE_REGION}".`
+    );
+  }
+
+  const bucket = (env.OBJECT_STORAGE_BUCKET || '').trim();
+  if (bucket !== APPROVED_DEV_STORAGE_BUCKET) {
+    throw new Error(
+      `Refusing to run storage integration tests: OBJECT_STORAGE_BUCKET must equal "${APPROVED_DEV_STORAGE_BUCKET}".`
+    );
+  }
+
+  const envPrefix = (env.OBJECT_STORAGE_ENV_PREFIX || '').trim();
+  if (envPrefix !== APPROVED_DEV_STORAGE_ENV_PREFIX) {
+    throw new Error(
+      `Refusing to run storage integration tests: OBJECT_STORAGE_ENV_PREFIX must equal "${APPROVED_DEV_STORAGE_ENV_PREFIX}".`
+    );
+  }
+
+  if (!(env.AWS_ACCESS_KEY_ID || '').trim() || !(env.AWS_SECRET_ACCESS_KEY || '').trim()) {
+    throw new Error(
+      'Refusing to run storage integration tests: AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY is missing.'
+    );
+  }
+
+  return {
+    endpointHost,
+    region,
+    bucket,
+    envPrefix,
   };
 }

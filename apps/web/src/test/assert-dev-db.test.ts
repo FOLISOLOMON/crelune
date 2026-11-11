@@ -5,8 +5,13 @@ import {
   APPROVED_DEV_DATABASE,
   APPROVED_DEV_DIRECT_HOST,
   APPROVED_DEV_POOLED_HOST,
+  APPROVED_DEV_STORAGE_BUCKET,
+  APPROVED_DEV_STORAGE_ENV_PREFIX,
+  APPROVED_DEV_STORAGE_HOST,
+  APPROVED_DEV_STORAGE_REGION,
   assertNoShellEnvConflict,
   assertSafeDevDatabaseEnvironment,
+  assertSafeDevStorageEnvironment,
 } from './assert-dev-db';
 
 describe('PostgreSQL Integration Database Safety Guard', () => {
@@ -210,5 +215,39 @@ describe('PostgreSQL Integration Database Safety Guard', () => {
         validDevEnv
       )
     ).not.toThrow();
+  });
+
+  it('validates development Neon Object Storage configuration and blocks production endpoints', () => {
+    const validStorageEnv = {
+      ...validDevEnv,
+      AWS_ENDPOINT_URL_S3: `https://${APPROVED_DEV_STORAGE_HOST}`,
+      AWS_REGION: APPROVED_DEV_STORAGE_REGION,
+      OBJECT_STORAGE_BUCKET: APPROVED_DEV_STORAGE_BUCKET,
+      OBJECT_STORAGE_ENV_PREFIX: APPROVED_DEV_STORAGE_ENV_PREFIX,
+      AWS_ACCESS_KEY_ID: 'nak_test',
+      AWS_SECRET_ACCESS_KEY: 'nsk_test',
+    };
+
+    expect(assertSafeDevStorageEnvironment(validStorageEnv)).toEqual({
+      endpointHost: APPROVED_DEV_STORAGE_HOST,
+      region: APPROVED_DEV_STORAGE_REGION,
+      bucket: APPROVED_DEV_STORAGE_BUCKET,
+      envPrefix: APPROVED_DEV_STORAGE_ENV_PREFIX,
+    });
+
+    expect(() =>
+      assertSafeDevStorageEnvironment({
+        ...validStorageEnv,
+        AWS_ENDPOINT_URL_S3:
+          'https://br-withered-moon-be8coj8h.storage.c-9.us-east-2.aws.neon.tech',
+      })
+    ).toThrow(/production branch/i);
+
+    expect(() =>
+      assertSafeDevStorageEnvironment({
+        ...validStorageEnv,
+        OBJECT_STORAGE_ENV_PREFIX: 'production',
+      })
+    ).toThrow(/OBJECT_STORAGE_ENV_PREFIX/i);
   });
 });

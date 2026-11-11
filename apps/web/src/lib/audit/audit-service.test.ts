@@ -16,6 +16,12 @@ describe('Audit Service & Metadata Sanitization', () => {
       password: 'secret',
       passwordHash: 'hash',
       sessionToken: 'tok_123',
+      signedUrl: 'https://storage.example.com/signed?X-Amz-Signature=deadbeef',
+      presignedUrl: 'https://storage.example.com/signed',
+      storageKey: 'development/organisations/org_1/members/mem_1/photos/abc.png',
+      imageBytes: 'binary',
+      accessKeyId: 'nak_test',
+      secretAccessKey: 'nsk_test',
       nested: {
         secretKey: 'abc',
         phoneNumber: '0245550199',

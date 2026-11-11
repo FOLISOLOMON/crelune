@@ -69,13 +69,13 @@ const MEMBER_LIST_SELECT = {
   updatedAt: true,
 } as const;
 
-const MEMBER_DETAIL_SELECT = {
+export const MEMBER_DETAIL_SELECT = {
   ...MEMBER_LIST_SELECT,
   notes: true,
 } as const;
 
 type MemberListRow = Prisma.MemberGetPayload<{ select: typeof MEMBER_LIST_SELECT }>;
-type MemberDetailRow = Prisma.MemberGetPayload<{ select: typeof MEMBER_DETAIL_SELECT }>;
+export type MemberDetailRow = Prisma.MemberGetPayload<{ select: typeof MEMBER_DETAIL_SELECT }>;
 
 export function mapMemberDirectoryItem(row: MemberListRow): MemberDirectoryItem {
   return {

@@ -18,6 +18,27 @@ export const MEMBER_PHONE_MAX_LENGTH = 30;
 export const MEMBER_EMAIL_MAX_LENGTH = 254;
 export const MEMBER_NOTES_MAX_LENGTH = 4000;
 
+export const MAX_MEMBER_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
+export const MIN_MEMBER_PHOTO_BYTES = 12;
+export const MAX_MEMBER_PHOTO_WIDTH = 6000;
+export const MAX_MEMBER_PHOTO_HEIGHT = 6000;
+export const MAX_MEMBER_PHOTO_PIXELS = 25_000_000;
+export const ALLOWED_MEMBER_PHOTO_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+] as const;
+export type MemberPhotoMimeType = (typeof ALLOWED_MEMBER_PHOTO_MIME_TYPES)[number];
+
+export interface MemberPhotoSummary {
+  url: string;
+  mimeType: MemberPhotoMimeType;
+  byteSize: number;
+  width: number;
+  height: number;
+  updatedAt: string;
+}
+
 export const MEMBER_LIST_DEFAULT_LIMIT = 25;
 export const MEMBER_LIST_MAX_LIMIT = 100;
 

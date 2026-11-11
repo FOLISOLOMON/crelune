@@ -41,6 +41,10 @@ for (const key of [
   'DATABASE_URL_UNPOOLED',
   'NEON_BRANCH',
   'NEON_BRANCH_ID',
+  'AWS_ENDPOINT_URL_S3',
+  'AWS_REGION',
+  'OBJECT_STORAGE_BUCKET',
+  'OBJECT_STORAGE_ENV_PREFIX',
 ]) {
   if (process.env[key] && process.env[key] !== fileEnv[key]) {
     fail(`pre-existing shell ${key} conflicts with .env.local.`);
@@ -119,6 +123,27 @@ const directHost = validateUrlHost(
 console.log(
   `[test:integration:db] Verified target branch="${branchName}" (${branchId}) db="${APPROVED_DEV_DATABASE}" pooled="${dbHost}" direct="${directHost}"`
 );
+
+const APPROVED_DEV_STORAGE_HOST =
+  'br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech';
+if (mergedEnv.AWS_ENDPOINT_URL_S3) {
+  let s3Url;
+  try {
+    s3Url = new URL(mergedEnv.AWS_ENDPOINT_URL_S3.trim());
+  } catch {
+    fail('malformed AWS_ENDPOINT_URL_S3.');
+  }
+  const s3Host = s3Url.hostname.toLowerCase();
+  if (s3Host.includes('br-withered-moon-be8coj8h') || s3Host !== APPROVED_DEV_STORAGE_HOST) {
+    fail(`AWS_ENDPOINT_URL_S3 host "${s3Host}" does not match exact approved development storage host.`);
+  }
+}
+if (
+  mergedEnv.OBJECT_STORAGE_ENV_PREFIX &&
+  mergedEnv.OBJECT_STORAGE_ENV_PREFIX.trim() !== 'development'
+) {
+  fail('OBJECT_STORAGE_ENV_PREFIX must equal "development" for integration tests.');
+}
 
 function findPgIntegrationTests(dir) {
   const results = [];

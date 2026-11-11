@@ -251,3 +251,17 @@ Implemented in Milestone 2.1.2:
    - [`AuthThrottle`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma) indexes both `blocked_until` and `window_start`.
    - [`pruneExpiredThrottles`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) deletes at most `250` rows per batch strictly matching `(blocked_until IS NOT NULL AND blocked_until <= now)` or `(blocked_until IS NULL AND window_start <= now - 15m)`. Active blocks and active windows are never deleted.
    - [`maybePruneExpiredThrottles`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) runs cleanup opportunistically at most once every `10` minutes per warm worker (or sampled at `5%` on cold worker invocations), avoiding per-login cleanup queries and avoiding external dependencies.
+
+---
+
+## 11. Milestone 3.3 Private Member Photograph Storage
+
+1. **Private Object Storage & Scoped Key Hierarchy**:
+   - Member photographs are stored in a `private` Neon Object Storage bucket (`crelune-dev-member-photos` on Neon branch `development`, `br-nameless-silence-bexjp44k`), provisioned with branch-scoped credentials in git-ignored `.env.local` and enforced by [`storage-config.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts).
+   - Object keys strictly follow `{envPrefix}/organisations/{organisationId}/members/{memberId}/photos/{uuid}.{ext}` and are verified before deletion or replacement via [`assertKeyMatchesMemberScope`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts). Browser components never import `@aws-sdk/client-s3` or read storage credentials.
+2. **Authenticated Private Streaming**:
+   - Retrieval uses [`GET /api/members/[id]/photo`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/%5Bid%5D/photo/route.ts) guarded by `requireOwnerSession`, `assertSameOrigin` on `POST`/`DELETE`, and `organisationId` ownership checks, serving bytes with `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`.
+   - Browser-facing S3 presigned URLs are not issued so that logout, session revocation, or member removal immediately invalidates access without exposing S3 endpoints, bucket names, object keys, or `X-Amz-Credential` parameters.
+3. **Binary Image Verification & Atomic Metadata Consistency**:
+   - [`validateUploadedMemberPhoto`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/image-validator.ts) enforces an `10 MiB` byte limit, `6000x6000` / `25,000,000` pixel limits, magic-byte inspection, container/SOF/IHDR/RIFF framing, PNG `CRC32` and bounded `zlib.inflateSync` decompression-bomb checks for JPEG, PNG, and WebP.
+   - [`uploadMemberPhoto`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-photo-service.ts) verifies archived-member upload rejection (`409`), uploads and `headObject`-verifies before opening a `pg_advisory_xact_lock` Postgres transaction, cleans up the newly uploaded object if DB persistence or audit logging fails, and deletes the replaced prior object only after commit. Audit metadata blocks storage keys, signed URLs, credentials, and raw image bytes.

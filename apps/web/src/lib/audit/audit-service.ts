@@ -14,6 +14,9 @@ export const AUDIT_ACTIONS = {
   MEMBER_UPDATED: 'MEMBER_UPDATED',
   MEMBER_ARCHIVED: 'MEMBER_ARCHIVED',
   MEMBER_RESTORED: 'MEMBER_RESTORED',
+  MEMBER_PHOTO_UPLOADED: 'MEMBER_PHOTO_UPLOADED',
+  MEMBER_PHOTO_REPLACED: 'MEMBER_PHOTO_REPLACED',
+  MEMBER_PHOTO_REMOVED: 'MEMBER_PHOTO_REMOVED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
@@ -37,6 +40,13 @@ const FORBIDDEN_METADATA_KEYS = new Set([
   'body',
   'requestbody',
   'photostoragekey',
+  'storagekey',
+  'objectkey',
+  'signedurl',
+  'presignedurl',
+  'imagebytes',
+  'accesskeyid',
+  'secretaccesskey',
 ]);
 
 const MAX_METADATA_DEPTH = 3;

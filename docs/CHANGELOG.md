@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.7] - 2026-11-11
+
+### Milestone 3, Stage 3.3: Private Member Photo Storage
+- Provisioned private Neon Object Storage bucket `crelune-dev-member-photos` strictly on Neon `development` (`br-nameless-silence-bexjp44k`) with branch-scoped credentials stored in git-ignored `.env.local` (leaving `production` untouched with zero buckets and `0` written bytes).
+- Implemented pure TypeScript binary image verification ([`image-validator.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/image-validator.ts)) validating JPEG/PNG/WebP magic signatures, SOF/IHDR/VP8/VP8L/VP8X framing, CRC/zlib decompression bounds, `10 MiB` upload cap, and `6000x6000` / `25,000,000` pixel limits.
+- Implemented Neon Object Storage provider and strict organisation/member key scoping ([`storage-config.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts), [`object-storage.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/object-storage.ts)) enforcing `{envPrefix}/organisations/{organisationId}/members/{memberId}/photos/{uuid}.{ext}` and rejecting S3 imports/env usage in browser code.
+- Implemented atomic photo lifecycle operations and private streaming route ([`member-photo-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-photo-service.ts), [`route.ts`](file:///d:/Projects/Crelune/apps/web/src/app/api/members/%5Bid%5D/photo/route.ts)) with `pg_advisory_xact_lock`, S3 compensation cleanup on DB failure, post-commit deletion of prior keys, archived-member `409 Conflict` upload guard, `Cache-Control: private, no-store`, and secret-safe audit logging (`MEMBER_PHOTO_UPLOADED`, `MEMBER_PHOTO_REPLACED`, `MEMBER_PHOTO_REMOVED`).
+- Strengthened integration test guardrails ([`assert-dev-db.ts`](file:///d:/Projects/Crelune/apps/web/src/test/assert-dev-db.ts), [`run-pg-integration.mjs`](file:///d:/Projects/Crelune/apps/web/scripts/run-pg-integration.mjs)) for exact Neon development storage endpoint matching and added unit, route, and live Neon `development` PostgreSQL + S3 integration tests.
+
+---
+
 ## [0.3.6] - 2026-11-11
 
 ### Milestone 3, Stage 3.2: Member Directory API, Duplicate Detection & Audit Logging

@@ -10,6 +10,11 @@ import {
   MemberNotFoundError,
   MemberValidationError,
 } from '@/lib/members/member-service';
+import {
+  MemberPhotoConflictError,
+  MemberPhotoNotFoundError,
+} from '@/lib/members/member-photo-service';
+import { ImageValidationError } from '@/lib/storage/image-validator';
 
 const PRIVATE_NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store',
@@ -63,8 +68,30 @@ export function handleMemberRouteError(
     );
   }
 
-  if (err instanceof MemberNotFoundError) {
-    return memberJsonResponse({ error: 'Member not found' }, 404);
+  if (err instanceof MemberNotFoundError || err instanceof MemberPhotoNotFoundError) {
+    return memberJsonResponse(
+      {
+        error:
+          err instanceof MemberPhotoNotFoundError
+            ? 'Member photo not found'
+            : 'Member not found',
+      },
+      404
+    );
+  }
+
+  if (err instanceof MemberPhotoConflictError) {
+    return memberJsonResponse(
+      { error: err.message, code: 'MEMBER_ARCHIVED' },
+      409
+    );
+  }
+
+  if (err instanceof ImageValidationError) {
+    return memberJsonResponse(
+      { error: err.message, code: err.code },
+      err.code === 'FILE_TOO_LARGE' ? 413 : 400
+    );
   }
 
   if (err instanceof MemberValidationError) {
