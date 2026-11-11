@@ -4,6 +4,8 @@
  * or conflicting shell environment configuration.
  */
 
+import { parseStrictPostgresUrl } from '../lib/database/postgres-url';
+
 export const APPROVED_DEV_BRANCH_NAME = 'development';
 export const APPROVED_DEV_BRANCH_ID = 'br-nameless-silence-bexjp44k';
 export const APPROVED_DEV_POOLED_HOST =
@@ -71,36 +73,15 @@ export function assertNoShellEnvConflict(
 
 function parseValidatedTargetUrl(
   rawUrl: string | undefined,
-  varName: string,
+  varName: 'DATABASE_URL' | 'DATABASE_URL_UNPOOLED',
   expectedHostname: string
 ): { hostname: string; database: string } {
-  if (!rawUrl || !rawUrl.trim()) {
-    throw new Error(
-      `Refusing to run PostgreSQL integration tests: ${varName} is missing.`
-    );
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl.trim());
-  } catch {
-    throw new Error(
-      `Refusing to run PostgreSQL integration tests: malformed ${varName}.`
-    );
-  }
-
-  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
-    throw new Error(
-      `Refusing to run PostgreSQL integration tests: invalid protocol for ${varName}.`
-    );
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-  if (!hostname) {
-    throw new Error(
-      `Refusing to run PostgreSQL integration tests: missing hostname in ${varName}.`
-    );
-  }
+  const { hostname, database } = parseStrictPostgresUrl(
+    rawUrl,
+    varName,
+    (message) =>
+      new Error(`Refusing to run PostgreSQL integration tests: ${message}`)
+  );
 
   if (
     KNOWN_PRODUCTION_HOSTS.has(hostname) ||
@@ -117,7 +98,6 @@ function parseValidatedTargetUrl(
     );
   }
 
-  const database = parsed.pathname.replace(/^\//, '');
   if (database !== APPROVED_DEV_DATABASE) {
     throw new Error(
       `Refusing to run PostgreSQL integration tests: ${varName} database "${database || '(empty)'}" must equal "${APPROVED_DEV_DATABASE}".`

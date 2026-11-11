@@ -273,6 +273,115 @@ describe('Object Storage Configuration & Exact Runtime Allowlist', () => {
     );
   });
 
+  it('rejects explicit unapproved ports, query routing/identity overrides, and duplicate/conflicting params while preserving Neon SSL params', () => {
+    const expectRejectedWithoutSecrets = (
+      overrides: Record<string, string | undefined>,
+      secretFragments: string[] = []
+    ) => {
+      let caught: unknown;
+      try {
+        getObjectStorageConfig({
+          ...validDevEnv,
+          ...overrides,
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(StorageConfigError);
+      const message = caught instanceof Error ? caught.message : String(caught);
+      expect(message).not.toContain('super_secret_pw');
+      expect(message).not.toContain('crelune_test');
+      for (const secret of secretFragments) {
+        expect(message).not.toContain(secret);
+      }
+    };
+
+    // 1. Approved pooled host with ?host=evil.example (and ?hostaddr=...)
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?host=evil.example&sslmode=require`,
+    }, ['evil.example']);
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?hostaddr=127.0.0.1&sslmode=require`,
+    });
+
+    // 2. Approved direct host with a host / hostaddr override
+    expectRejectedWithoutSecrets({
+      DATABASE_URL_UNPOOLED: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/neondb?host=evil.example&sslmode=require`,
+    }, ['evil.example']);
+    expectRejectedWithoutSecrets({
+      DATABASE_URL_UNPOOLED: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/neondb?hostaddr=192.0.2.1&sslmode=require`,
+    });
+
+    // 3. Approved host with an unapproved explicit port
+    for (const badPortSuffix of [':5433', ':6432', ':54320', ':443', ':05432', ':']) {
+      expectRejectedWithoutSecrets({
+        DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}${badPortSuffix}/neondb?sslmode=require`,
+      });
+      expectRejectedWithoutSecrets({
+        DATABASE_URL_UNPOOLED: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}${badPortSuffix}/neondb?sslmode=require`,
+      });
+    }
+
+    // 4. Approved host with a query-string port override
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?port=5433&sslmode=require`,
+    });
+    expectRejectedWithoutSecrets({
+      DATABASE_URL_UNPOOLED: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/neondb?port=5432&sslmode=require`,
+    });
+
+    // 5. Approved host with a database-name override
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?dbname=otherdb&sslmode=require`,
+    });
+    expectRejectedWithoutSecrets({
+      DATABASE_URL_UNPOOLED: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/neondb?database=otherdb&sslmode=require`,
+    });
+
+    // 6. Approved host with user/password/service/passfile overrides without leaking secrets
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?user=attacker_user&sslmode=require`,
+    }, ['attacker_user']);
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?password=leaked_query_secret&sslmode=require`,
+    }, ['leaked_query_secret']);
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?service=prod_service&sslmode=require`,
+    }, ['prod_service']);
+    expectRejectedWithoutSecrets({
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?passfile=/etc/secret_pgpass&sslmode=require`,
+    }, ['secret_pgpass']);
+
+    // 7. Duplicate or conflicting parameters, semicolon smuggling, obfuscated keys, and TLS downgrade
+    for (const badQuery of [
+      'sslmode=require&sslmode=disable',
+      'sslmode=disable&sslmode=require',
+      'sslmode=require&SSLMODE=require',
+      'pgbouncer=true&pgbouncer=false',
+      'sslmode=disable',
+      'channel_binding=disable&sslmode=require',
+      'sslmode=require;host=evil.example',
+      '%68ost=evil.example&sslmode=require',
+    ]) {
+      expectRejectedWithoutSecrets(
+        {
+          DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}/neondb?${badQuery}`,
+        },
+        ['evil.example']
+      );
+    }
+
+    // 8. Preserves legitimate SSL, channel_binding, operational parameters, and explicit default port 5432
+    const legitimateCfg = getObjectStorageConfig({
+      ...validDevEnv,
+      DATABASE_URL: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.pooledDbHost}:5432/neondb?channel_binding=require&sslmode=require&pgbouncer=true&connect_timeout=10`,
+      DATABASE_URL_UNPOOLED: `postgresql://crelune_test:super_secret_pw@${APPROVED_DEV_STORAGE_TARGET.directDbHost}/neondb?channel_binding=require&sslmode=require`,
+    });
+    expect(legitimateCfg.pooledDbHost).toBe(APPROVED_DEV_STORAGE_TARGET.pooledDbHost);
+    expect(legitimateCfg.directDbHost).toBe(APPROVED_DEV_STORAGE_TARGET.directDbHost);
+    expect(legitimateCfg.databaseName).toBe('neondb');
+  });
+
   it('never uses original filenames and enforces environment + organisation + member key isolation', () => {
     const key = buildMemberPhotoObjectKey({
       envPrefix: 'development',

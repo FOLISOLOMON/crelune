@@ -7,6 +7,7 @@
  */
 
 import crypto from 'node:crypto';
+import { parseStrictPostgresUrl } from '../database/postgres-url';
 
 export type StorageEnvPrefix = 'development' | 'production';
 
@@ -120,42 +121,18 @@ function validateStrictHttpsEndpoint(endpointRaw: string): URL {
 }
 
 /**
- * Parses a PostgreSQL connection URL cleanly with `new URL` without exposing
- * credentials, query secrets, or raw connection strings in thrown errors.
+ * Parses a PostgreSQL connection URL cleanly via `parseStrictPostgresUrl`
+ * without exposing credentials, query secrets, or raw connection strings in thrown errors.
  */
 function parsePostgresUrl(
   rawUrl: string | undefined,
   varName: 'DATABASE_URL' | 'DATABASE_URL_UNPOOLED'
 ): { hostname: string; database: string } {
-  const trimmed = (rawUrl || '').trim();
-  if (!trimmed) {
-    throw new StorageConfigError(
-      `${varName} is required to verify runtime database and storage pairing.`
-    );
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new StorageConfigError(`${varName} is malformed.`);
-  }
-
-  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
-    throw new StorageConfigError(`${varName} must use a valid PostgreSQL protocol.`);
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-  if (!hostname) {
-    throw new StorageConfigError(`${varName} is missing a database hostname.`);
-  }
-
-  const database = parsed.pathname.replace(/^\//, '');
-  if (!database || database.includes('/')) {
-    throw new StorageConfigError(`${varName} is missing a valid database name.`);
-  }
-
-  return { hostname, database };
+  return parseStrictPostgresUrl(
+    rawUrl,
+    varName,
+    (message) => new StorageConfigError(message)
+  );
 }
 
 function assertTargetEquality(

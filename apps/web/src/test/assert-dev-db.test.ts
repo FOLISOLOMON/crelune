@@ -281,4 +281,41 @@ describe('PostgreSQL Integration Database Safety Guard', () => {
       })
     ).toThrow(/OBJECT_STORAGE_CREDENTIAL_BRANCH_ID/i);
   });
+
+  it('rejects unapproved explicit ports and routing/identity query overrides in DATABASE_URL and DATABASE_URL_UNPOOLED', () => {
+    for (const overrideUrl of [
+      `postgresql://user:super_secret_pw@${APPROVED_DEV_POOLED_HOST}:5433/${APPROVED_DEV_DATABASE}?sslmode=require`,
+      `postgresql://user:super_secret_pw@${APPROVED_DEV_POOLED_HOST}/${APPROVED_DEV_DATABASE}?host=evil.example&sslmode=require`,
+      `postgresql://user:super_secret_pw@${APPROVED_DEV_POOLED_HOST}/${APPROVED_DEV_DATABASE}?port=5433&sslmode=require`,
+      `postgresql://user:super_secret_pw@${APPROVED_DEV_POOLED_HOST}/${APPROVED_DEV_DATABASE}?dbname=otherdb&sslmode=require`,
+      `postgresql://user:super_secret_pw@${APPROVED_DEV_POOLED_HOST}/${APPROVED_DEV_DATABASE}?sslmode=require&sslmode=disable`,
+    ]) {
+      let msg = '';
+      try {
+        assertSafeDevDatabaseEnvironment({
+          ...validDevEnv,
+          DATABASE_URL: overrideUrl,
+        });
+      } catch (err) {
+        msg = err instanceof Error ? err.message : String(err);
+      }
+      expect(msg).toMatch(/Refusing to run PostgreSQL integration tests/i);
+      expect(msg).not.toContain('super_secret_pw');
+      expect(msg).not.toContain('evil.example');
+    }
+
+    expect(() =>
+      assertSafeDevDatabaseEnvironment({
+        ...validDevEnv,
+        DATABASE_URL_UNPOOLED: `postgresql://user:super_secret_pw@${APPROVED_DEV_DIRECT_HOST}:6432/${APPROVED_DEV_DATABASE}?sslmode=require`,
+      })
+    ).toThrow(/unapproved explicit port/i);
+
+    expect(() =>
+      assertSafeDevDatabaseEnvironment({
+        ...validDevEnv,
+        DATABASE_URL_UNPOOLED: `postgresql://user:super_secret_pw@${APPROVED_DEV_DIRECT_HOST}/${APPROVED_DEV_DATABASE}?host=evil.example&sslmode=require`,
+      })
+    ).toThrow(/disallowed connection override/i);
+  });
 });

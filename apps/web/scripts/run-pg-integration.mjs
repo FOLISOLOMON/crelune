@@ -80,22 +80,67 @@ if (branchId !== APPROVED_DEV_BRANCH_ID) {
   fail(`expected NEON_BRANCH_ID="${APPROVED_DEV_BRANCH_ID}", got "${branchId}".`);
 }
 
+const FORBIDDEN_URL_QUERY_PARAMS = new Set([
+  'host',
+  'hostaddr',
+  'port',
+  'dbname',
+  'database',
+  'user',
+  'username',
+  'password',
+  'service',
+  'passfile',
+  'options',
+  'replication',
+  'target_session_attrs',
+  'sslkey',
+  'sslcert',
+  'sslrootcert',
+  'sslcrl',
+  'sslcrldir',
+  'sslpassword',
+  'krbsrvname',
+  'gsslib',
+  'gssencmode',
+]);
+
 function validateUrlHost(rawUrl, varName, expectedHost) {
   if (!rawUrl || !rawUrl.trim()) {
     fail(`${varName} is missing.`);
   }
+  const trimmed = rawUrl.trim();
   let parsed;
   try {
-    parsed = new URL(rawUrl.trim());
+    parsed = new URL(trimmed);
   } catch {
     fail(`malformed ${varName}.`);
   }
   if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
     fail(`invalid protocol for ${varName}.`);
   }
+  if (parsed.hash) {
+    fail(`${varName} must not contain a URL fragment.`);
+  }
+  const afterScheme = trimmed.slice(trimmed.indexOf('://') + 3);
+  const authorityEnd = Math.min(
+    ...[afterScheme.indexOf('/'), afterScheme.indexOf('?'), afterScheme.indexOf('#')].map((i) =>
+      i === -1 ? afterScheme.length : i
+    )
+  );
+  const authority = afterScheme.slice(0, authorityEnd);
+  const atIdx = authority.lastIndexOf('@');
+  const hostPort = atIdx === -1 ? authority : authority.slice(atIdx + 1);
+  const portColon = hostPort.indexOf(':');
+  if (portColon !== -1 && hostPort.slice(portColon + 1) !== '5432') {
+    fail(`${varName} specifies an unapproved explicit port.`);
+  }
+  if (parsed.port && parsed.port !== '5432') {
+    fail(`${varName} specifies an unapproved explicit port.`);
+  }
   const host = parsed.hostname.toLowerCase();
-  if (!host) {
-    fail(`missing hostname in ${varName}.`);
+  if (!host || host.includes(',') || host.includes('%')) {
+    fail(`missing or invalid hostname in ${varName}.`);
   }
   if (PRODUCTION_HOSTS.has(host) || host.includes(PRODUCTION_ENDPOINT_ID)) {
     fail(`${varName} targets production host "${host}".`);
@@ -106,6 +151,33 @@ function validateUrlHost(rawUrl, varName, expectedHost) {
   const database = parsed.pathname.replace(/^\//, '');
   if (database !== APPROVED_DEV_DATABASE) {
     fail(`${varName} database "${database || '(empty)'}" must equal "${APPROVED_DEV_DATABASE}".`);
+  }
+  if (parsed.search) {
+    if (parsed.search.includes(';')) {
+      fail(`${varName} contains invalid query parameter delimiter syntax.`);
+    }
+    const seenKeys = new Set();
+    for (const seg of parsed.search.slice(1).split('&')) {
+      const eq = seg.indexOf('=');
+      if (eq <= 0) fail(`${varName} contains a malformed query parameter.`);
+      const rawKey = seg.slice(0, eq);
+      if (rawKey.includes('%')) fail(`${varName} contains an obfuscated query parameter.`);
+      const lowerKey = rawKey.toLowerCase();
+      if (seenKeys.has(lowerKey)) {
+        fail(`${varName} contains duplicate query parameter "${lowerKey}".`);
+      }
+      seenKeys.add(lowerKey);
+      if (FORBIDDEN_URL_QUERY_PARAMS.has(lowerKey)) {
+        fail(`${varName} contains disallowed query parameter "${lowerKey}".`);
+      }
+      const val = decodeURIComponent(seg.slice(eq + 1).replace(/\+/g, ' ')).trim().toLowerCase();
+      if (lowerKey === 'sslmode' && !['require', 'verify-ca', 'verify-full'].includes(val)) {
+        fail(`${varName} specifies an unapproved sslmode setting.`);
+      }
+      if (lowerKey === 'channel_binding' && !['require', 'prefer'].includes(val)) {
+        fail(`${varName} specifies an unapproved channel_binding setting.`);
+      }
+    }
   }
   return host;
 }
