@@ -15,27 +15,88 @@ function createDeferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+interface LockWaitEvidence {
+  waiterPid: number;
+  holderPid: number;
+  waitEvent: string;
+  blockingPids: number[];
+  query: string;
+}
+
 async function waitForDesignJobsLockWait(
   observer: PrismaClient,
+  params: {
+    waiterPid: number;
+    holderPid: number;
+    expectedQueryFragment: string;
+  },
   timeoutMs = 15_000
-): Promise<void> {
+): Promise<LockWaitEvidence> {
+  const { waiterPid, holderPid, expectedQueryFragment } = params;
   const deadline = Date.now() + timeoutMs;
+  let lastSnapshot: unknown = null;
+
   while (Date.now() < deadline) {
-    const rows = await observer.$queryRaw<Array<{ waiting: bigint | number }>>`
-      SELECT COUNT(*) AS waiting
-      FROM pg_stat_activity
-      WHERE datname = current_database()
-        AND pid <> pg_backend_pid()
-        AND state = 'active'
-        AND wait_event_type = 'Lock'
-        AND wait_event IN ('transactionid', 'tuple')
+    const rows = await observer.$queryRaw<
+      Array<{
+        pid: number;
+        state: string | null;
+        wait_event_type: string | null;
+        wait_event: string | null;
+        blocking_pids: number[] | null;
+        query: string | null;
+        holder_holds_design_jobs_lock: boolean;
+      }>
+    >`
+      SELECT
+        a.pid,
+        a.state,
+        a.wait_event_type,
+        a.wait_event,
+        pg_blocking_pids(a.pid) AS blocking_pids,
+        a.query,
+        EXISTS (
+          SELECT 1
+          FROM pg_locks hl
+          JOIN pg_class hc ON hc.oid = hl.relation
+          WHERE hl.pid = ${holderPid}::int
+            AND hc.relname = 'design_jobs'
+            AND hl.granted
+        ) AS holder_holds_design_jobs_lock
+      FROM pg_stat_activity a
+      WHERE a.datname = current_database()
+        AND a.pid = ${waiterPid}::int
     `;
-    if (Number(rows[0]?.waiting ?? 0) > 0) {
-      return;
+
+    const row = rows[0];
+    lastSnapshot = row ?? null;
+
+    if (
+      row &&
+      row.state === 'active' &&
+      row.wait_event_type === 'Lock' &&
+      (row.wait_event === 'transactionid' || row.wait_event === 'tuple') &&
+      Array.isArray(row.blocking_pids) &&
+      row.blocking_pids.includes(holderPid) &&
+      row.holder_holds_design_jobs_lock &&
+      typeof row.query === 'string' &&
+      row.query.includes(expectedQueryFragment)
+    ) {
+      return {
+        waiterPid: Number(row.pid),
+        holderPid,
+        waitEvent: row.wait_event,
+        blockingPids: row.blocking_pids.map(Number),
+        query: row.query,
+      };
     }
+
     await new Promise((r) => setTimeout(r, 40));
   }
-  throw new Error('Timed out waiting for PostgreSQL row-lock wait.');
+
+  throw new Error(
+    `Timed out waiting for waiterPid=${waiterPid} to block behind holderPid=${holderPid} on design_jobs lock. Last snapshot: ${JSON.stringify(lastSnapshot)}`
+  );
 }
 
 describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Version Consistency & Immutability (Neon Dev)', () => {
@@ -995,7 +1056,8 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
       },
     });
 
-    const dispatchInserted = createDeferred();
+    const dispatchInserted = createDeferred<number>();
+    const waiterPidReady = createDeferred<number>();
     const allowDispatchCommit = createDeferred();
     let updateSettled = false;
 
@@ -1003,6 +1065,9 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
       const tx1Promise = client1.$transaction(
         async (tx1) => {
           await tx1.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+          const [{ pid: holderPid }] = await tx1.$queryRaw<Array<{ pid: number }>>`
+            SELECT pg_backend_pid() AS pid
+          `;
           const created = await tx1.creativeJobDispatch.create({
             data: {
               organisationId: orgAId,
@@ -1013,19 +1078,23 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
               manifestJson: { manifestVersion: 1 },
             },
           });
-          dispatchInserted.resolve();
+          dispatchInserted.resolve(Number(holderPid));
           await allowDispatchCommit.promise;
           return created;
         },
         { maxWait: 15_000, timeout: 30_000 }
       );
 
-      await dispatchInserted.promise;
+      const holderPid = await dispatchInserted.promise;
 
       const tx2Promise = client2
         .$transaction(
           async (tx2) => {
             await tx2.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+            const [{ pid: waiterPid }] = await tx2.$queryRaw<Array<{ pid: number }>>`
+              SELECT pg_backend_pid() AS pid
+            `;
+            waiterPidReady.resolve(Number(waiterPid));
             return tx2.designJob.update({
               where: { id: concJob.id },
               data: {
@@ -1043,10 +1112,21 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
       const tx2Rejection = expect(tx2Promise).rejects.toThrow(
         /conflicts with active CreativeJobDispatch/i
       );
+      const waiterPid = await waiterPidReady.promise;
+      expect(waiterPid).not.toBe(holderPid);
 
-      // Deterministic verification: tx2 must be blocked in PostgreSQL on design_jobs row lock while tx1 is uncommitted
-      await waitForDesignJobsLockWait(prisma, 15_000);
+      // Deterministic verification: tx2's exact backend PID must be blocked by tx1's PID on design_jobs lock
+      const lockEvidence = await waitForDesignJobsLockWait(
+        prisma,
+        { waiterPid, holderPid, expectedQueryFragment: 'design_jobs' },
+        15_000
+      );
+      expect(lockEvidence.waiterPid).toBe(waiterPid);
+      expect(lockEvidence.blockingPids).toContain(holderPid);
       expect(updateSettled).toBe(false);
+      console.info(
+        `[Scenario A] Verified lock wait: waiterPid=${lockEvidence.waiterPid} blocked by holderPid=${lockEvidence.holderPid} waitEvent=${lockEvidence.waitEvent}`
+      );
 
       // Release tx1 so it commits the dispatch; tx2 then wakes up, sees committed dispatch, and must reject
       allowDispatchCommit.resolve();
@@ -1099,7 +1179,8 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
       },
     });
 
-    const templateUpdated = createDeferred();
+    const templateUpdated = createDeferred<number>();
+    const waiterPidReady = createDeferred<number>();
     const allowTemplateCommit = createDeferred();
     let dispatchSettled = false;
 
@@ -1107,6 +1188,9 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
       const tx1Promise = client1.$transaction(
         async (tx1) => {
           await tx1.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+          const [{ pid: holderPid }] = await tx1.$queryRaw<Array<{ pid: number }>>`
+            SELECT pg_backend_pid() AS pid
+          `;
           const updated = await tx1.designJob.update({
             where: { id: concJob.id },
             data: {
@@ -1114,19 +1198,23 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
               templateVersionId: versionA2v1Id,
             },
           });
-          templateUpdated.resolve();
+          templateUpdated.resolve(Number(holderPid));
           await allowTemplateCommit.promise;
           return updated;
         },
         { maxWait: 15_000, timeout: 30_000 }
       );
 
-      await templateUpdated.promise;
+      const holderPid = await templateUpdated.promise;
 
       const tx2Promise = client2
         .$transaction(
           async (tx2) => {
             await tx2.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+            const [{ pid: waiterPid }] = await tx2.$queryRaw<Array<{ pid: number }>>`
+              SELECT pg_backend_pid() AS pid
+            `;
+            waiterPidReady.resolve(Number(waiterPid));
             return tx2.creativeJobDispatch.create({
               data: {
                 organisationId: orgAId,
@@ -1146,10 +1234,21 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
         });
 
       const tx2Rejection = expect(tx2Promise).rejects.toThrow(/expected DesignJob template/i);
+      const waiterPid = await waiterPidReady.promise;
+      expect(waiterPid).not.toBe(holderPid);
 
-      // Deterministic verification: tx2 must wait for tx1's row lock on design_jobs rather than reading stale state
-      await waitForDesignJobsLockWait(prisma, 15_000);
+      // Deterministic verification: tx2's exact backend PID must be blocked by tx1's PID on design_jobs lock
+      const lockEvidence = await waitForDesignJobsLockWait(
+        prisma,
+        { waiterPid, holderPid, expectedQueryFragment: 'creative_job_dispatches' },
+        15_000
+      );
+      expect(lockEvidence.waiterPid).toBe(waiterPid);
+      expect(lockEvidence.blockingPids).toContain(holderPid);
       expect(dispatchSettled).toBe(false);
+      console.info(
+        `[Scenario B] Verified lock wait: waiterPid=${lockEvidence.waiterPid} blocked by holderPid=${lockEvidence.holderPid} waitEvent=${lockEvidence.waitEvent}`
+      );
 
       // Commit tx1 (T2/v2); tx2 then wakes up, re-reads committed parent T2/v2, and must reject T1/v1 dispatch
       allowTemplateCommit.resolve();
