@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   defaultPsdLayerInspector,
@@ -293,5 +296,79 @@ describe('WebtoonPsdLayerInspector', () => {
     ).rejects.toMatchObject({
       code: 'PSD_DIMENSIONS_INVALID',
     });
+  });
+
+  it('terminates a synchronously hung parser worker on wall-clock timeout without blocking the event loop', async () => {
+    const tmpWorker = path.join(os.tmpdir(), `crelune-hung-worker-${Date.now()}.mjs`);
+    fs.writeFileSync(
+      tmpWorker,
+      'while (true) {}',
+      'utf8'
+    );
+
+    try {
+      const inspector = new WebtoonPsdLayerInspector({ workerScriptPath: tmpWorker });
+      const psdBuffer = buildSyntheticPsdBuffer({ width: 100, height: 100 });
+
+      const started = Date.now();
+      await expect(
+        inspector.inspectBuffer({
+          buffer: psdBuffer,
+          filename: 'hung.psd',
+          limits: { timeoutMs: 120 },
+        })
+      ).rejects.toMatchObject({
+        name: 'PsdInspectionError',
+        code: 'PSD_INSPECTION_TIMEOUT',
+      });
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeLessThan(2000);
+    } finally {
+      fs.rmSync(tmpWorker, { force: true });
+    }
+  });
+
+  it('runs the worker with an empty environment (zero parent secrets) and rejects oversized worker output', async () => {
+    const prevSecret = process.env.CRELUNE_TEST_SECRET_SENTINEL;
+    process.env.CRELUNE_TEST_SECRET_SENTINEL = 'top-secret-do-not-leak';
+
+    const envCheckWorker = path.join(
+      os.tmpdir(),
+      `crelune-env-worker-${Date.now()}.mjs`
+    );
+    fs.writeFileSync(
+      envCheckWorker,
+      `import { parentPort } from 'node:worker_threads';
+       const keys = Object.keys(process.env);
+       if (keys.length > 0 || process.env.CRELUNE_TEST_SECRET_SENTINEL) {
+         parentPort.postMessage({ ok: false, code: 'PSD_PARSE_FAILED', message: 'Env leaked: ' + keys.join(',') });
+       } else {
+         parentPort.postMessage({ ok: false, code: 'PSD_OUTPUT_EXCEEDED', message: 'Clean env verified' });
+       }`,
+      'utf8'
+    );
+
+    try {
+      const inspector = new WebtoonPsdLayerInspector({
+        workerScriptPath: envCheckWorker,
+      });
+      const psdBuffer = buildSyntheticPsdBuffer({ width: 100, height: 100 });
+      await expect(
+        inspector.inspectBuffer({
+          buffer: psdBuffer,
+          filename: 'env-check.psd',
+        })
+      ).rejects.toMatchObject({
+        code: 'PSD_OUTPUT_EXCEEDED',
+        message: 'Clean env verified',
+      });
+    } finally {
+      fs.rmSync(envCheckWorker, { force: true });
+      if (prevSecret === undefined) {
+        delete process.env.CRELUNE_TEST_SECRET_SENTINEL;
+      } else {
+        process.env.CRELUNE_TEST_SECRET_SENTINEL = prevSecret;
+      }
+    }
   });
 });

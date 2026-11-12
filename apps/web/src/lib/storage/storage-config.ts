@@ -630,6 +630,90 @@ export function assertKeyMatchesTemplatePreviewScope(
   );
 }
 
+export function buildTemplateMasterStagingPrefix(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+}): string {
+  if (!ALLOWED_ENV_PREFIXES.has(params.envPrefix)) {
+    throw new StorageKeyViolationError('Invalid storage environment prefix.');
+  }
+  const orgId = assertSafeIdentifier(params.organisationId, 'organisationId');
+  const templateId = assertSafeIdentifier(params.templateId, 'templateId');
+  return `${params.envPrefix}/organisations/${orgId}/templates/${templateId}/staging/masters/`;
+}
+
+export function buildTemplateMasterStagingObjectKey(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+  extension: CreativeMasterExtension;
+  objectId?: string;
+}): string {
+  if (!CREATIVE_MASTER_EXTENSIONS.has(params.extension)) {
+    throw new StorageKeyViolationError('Unsupported template master extension.');
+  }
+  const objectId = assertValidObjectId(params.objectId);
+  return `${buildTemplateMasterStagingPrefix(params)}${objectId}.${params.extension}`;
+}
+
+export function assertKeyMatchesTemplateMasterStagingScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    templateId: string;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildTemplateMasterStagingPrefix(params),
+    /^[a-zA-Z0-9_-]+\.(psd|af|afphoto|afdesign|afpub)$/
+  );
+}
+
+export function buildTemplatePreviewStagingPrefix(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+}): string {
+  if (!ALLOWED_ENV_PREFIXES.has(params.envPrefix)) {
+    throw new StorageKeyViolationError('Invalid storage environment prefix.');
+  }
+  const orgId = assertSafeIdentifier(params.organisationId, 'organisationId');
+  const templateId = assertSafeIdentifier(params.templateId, 'templateId');
+  return `${params.envPrefix}/organisations/${orgId}/templates/${templateId}/staging/previews/`;
+}
+
+export function buildTemplatePreviewStagingObjectKey(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+  extension: CreativePreviewExtension;
+  objectId?: string;
+}): string {
+  if (!CREATIVE_PREVIEW_EXTENSIONS.has(params.extension)) {
+    throw new StorageKeyViolationError('Unsupported template preview extension.');
+  }
+  const objectId = assertValidObjectId(params.objectId);
+  return `${buildTemplatePreviewStagingPrefix(params)}${objectId}.${params.extension}`;
+}
+
+export function assertKeyMatchesTemplatePreviewStagingScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    templateId: string;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildTemplatePreviewStagingPrefix(params),
+    /^[a-zA-Z0-9_-]+\.(png|jpg|webp)$/
+  );
+}
+
 export function buildWorkingAssetPrefix(params: {
   envPrefix: StorageEnvPrefix;
   organisationId: string;

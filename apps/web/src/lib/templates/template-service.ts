@@ -50,9 +50,13 @@ import {
 } from '@/lib/storage/creative-storage';
 import {
   assertKeyMatchesTemplateMasterScope,
+  assertKeyMatchesTemplateMasterStagingScope,
   assertKeyMatchesTemplatePreviewScope,
+  assertKeyMatchesTemplatePreviewStagingScope,
   buildTemplateMasterObjectKey,
+  buildTemplateMasterStagingObjectKey,
   buildTemplatePreviewObjectKey,
+  buildTemplatePreviewStagingObjectKey,
   type CreativeMasterExtension,
   type CreativePreviewExtension,
 } from '@/lib/storage/storage-config';
@@ -102,6 +106,7 @@ function detectPreviewImageMagicMime(
 }
 
 const MAX_PREVIEW_DIMENSION_PX = 30_000;
+export const CREATIVE_CLEANUP_EXPIRY_GRACE_MS = 60_000;
 
 export interface TemplateActorContext {
   userId: string;
@@ -298,27 +303,6 @@ function previewExtensionFromMime(mimeType: string): CreativePreviewExtension {
   }
 }
 
-function parseVersionNumberFromCreativeKey(
-  storageKey: string,
-  segment: 'versions' | 'previews'
-): number {
-  const marker = `/${segment}/v`;
-  const idx = storageKey.indexOf(marker);
-  if (idx === -1) {
-    throw new TemplateValidationError('Invalid creative upload storage key scope.');
-  }
-  const rest = storageKey.slice(idx + marker.length);
-  const slashIdx = rest.indexOf('/');
-  if (slashIdx <= 0) {
-    throw new TemplateValidationError('Invalid creative upload storage key scope.');
-  }
-  const num = Number.parseInt(rest.slice(0, slashIdx), 10);
-  if (!Number.isInteger(num) || num < 1) {
-    throw new TemplateValidationError('Invalid creative upload storage key version.');
-  }
-  return num;
-}
-
 function formatFromVerifiedMasterKey(storageKey: string): TemplateFileFormat {
   const ext = extractNormalizedFileExtension(storageKey);
   switch (ext) {
@@ -342,6 +326,12 @@ function computeNextRetryAt(attempts: number, now: Date): Date {
   return new Date(now.getTime() + delayMs);
 }
 
+function computeCleanupDeferUntil(expiresAt: Date | null | undefined, now: Date): Date {
+  if (!expiresAt) return now;
+  const expiryWithGrace = expiresAt.getTime() + CREATIVE_CLEANUP_EXPIRY_GRACE_MS;
+  return new Date(Math.max(now.getTime(), expiryWithGrace));
+}
+
 async function enqueueAndAttemptCreativeCleanup(
   params: {
     organisationId: string;
@@ -349,6 +339,8 @@ async function enqueueAndAttemptCreativeCleanup(
     objectKey: string;
     reason: CreativeStorageCleanupReason;
     now: Date;
+    deferUntil?: Date;
+    attemptImmediateDelete?: boolean;
   },
   storage: CreativeObjectStorageProvider
 ): Promise<void> {
@@ -356,6 +348,9 @@ async function enqueueAndAttemptCreativeCleanup(
     return;
   }
   assertCreativeKeyEnvPrefix(params.objectKey, storage.envPrefix);
+
+  const deferUntil = params.deferUntil ?? params.now;
+  const mustStayPendingUntilExpiry = deferUntil.getTime() > params.now.getTime();
 
   const cleanup = await prisma.creativeStorageCleanup.upsert({
     where: { objectKey: params.objectKey },
@@ -366,36 +361,57 @@ async function enqueueAndAttemptCreativeCleanup(
       reason: params.reason,
       status: 'PENDING',
       attempts: 0,
-      nextRetryAt: params.now,
+      nextRetryAt: deferUntil,
     },
     update: {
       reason: params.reason,
       status: 'PENDING',
-      nextRetryAt: params.now,
+      nextRetryAt: deferUntil,
       resolvedAt: null,
     },
   });
 
+  if (params.attemptImmediateDelete === false) {
+    return;
+  }
+
   try {
     await storage.deleteObject(params.objectKey);
-    await prisma.creativeStorageCleanup.update({
-      where: { id: cleanup.id },
-      data: {
-        status: 'COMPLETED',
-        attempts: cleanup.attempts + 1,
-        lastError: null,
-        resolvedAt: new Date(),
-      },
-    });
+    if (mustStayPendingUntilExpiry) {
+      // Keep cleanup PENDING until the presigned PUT URL + grace window has elapsed,
+      // because a late PUT before expiry could recreate the object.
+      await prisma.creativeStorageCleanup.update({
+        where: { id: cleanup.id },
+        data: {
+          status: 'PENDING',
+          attempts: cleanup.attempts + 1,
+          lastError: null,
+          nextRetryAt: deferUntil,
+          resolvedAt: null,
+        },
+      });
+    } else {
+      await prisma.creativeStorageCleanup.update({
+        where: { id: cleanup.id },
+        data: {
+          status: 'COMPLETED',
+          attempts: cleanup.attempts + 1,
+          lastError: null,
+          resolvedAt: new Date(),
+        },
+      });
+    }
   } catch (err) {
     const errorName = err instanceof Error ? err.name : 'CleanupDeleteError';
+    const retryAt = computeNextRetryAt(cleanup.attempts + 1, params.now);
     await prisma.creativeStorageCleanup.update({
       where: { id: cleanup.id },
       data: {
         status: 'PENDING',
         attempts: cleanup.attempts + 1,
         lastError: errorName.slice(0, 120),
-        nextRetryAt: computeNextRetryAt(cleanup.attempts + 1, params.now),
+        nextRetryAt:
+          retryAt.getTime() > deferUntil.getTime() ? retryAt : deferUntil,
       },
     });
   }
@@ -407,6 +423,7 @@ async function rejectUploadIntentWithCleanup(
     organisationId: string;
     storageBucket: string;
     storageKey: string;
+    expiresAt?: Date;
   },
   reason: string,
   now: Date,
@@ -433,6 +450,8 @@ async function rejectUploadIntentWithCleanup(
         objectKey: intent.storageKey,
         reason: 'UPLOAD_REJECTED',
         now,
+        deferUntil: computeCleanupDeferUntil(intent.expiresAt, now),
+        attemptImmediateDelete: true,
       },
       storage
     );
@@ -974,26 +993,23 @@ export async function createTemplateUploadIntent(
     };
   }
 
-  const nextVersionHint = (template.versions[0]?.versionNumber ?? 0) + 1;
   let storageKey: string;
   if (input.kind === 'TEMPLATE_MASTER') {
     const ext = extractNormalizedFileExtension(input.originalFilename);
     if (!ext) {
       throw new TemplateValidationError('Master filename must include a valid extension.');
     }
-    storageKey = buildTemplateMasterObjectKey({
+    storageKey = buildTemplateMasterStagingObjectKey({
       envPrefix: storage.envPrefix,
       organisationId: actor.organisationId,
       templateId: template.id,
-      versionNumber: nextVersionHint,
       extension: ext as CreativeMasterExtension,
     });
   } else {
-    storageKey = buildTemplatePreviewObjectKey({
+    storageKey = buildTemplatePreviewStagingObjectKey({
       envPrefix: storage.envPrefix,
       organisationId: actor.organisationId,
       templateId: template.id,
-      versionNumber: nextVersionHint,
       extension: previewExtensionFromMime(input.mimeType),
     });
   }
@@ -1116,15 +1132,10 @@ export async function completeTemplateVersionUpload(
     throw new TemplateValidationError('Upload intent storage bucket mismatch.');
   }
 
-  const keyVersionHint = parseVersionNumberFromCreativeKey(
-    masterIntent.storageKey,
-    'versions'
-  );
-  assertKeyMatchesTemplateMasterScope(masterIntent.storageKey, {
+  assertKeyMatchesTemplateMasterStagingScope(masterIntent.storageKey, {
     envPrefix: storage.envPrefix,
     organisationId: actor.organisationId,
     templateId,
-    versionNumber: keyVersionHint,
   });
 
   const head = await storage.headObject(masterIntent.storageKey);
@@ -1248,6 +1259,8 @@ export async function completeTemplateVersionUpload(
     mimeType: string;
     byteSize: number;
     sha256: string;
+    bytes: Uint8Array;
+    expiresAt: Date;
   } | null = null;
 
   if (input.previewUploadIntentId) {
@@ -1286,15 +1299,10 @@ export async function completeTemplateVersionUpload(
       throw new TemplateValidationError('Preview upload intent storage bucket mismatch.');
     }
 
-    const previewVersionHint = parseVersionNumberFromCreativeKey(
-      previewIntent.storageKey,
-      'previews'
-    );
-    assertKeyMatchesTemplatePreviewScope(previewIntent.storageKey, {
+    assertKeyMatchesTemplatePreviewStagingScope(previewIntent.storageKey, {
       envPrefix: storage.envPrefix,
       organisationId: actor.organisationId,
       templateId,
-      versionNumber: previewVersionHint,
     });
 
     const previewHead = await storage.headObject(previewIntent.storageKey);
@@ -1406,146 +1414,255 @@ export async function completeTemplateVersionUpload(
       mimeType: previewIntent.expectedMimeType,
       byteSize: previewBytes.byteLength,
       sha256: previewSha256,
+      bytes: previewBytes,
+      expiresAt: previewIntent.expiresAt,
     };
   }
 
-  const createdVersionId = await prisma.$transaction(async (tx) => {
-    const lockedTemplates = await tx.$queryRaw<
-      Array<{ id: string; is_active: boolean; archived_at: Date | null }>
-    >`
-      SELECT id, is_active, archived_at
-      FROM templates
-      WHERE id = ${templateId} AND organisation_id = ${actor.organisationId}
-      FOR UPDATE
-    `;
-    const lockedTemplate = lockedTemplates[0];
-    if (!lockedTemplate) {
-      throw new TemplateNotFoundError();
-    }
-    if (!lockedTemplate.is_active || lockedTemplate.archived_at !== null) {
-      throw new TemplateConflictError(
-        'Archived templates cannot register new versions. Restore the template first.',
-        'TEMPLATE_ARCHIVED'
-      );
-    }
+  const masterExt = format.toLowerCase() as CreativeMasterExtension;
+  const promotedKeys: string[] = [];
+  let createdVersionId: string;
+  try {
+    createdVersionId = await prisma.$transaction(async (tx) => {
+      const lockedTemplates = await tx.$queryRaw<
+        Array<{ id: string; is_active: boolean; archived_at: Date | null }>
+      >`
+        SELECT id, is_active, archived_at
+        FROM templates
+        WHERE id = ${templateId} AND organisation_id = ${actor.organisationId}
+        FOR UPDATE
+      `;
+      const lockedTemplate = lockedTemplates[0];
+      if (!lockedTemplate) {
+        throw new TemplateNotFoundError();
+      }
+      if (!lockedTemplate.is_active || lockedTemplate.archived_at !== null) {
+        throw new TemplateConflictError(
+          'Archived templates cannot register new versions. Restore the template first.',
+          'TEMPLATE_ARCHIVED'
+        );
+      }
 
-    const claimedMaster = await tx.creativeUploadIntent.updateMany({
-      where: {
-        id: masterIntent.id,
-        organisationId: actor.organisationId,
-        status: 'PENDING',
-      },
-      data: {
-        status: 'VERIFIED',
-        verifiedByteSize: actualByteSize,
-        verifiedSha256: actualSha256,
-        verifiedAt: now,
-      },
-    });
-    if (claimedMaster.count !== 1) {
-      throw new UploadIntentConflictError(
-        'Upload intent has already been processed.',
-        'UPLOAD_INTENT_NOT_REUSABLE'
-      );
-    }
-
-    if (verifiedPreview) {
-      const claimedPreview = await tx.creativeUploadIntent.updateMany({
+      const claimedMaster = await tx.creativeUploadIntent.updateMany({
         where: {
-          id: verifiedPreview.intentId,
+          id: masterIntent.id,
           organisationId: actor.organisationId,
           status: 'PENDING',
         },
         data: {
           status: 'VERIFIED',
-          verifiedByteSize: verifiedPreview.byteSize,
-          verifiedSha256: verifiedPreview.sha256,
+          verifiedByteSize: actualByteSize,
+          verifiedSha256: actualSha256,
           verifiedAt: now,
         },
       });
-      if (claimedPreview.count !== 1) {
+      if (claimedMaster.count !== 1) {
         throw new UploadIntentConflictError(
-          'Preview upload intent has already been processed.',
+          'Upload intent has already been processed.',
           'UPLOAD_INTENT_NOT_REUSABLE'
         );
       }
-    }
 
-    const latestVersion = await tx.templateVersion.findFirst({
-      where: { templateId, organisationId: actor.organisationId },
-      orderBy: { versionNumber: 'desc' },
-      select: { versionNumber: true },
-    });
-    const nextVersionNumber = (latestVersion?.versionNumber ?? 0) + 1;
+      if (verifiedPreview) {
+        const claimedPreview = await tx.creativeUploadIntent.updateMany({
+          where: {
+            id: verifiedPreview.intentId,
+            organisationId: actor.organisationId,
+            status: 'PENDING',
+          },
+          data: {
+            status: 'VERIFIED',
+            verifiedByteSize: verifiedPreview.byteSize,
+            verifiedSha256: verifiedPreview.sha256,
+            verifiedAt: now,
+          },
+        });
+        if (claimedPreview.count !== 1) {
+          throw new UploadIntentConflictError(
+            'Preview upload intent has already been processed.',
+            'UPLOAD_INTENT_NOT_REUSABLE'
+          );
+        }
+      }
 
-    const version = await tx.templateVersion.create({
-      data: {
+      const latestVersion = await tx.templateVersion.findFirst({
+        where: { templateId, organisationId: actor.organisationId },
+        orderBy: { versionNumber: 'desc' },
+        select: { versionNumber: true },
+      });
+      const nextVersionNumber = (latestVersion?.versionNumber ?? 0) + 1;
+
+      const finalMasterKey = buildTemplateMasterObjectKey({
+        envPrefix: storage.envPrefix,
         organisationId: actor.organisationId,
         templateId,
         versionNumber: nextVersionNumber,
-        format,
-        storageBucket: masterIntent.storageBucket,
-        storageKey: masterIntent.storageKey,
-        previewStorageKey: verifiedPreview?.storageKey ?? null,
-        previewMimeType: verifiedPreview?.mimeType ?? null,
-        previewByteSize: verifiedPreview?.byteSize ?? null,
-        originalFilename: leafFilename,
-        mimeType: masterIntent.expectedMimeType,
-        byteSize: actualByteSize,
-        sha256: actualSha256,
-        widthPx,
-        heightPx,
-        inspectionStatus,
-        inspectionSummary,
-        detectedLayersJson:
-          inspectionResult === null
-            ? Prisma.JsonNull
-            : (inspectionResult as unknown as Prisma.InputJsonValue),
-        inspectedAt,
-        uploadedByUserId: actor.userId,
-        uploadIntentId: masterIntent.id,
-      },
-    });
-
-    if (input.activateImmediately) {
-      await tx.template.update({
-        where: { id: templateId },
-        data: { activeVersionId: version.id },
+        extension: masterExt,
       });
-    }
-
-    await auditService.recordAuditEvent(tx, {
-      organisationId: actor.organisationId,
-      actorUserId: actor.userId,
-      action: auditService.AUDIT_ACTIONS.TEMPLATE_VERSION_UPLOADED,
-      entityType: 'TemplateVersion',
-      entityId: version.id,
-      metadata: {
+      assertKeyMatchesTemplateMasterScope(finalMasterKey, {
+        envPrefix: storage.envPrefix,
+        organisationId: actor.organisationId,
         templateId,
         versionNumber: nextVersionNumber,
-        format,
-        byteSize: actualByteSize,
-        inspectionStatus,
-        activated: input.activateImmediately,
-      },
-    });
+      });
+      const existingMasterHead = await storage.headObject(finalMasterKey);
+      if (existingMasterHead.exists) {
+        throw new TemplateConflictError(
+          'Target template version storage object already exists.',
+          'VERSION_STORAGE_KEY_COLLISION'
+        );
+      }
+      await storage.putPrivateObject({
+        key: finalMasterKey,
+        body: masterBytes,
+        contentType: masterIntent.expectedMimeType,
+      });
+      promotedKeys.push(finalMasterKey);
 
-    if (input.activateImmediately) {
+      let finalPreviewKey: string | null = null;
+      if (verifiedPreview) {
+        finalPreviewKey = buildTemplatePreviewObjectKey({
+          envPrefix: storage.envPrefix,
+          organisationId: actor.organisationId,
+          templateId,
+          versionNumber: nextVersionNumber,
+          extension: previewExtensionFromMime(verifiedPreview.mimeType),
+        });
+        assertKeyMatchesTemplatePreviewScope(finalPreviewKey, {
+          envPrefix: storage.envPrefix,
+          organisationId: actor.organisationId,
+          templateId,
+          versionNumber: nextVersionNumber,
+        });
+        const existingPreviewHead = await storage.headObject(finalPreviewKey);
+        if (existingPreviewHead.exists) {
+          throw new TemplateConflictError(
+            'Target template preview storage object already exists.',
+            'VERSION_STORAGE_KEY_COLLISION'
+          );
+        }
+        await storage.putPrivateObject({
+          key: finalPreviewKey,
+          body: verifiedPreview.bytes,
+          contentType: verifiedPreview.mimeType,
+        });
+        promotedKeys.push(finalPreviewKey);
+      }
+
+      const version = await tx.templateVersion.create({
+        data: {
+          organisationId: actor.organisationId,
+          templateId,
+          versionNumber: nextVersionNumber,
+          format,
+          storageBucket: masterIntent.storageBucket,
+          storageKey: finalMasterKey,
+          previewStorageKey: finalPreviewKey,
+          previewMimeType: verifiedPreview?.mimeType ?? null,
+          previewByteSize: verifiedPreview?.byteSize ?? null,
+          originalFilename: leafFilename,
+          mimeType: masterIntent.expectedMimeType,
+          byteSize: actualByteSize,
+          sha256: actualSha256,
+          widthPx,
+          heightPx,
+          inspectionStatus,
+          inspectionSummary,
+          detectedLayersJson:
+            inspectionResult === null
+              ? Prisma.JsonNull
+              : (inspectionResult as unknown as Prisma.InputJsonValue),
+          inspectedAt,
+          uploadedByUserId: actor.userId,
+          uploadIntentId: masterIntent.id,
+        },
+      });
+
+      if (input.activateImmediately) {
+        await tx.template.update({
+          where: { id: templateId },
+          data: { activeVersionId: version.id },
+        });
+      }
+
       await auditService.recordAuditEvent(tx, {
         organisationId: actor.organisationId,
         actorUserId: actor.userId,
-        action: auditService.AUDIT_ACTIONS.TEMPLATE_VERSION_ACTIVATED,
-        entityType: 'Template',
-        entityId: templateId,
+        action: auditService.AUDIT_ACTIONS.TEMPLATE_VERSION_UPLOADED,
+        entityType: 'TemplateVersion',
+        entityId: version.id,
         metadata: {
-          activeVersionId: version.id,
+          templateId,
           versionNumber: nextVersionNumber,
+          format,
+          byteSize: actualByteSize,
+          inspectionStatus,
+          activated: input.activateImmediately,
         },
       });
-    }
 
-    return version.id;
-  }, { maxWait: 10_000, timeout: 20_000 });
+      if (input.activateImmediately) {
+        await auditService.recordAuditEvent(tx, {
+          organisationId: actor.organisationId,
+          actorUserId: actor.userId,
+          action: auditService.AUDIT_ACTIONS.TEMPLATE_VERSION_ACTIVATED,
+          entityType: 'Template',
+          entityId: templateId,
+          metadata: {
+            activeVersionId: version.id,
+            versionNumber: nextVersionNumber,
+          },
+        });
+      }
+
+      return version.id;
+    }, { maxWait: 10_000, timeout: 20_000 });
+  } catch (err) {
+    for (const key of promotedKeys) {
+      await enqueueAndAttemptCreativeCleanup(
+        {
+          organisationId: actor.organisationId,
+          bucket: storage.bucket,
+          objectKey: key,
+          reason: 'TEMPLATE_VERSION_RETIRED',
+          now,
+          attemptImmediateDelete: true,
+        },
+        storage
+      ).catch(() => {});
+    }
+    throw err;
+  }
+
+  // Schedule post-expiry cleanup for temporary staging keys so late PUTs before
+  // URL expiry cannot leave orphaned staging objects.
+  await enqueueAndAttemptCreativeCleanup(
+    {
+      organisationId: actor.organisationId,
+      bucket: masterIntent.storageBucket,
+      objectKey: masterIntent.storageKey,
+      reason: 'TEMPLATE_VERSION_RETIRED',
+      now,
+      deferUntil: computeCleanupDeferUntil(masterIntent.expiresAt, now),
+      attemptImmediateDelete: false,
+    },
+    storage
+  ).catch(() => {});
+
+  if (verifiedPreview) {
+    await enqueueAndAttemptCreativeCleanup(
+      {
+        organisationId: actor.organisationId,
+        bucket: masterIntent.storageBucket,
+        objectKey: verifiedPreview.storageKey,
+        reason: 'TEMPLATE_VERSION_RETIRED',
+        now,
+        deferUntil: computeCleanupDeferUntil(verifiedPreview.expiresAt, now),
+        attemptImmediateDelete: false,
+      },
+      storage
+    ).catch(() => {});
+  }
 
   const [template, version] = await Promise.all([
     getTemplateDetail(actor.organisationId, templateId),
@@ -1589,21 +1706,25 @@ export async function abandonUploadIntent(
     select: UPLOAD_INTENT_SUMMARY_SELECT,
   });
 
+  const deferUntil = computeCleanupDeferUntil(intent.expiresAt, now);
   const head = await storage.headObject(intent.storageKey).catch(() => ({
     exists: false,
   }));
-  if (head.exists) {
-    await enqueueAndAttemptCreativeCleanup(
-      {
-        organisationId: actor.organisationId,
-        bucket: intent.storageBucket,
-        objectKey: intent.storageKey,
-        reason: 'UPLOAD_ABANDONED',
-        now,
-      },
-      storage
-    );
-  }
+
+  // Always enqueue cleanup with nextRetryAt >= expiresAt + grace so a late PUT
+  // before presigned URL expiry cannot leave an orphaned object.
+  await enqueueAndAttemptCreativeCleanup(
+    {
+      organisationId: actor.organisationId,
+      bucket: intent.storageBucket,
+      objectKey: intent.storageKey,
+      reason: 'UPLOAD_ABANDONED',
+      now,
+      deferUntil,
+      attemptImmediateDelete: head.exists,
+    },
+    storage
+  );
 
   return mapUploadIntentSummary(updated);
 }
@@ -1710,6 +1831,54 @@ export async function cleanupPendingCreativeStorage(
     }
     try {
       assertCreativeKeyEnvPrefix(item.objectKey, storage.envPrefix);
+
+      // Never delete an object referenced by any verified TemplateVersion or ExportRecord.
+      const [referencedVersion, referencedExport] = await Promise.all([
+        prisma.templateVersion.findFirst({
+          where: {
+            OR: [
+              { storageKey: item.objectKey },
+              { previewStorageKey: item.objectKey },
+            ],
+          },
+          select: { id: true },
+        }),
+        prisma.exportRecord.findFirst({
+          where: { storageKey: item.objectKey },
+          select: { id: true },
+        }),
+      ]);
+      if (referencedVersion || referencedExport) {
+        await prisma.creativeStorageCleanup.update({
+          where: { id: item.id },
+          data: {
+            status: 'REJECTED',
+            attempts: item.attempts + 1,
+            lastError: 'REFERENCED_BY_ACTIVE_RECORD',
+            resolvedAt: now,
+          },
+        });
+        continue;
+      }
+
+      // Defer final deletion until any associated upload intent URL has expired + grace.
+      const relatedIntent = await prisma.creativeUploadIntent.findUnique({
+        where: { storageKey: item.objectKey },
+        select: { expiresAt: true },
+      });
+      if (relatedIntent) {
+        const deferUntil = computeCleanupDeferUntil(relatedIntent.expiresAt, now);
+        if (deferUntil.getTime() > now.getTime()) {
+          await prisma.creativeStorageCleanup.update({
+            where: { id: item.id },
+            data: {
+              nextRetryAt: deferUntil,
+            },
+          });
+          continue;
+        }
+      }
+
       await storage.deleteObject(item.objectKey);
       await prisma.creativeStorageCleanup.update({
         where: { id: item.id },
@@ -1717,7 +1886,7 @@ export async function cleanupPendingCreativeStorage(
           status: 'COMPLETED',
           attempts: item.attempts + 1,
           lastError: null,
-          resolvedAt: new Date(),
+          resolvedAt: now,
         },
       });
       resolved += 1;

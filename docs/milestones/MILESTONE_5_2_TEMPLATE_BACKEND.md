@@ -50,3 +50,10 @@ Stage 5.2 delivers the production-oriented Template Management backend while pre
 | Unit Tests | `npm test` | **PASS** | `@crelune/web` 25 files / 192 tests, `@crelune/shared` 8 files / 53 tests, `@crelune/ui` 1 file / 3 tests |
 | DB + S3 Integration | `npm run test:integration:db` | **PASS** | 9 files / 48 tests passed against `br-nameless-silence-bexjp44k` (`neondb`) and `crelune-dev-creative`, with complete `afterAll` cleanup |
 | Full Build | `npm run build` | **PASS** | Next.js 15.5.29 production build + all workspace packages compiled cleanly |
+
+---
+
+## 3. Stage 5.2.1 Follow-Up Hardening
+
+Following Product Owner review of Stage 5.2 (`3a5ec077b960ebb776cab26a46c9cc0faaa8025e`), targeted upload-integrity, worker-isolation, and cleanup-timing corrections were implemented in [MILESTONE_5_2_1_UPLOAD_INTEGRITY_CORRECTIONS.md](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_5_2_1_UPLOAD_INTEGRITY_CORRECTIONS.md).
+

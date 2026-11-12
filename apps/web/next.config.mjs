@@ -8,7 +8,7 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env.local') });
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   transpilePackages: ['@crelune/shared', '@crelune/ui', '@crelune/database'],
-  serverExternalPackages: ['sharp'],
+  serverExternalPackages: ['sharp', '@webtoon/psd'],
   reactStrictMode: true,
   poweredByHeader: false,
 };

@@ -6,9 +6,11 @@ import { createCreativeObjectStorageProvider } from '../lib/storage/creative-sto
 import {
   abandonUploadIntent,
   archiveTemplate,
+  cleanupPendingCreativeStorage,
   completeTemplateVersionUpload,
   createTemplate,
   createTemplateUploadIntent,
+  CREATIVE_CLEANUP_EXPIRY_GRACE_MS,
   getTemplateDetail,
   getTemplateVersionDetail,
   getTemplateVersionPreview,
@@ -157,13 +159,26 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
     const orgIds = [orgAId, orgBId];
     const storage = createCreativeObjectStorageProvider();
 
-    const intents = await prisma.creativeUploadIntent.findMany({
-      where: { organisationId: { in: orgIds } },
-      select: { storageKey: true },
-    });
-    for (const row of intents) {
+    const [intents, versions] = await Promise.all([
+      prisma.creativeUploadIntent.findMany({
+        where: { organisationId: { in: orgIds } },
+        select: { storageKey: true },
+      }),
+      prisma.templateVersion.findMany({
+        where: { organisationId: { in: orgIds } },
+        select: { storageKey: true, previewStorageKey: true },
+      }),
+    ]);
+
+    const allKeys = new Set<string>();
+    for (const row of intents) allKeys.add(row.storageKey);
+    for (const v of versions) {
+      allKeys.add(v.storageKey);
+      if (v.previewStorageKey) allKeys.add(v.previewStorageKey);
+    }
+    for (const key of allKeys) {
       try {
-        await storage.deleteObject(row.storageKey);
+        await storage.deleteObject(key);
       } catch {
         // Best-effort cleanup of test objects
       }
@@ -429,7 +444,10 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
         objectKey: badIntentRow!.storageKey,
       },
     });
-    expect(cleanupRow?.status).toBe('COMPLETED');
+    expect(cleanupRow?.status).toBe('PENDING');
+    expect(cleanupRow!.nextRetryAt.getTime()).toBeGreaterThanOrEqual(
+      badIntentRow!.expiresAt.getTime() + CREATIVE_CLEANUP_EXPIRY_GRACE_MS
+    );
     const headAfterCleanup = await storage.headObject(badIntentRow!.storageKey);
     expect(headAfterCleanup.exists).toBe(false);
 
@@ -516,20 +534,35 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
     const serializedAudits = JSON.stringify(audits);
     expect(serializedAudits).not.toContain(masterRow.storageKey);
     expect(serializedAudits).not.toContain('X-Amz-Signature');
-  });
+  }, 180_000);
 
-  it('allocates distinct sequential version numbers under concurrent version completions', async () => {
+  it('assigns consistent canonical v1/v2 storage identities, distinct previews, and verified SHA-256 content under concurrent completions', async () => {
     const actorA = { userId: userAId, organisationId: orgAId };
+    const storage = createCreativeObjectStorageProvider();
     const template = await createTemplate(actorA, {
       name: 'Concurrent Version Template',
       category: 'EVENT_ANNOUNCEMENT',
       studioType: 'AFFINITY_DESIGNER',
     });
 
-    const bytes1 = new Uint8Array([0x01, 0x02, 0x03, 0x04, 0x05]);
-    const bytes2 = new Uint8Array([0x06, 0x07, 0x08, 0x09, 0x0a]);
+    const bytes1 = new Uint8Array([0x01, 0x02, 0x03, 0x04, 0x05, 0x11]);
+    const bytes2 = new Uint8Array([0x06, 0x07, 0x08, 0x09, 0x0a, 0x22]);
+    const preview1 = new Uint8Array(
+      await sharp({
+        create: { width: 16, height: 16, channels: 3, background: { r: 20, g: 40, b: 80 } },
+      })
+        .png()
+        .toBuffer()
+    );
+    const preview2 = new Uint8Array(
+      await sharp({
+        create: { width: 16, height: 16, channels: 3, background: { r: 200, g: 80, b: 40 } },
+      })
+        .png()
+        .toBuffer()
+    );
 
-    const [intent1, intent2] = await Promise.all([
+    const [intent1, intent2, pIntent1, pIntent2] = await Promise.all([
       createTemplateUploadIntent(actorA, {
         kind: 'TEMPLATE_MASTER',
         templateId: template.id,
@@ -550,6 +583,24 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
         sha256: sha256Hex(bytes2),
         idempotencyKey: 'stage52_concurrent_2_001',
       }),
+      createTemplateUploadIntent(actorA, {
+        kind: 'TEMPLATE_PREVIEW',
+        templateId: template.id,
+        originalFilename: 'concurrent-p1.png',
+        mimeType: 'image/png',
+        byteSize: preview1.byteLength,
+        sha256: sha256Hex(preview1),
+        idempotencyKey: 'stage52_concurrent_p1_001',
+      }),
+      createTemplateUploadIntent(actorA, {
+        kind: 'TEMPLATE_PREVIEW',
+        templateId: template.id,
+        originalFilename: 'concurrent-p2.png',
+        mimeType: 'image/png',
+        byteSize: preview2.byteLength,
+        sha256: sha256Hex(preview2),
+        idempotencyKey: 'stage52_concurrent_p2_001',
+      }),
     ]);
 
     await Promise.all([
@@ -563,15 +614,27 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
         headers: intent2.upload.requiredHeaders,
         body: Buffer.from(bytes2),
       }),
+      fetch(pIntent1.upload.url, {
+        method: 'PUT',
+        headers: pIntent1.upload.requiredHeaders,
+        body: Buffer.from(preview1),
+      }),
+      fetch(pIntent2.upload.url, {
+        method: 'PUT',
+        headers: pIntent2.upload.requiredHeaders,
+        body: Buffer.from(preview2),
+      }),
     ]);
 
     const [vA, vB] = await Promise.all([
       completeTemplateVersionUpload(actorA, template.id, {
         uploadIntentId: intent1.intent.id,
+        previewUploadIntentId: pIntent1.intent.id,
         activateImmediately: false,
       }),
       completeTemplateVersionUpload(actorA, template.id, {
         uploadIntentId: intent2.intent.id,
+        previewUploadIntentId: pIntent2.intent.id,
         activateImmediately: false,
       }),
     ]);
@@ -579,5 +642,210 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
     expect(new Set([vA.version.versionNumber, vB.version.versionNumber])).toEqual(
       new Set([1, 2])
     );
+
+    const dbVersions = await prisma.templateVersion.findMany({
+      where: { templateId: template.id, organisationId: orgAId },
+      orderBy: { versionNumber: 'asc' },
+    });
+    expect(dbVersions).toHaveLength(2);
+    expect(dbVersions[0]?.versionNumber).toBe(1);
+    expect(dbVersions[1]?.versionNumber).toBe(2);
+    expect(dbVersions[0]?.storageKey).toContain(`/templates/${template.id}/versions/v1/`);
+    expect(dbVersions[1]?.storageKey).toContain(`/templates/${template.id}/versions/v2/`);
+    expect(dbVersions[0]?.previewStorageKey).toContain(`/templates/${template.id}/previews/v1/`);
+    expect(dbVersions[1]?.previewStorageKey).toContain(`/templates/${template.id}/previews/v2/`);
+
+    // Verify stored binaries in crelune-dev-creative match their own expected SHA-256
+    const stored0 = await storage.getObjectBounded(dbVersions[0]!.storageKey, 1024);
+    const stored1 = await storage.getObjectBounded(dbVersions[1]!.storageKey, 1024);
+    expect(sha256Hex(stored0.body)).toBe(dbVersions[0]!.sha256);
+    expect(sha256Hex(stored1.body)).toBe(dbVersions[1]!.sha256);
+    expect(dbVersions[0]!.sha256).not.toBe(dbVersions[1]!.sha256);
+
+    const [dlPreviewA, dlPreviewB] = await Promise.all([
+      getTemplateVersionPreview(orgAId, template.id, vA.version.id),
+      getTemplateVersionPreview(orgAId, template.id, vB.version.id),
+    ]);
+    expect(Buffer.from(dlPreviewA.body)).toEqual(Buffer.from(preview1));
+    expect(Buffer.from(dlPreviewB.body)).toEqual(Buffer.from(preview2));
+  });
+
+  it('enforces post-expiry deferred cleanup for abandoned uploads, late PUTs, retries, and active-version protection', async () => {
+    const actorA = { userId: userAId, organisationId: orgAId };
+    const storage = createCreativeObjectStorageProvider();
+    const template = await createTemplate(actorA, {
+      name: 'Cleanup Timing Template',
+      category: 'GENERAL_GRAPHIC_DESIGN',
+      studioType: 'AFFINITY_PHOTO',
+    });
+
+    // 1. Abandonment before any PUT -> cleanup stays PENDING until expiresAt + grace
+    const intentBeforePut = await createTemplateUploadIntent(actorA, {
+      kind: 'TEMPLATE_MASTER',
+      templateId: template.id,
+      format: 'AFPHOTO',
+      originalFilename: 'before-put.afphoto',
+      mimeType: 'application/octet-stream',
+      byteSize: 16,
+      sha256: sha256Hex(new Uint8Array(16).fill(1)),
+      idempotencyKey: 'stage521_abandon_before_put',
+    });
+    const intentBeforePutRow = await prisma.creativeUploadIntent.findUniqueOrThrow({
+      where: { id: intentBeforePut.intent.id },
+    });
+    await abandonUploadIntent(actorA, intentBeforePut.intent.id);
+    const cleanupBeforePut = await prisma.creativeStorageCleanup.findUnique({
+      where: { objectKey: intentBeforePutRow.storageKey },
+    });
+    expect(cleanupBeforePut?.status).toBe('PENDING');
+    expect(cleanupBeforePut!.nextRetryAt.getTime()).toBeGreaterThanOrEqual(
+      intentBeforePutRow.expiresAt.getTime() + CREATIVE_CLEANUP_EXPIRY_GRACE_MS
+    );
+
+    // 2. Late PUT after abandonment but BEFORE URL expiry
+    const lateBytes = new Uint8Array(16).fill(1);
+    const latePutRes = await fetch(intentBeforePut.upload.url, {
+      method: 'PUT',
+      headers: intentBeforePut.upload.requiredHeaders,
+      body: Buffer.from(lateBytes),
+    });
+    expect(latePutRes.ok).toBe(true);
+    expect((await storage.headObject(intentBeforePutRow.storageKey)).exists).toBe(true);
+
+    // Early cleanup run BEFORE expiry must NOT mark completed
+    const earlyRun = await cleanupPendingCreativeStorage(
+      { organisationId: orgAId },
+      { storage, now: () => new Date() }
+    );
+    expect(earlyRun.resolved).toBe(0);
+    expect(
+      (await prisma.creativeStorageCleanup.findUnique({
+        where: { objectKey: intentBeforePutRow.storageKey },
+      }))?.status
+    ).toBe('PENDING');
+
+    // 3. Abandonment AFTER a successful PUT -> deletes bytes AND keeps PENDING until expiry+grace
+    const afterPutBytes = new Uint8Array(24).fill(2);
+    const intentAfterPut = await createTemplateUploadIntent(actorA, {
+      kind: 'TEMPLATE_MASTER',
+      templateId: template.id,
+      format: 'AFPHOTO',
+      originalFilename: 'after-put.afphoto',
+      mimeType: 'application/octet-stream',
+      byteSize: afterPutBytes.byteLength,
+      sha256: sha256Hex(afterPutBytes),
+      idempotencyKey: 'stage521_abandon_after_put',
+    });
+    const intentAfterPutRow = await prisma.creativeUploadIntent.findUniqueOrThrow({
+      where: { id: intentAfterPut.intent.id },
+    });
+    const putOk = await fetch(intentAfterPut.upload.url, {
+      method: 'PUT',
+      headers: intentAfterPut.upload.requiredHeaders,
+      body: Buffer.from(afterPutBytes),
+    });
+    expect(putOk.ok).toBe(true);
+    await abandonUploadIntent(actorA, intentAfterPut.intent.id);
+    expect((await storage.headObject(intentAfterPutRow.storageKey)).exists).toBe(false);
+    expect(
+      (await prisma.creativeStorageCleanup.findUnique({
+        where: { objectKey: intentAfterPutRow.storageKey },
+      }))?.status
+    ).toBe('PENDING');
+
+    // 4. Failed deletion followed by successful retry after expiry
+    const postExpiryNow = new Date(
+      Math.max(
+        intentBeforePutRow.expiresAt.getTime(),
+        intentAfterPutRow.expiresAt.getTime()
+      ) +
+        CREATIVE_CLEANUP_EXPIRY_GRACE_MS +
+        5_000
+    );
+    const failingStorage = {
+      ...storage,
+      bucket: storage.bucket,
+      envPrefix: storage.envPrefix,
+      deleteObject: async () => {
+        throw new Error('SimulatedS3TransientError');
+      },
+    };
+    const failedRun = await cleanupPendingCreativeStorage(
+      { organisationId: orgAId },
+      { storage: failingStorage, now: () => postExpiryNow }
+    );
+    expect(failedRun.failed).toBeGreaterThanOrEqual(2);
+    const retryRow = await prisma.creativeStorageCleanup.findUniqueOrThrow({
+      where: { objectKey: intentBeforePutRow.storageKey },
+    });
+    expect(retryRow.status).toBe('PENDING');
+    expect(retryRow.attempts).toBeGreaterThanOrEqual(1);
+    expect(retryRow.lastError).toBe('Error');
+
+    // 5. Cleanup after URL expiry + backoff succeeds and deletes late-PUT object
+    const afterBackoffNow = new Date(retryRow.nextRetryAt.getTime() + 1_000);
+    const successRun = await cleanupPendingCreativeStorage(
+      { organisationId: orgAId },
+      { storage, now: () => afterBackoffNow }
+    );
+    expect(successRun.resolved).toBeGreaterThanOrEqual(2);
+    expect((await storage.headObject(intentBeforePutRow.storageKey)).exists).toBe(false);
+    expect(
+      (await prisma.creativeStorageCleanup.findUnique({
+        where: { objectKey: intentBeforePutRow.storageKey },
+      }))?.status
+    ).toBe('COMPLETED');
+
+    // 6. Repeated cleanup execution is idempotent
+    const repeatRun = await cleanupPendingCreativeStorage(
+      { organisationId: orgAId },
+      { storage, now: () => afterBackoffNow }
+    );
+    expect(repeatRun.resolved).toBe(0);
+
+    // 7. Never deletes an object referenced by a verified TemplateVersion
+    const validBytes = new Uint8Array([0x41, 0x46, 0x33, 0x33, 0x09]);
+    const validIntent = await createTemplateUploadIntent(actorA, {
+      kind: 'TEMPLATE_MASTER',
+      templateId: template.id,
+      format: 'AF',
+      originalFilename: 'protected.af',
+      mimeType: 'application/octet-stream',
+      byteSize: validBytes.byteLength,
+      sha256: sha256Hex(validBytes),
+      idempotencyKey: 'stage521_protected_version',
+    });
+    await fetch(validIntent.upload.url, {
+      method: 'PUT',
+      headers: validIntent.upload.requiredHeaders,
+      body: Buffer.from(validBytes),
+    });
+    const verRes = await completeTemplateVersionUpload(actorA, template.id, {
+      uploadIntentId: validIntent.intent.id,
+      activateImmediately: true,
+    });
+    const activeVersion = await prisma.templateVersion.findUniqueOrThrow({
+      where: { id: verRes.version.id },
+    });
+    await prisma.creativeStorageCleanup.create({
+      data: {
+        organisationId: orgAId,
+        bucket: storage.bucket,
+        objectKey: activeVersion.storageKey,
+        reason: 'TEMPLATE_VERSION_RETIRED',
+        status: 'PENDING',
+        nextRetryAt: new Date(0),
+      },
+    });
+    await cleanupPendingCreativeStorage(
+      { organisationId: orgAId },
+      { storage, now: () => afterBackoffNow }
+    );
+    const guardRow = await prisma.creativeStorageCleanup.findUniqueOrThrow({
+      where: { objectKey: activeVersion.storageKey },
+    });
+    expect(guardRow.status).toBe('REJECTED');
+    expect(guardRow.lastError).toBe('REFERENCED_BY_ACTIVE_RECORD');
+    expect((await storage.headObject(activeVersion.storageKey)).exists).toBe(true);
   });
 });

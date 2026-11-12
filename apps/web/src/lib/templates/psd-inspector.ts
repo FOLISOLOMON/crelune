@@ -1,12 +1,19 @@
 /**
- * CRELUNE — Bounded Read-Only PSD Layer Inspector (`@webtoon/psd` Adapter)
+ * CRELUNE — Bounded Read-Only PSD Layer Inspector (`@webtoon/psd` Worker-Isolated Adapter)
  *
- * Implements `PsdLayerInspector` behind strict file-size, dimension, depth,
- * node-count, and timeout caps. Extracted layer metadata NEVER implies live
- * editability inside Affinity 3.3 (`editabilityVerified: false` always).
+ * Isolates `Psd.parse()` inside a terminable Node `worker_threads.Worker` with:
+ *  - Empty environment (`env: {}`) so the parser never accesses DB/storage/session secrets
+ *  - Explicit V8 heap `resourceLimits` (`256 MB` old generation, `64 MB` young generation)
+ *  - Real wall-clock deadline that calls `worker.terminate()` on timeout
+ *  - Bounded input transfer (`<= 100 MB`) and bounded output payload (`<= 1 MiB`)
+ *
+ * Extracted layer metadata NEVER implies live editability inside Affinity 3.3
+ * (`editabilityVerified: false` always).
  */
 
-import Psd, { type Group, type Layer, type NodeChild } from '@webtoon/psd';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import {
   DEFAULT_PSD_INSPECTION_LIMITS,
   psdInspectionResultSchema,
@@ -14,24 +21,32 @@ import {
   type PsdInspectionLimits,
   type PsdInspectionResult,
   type PsdLayerInspector,
-  type PsdLayerKind,
-  type PsdLayerNode,
 } from '@crelune/shared';
 
 export const PSD_INSPECTOR_ENGINE_ID = 'webtoon-psd-0.4.0' as const;
 const MAX_PSD_DIMENSION_PX = 30_000;
 const PSD_HEADER_MIN_BYTES = 26;
 
+export const PSD_WORKER_RESOURCE_LIMITS = {
+  maxOldGenerationSizeMb: 256,
+  maxYoungGenerationSizeMb: 64,
+  codeRangeSizeMb: 16,
+} as const;
+
+export type PsdInspectionErrorCode =
+  | 'INVALID_PSD_HEADER'
+  | 'UNSUPPORTED_PSD_VERSION'
+  | 'PSD_SIZE_EXCEEDED'
+  | 'PSD_DIMENSIONS_INVALID'
+  | 'PSD_PARSE_FAILED'
+  | 'PSD_INSPECTION_TIMEOUT'
+  | 'PSD_OUTPUT_EXCEEDED'
+  | 'PSD_WORKER_TERMINATED';
+
 export class PsdInspectionError extends Error {
   constructor(
     message: string,
-    public readonly code:
-      | 'INVALID_PSD_HEADER'
-      | 'UNSUPPORTED_PSD_VERSION'
-      | 'PSD_SIZE_EXCEEDED'
-      | 'PSD_DIMENSIONS_INVALID'
-      | 'PSD_PARSE_FAILED'
-      | 'PSD_INSPECTION_TIMEOUT'
+    public readonly code: PsdInspectionErrorCode
   ) {
     super(message);
     this.name = 'PsdInspectionError';
@@ -106,192 +121,141 @@ function assertValidPsdHeader(buffer: Uint8Array, maxFileBytes: number): void {
   }
 }
 
-function sanitizeLayerName(raw: string | undefined, fallback: string): string {
-  const cleaned = (raw ?? '')
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .trim();
-  if (!cleaned) return fallback;
-  return cleaned.slice(0, 240);
+function resolveDefaultWorkerScriptPath(): string {
+  const candidates = [
+    path.resolve(process.cwd(), 'src/lib/templates/psd-parse-worker.mjs'),
+    path.resolve(process.cwd(), 'apps/web/src/lib/templates/psd-parse-worker.mjs'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new PsdInspectionError(
+    'PSD inspection worker script is unavailable in the runtime environment.',
+    'PSD_PARSE_FAILED'
+  );
 }
 
-function classifyLayerKind(layer: Layer): PsdLayerKind {
-  if (layer.text !== undefined || layer.additionalProperties?.typeToolObjectSetting) {
-    return 'TEXT';
-  }
-  const props = layer.additionalProperties;
-  if (props?.smartObjectPlacedLayerData) {
-    return 'SMART_OBJECT';
-  }
-  if (
-    props?.vectorMaskSetting ||
-    props?.vectorStrokeData ||
-    props?.vectorStrokeContentData
-  ) {
-    return 'VECTOR';
-  }
-  if (props?.hueSaturation || props?.solidColorSheetSetting || props?.gradientFillSetting || props?.patternFillSetting) {
-    return 'ADJUSTMENT';
-  }
-  if (layer.width > 0 || layer.height > 0) {
-    return 'PIXEL';
-  }
-  return 'UNKNOWN';
-}
-
-function toSafeOpacityPercent(opacityByte: number): number | undefined {
-  if (!Number.isFinite(opacityByte)) return undefined;
-  const clamped = Math.min(255, Math.max(0, opacityByte));
-  return Math.round((clamped / 255) * 10000) / 100;
-}
+type WorkerPayload =
+  | { ok: true; result: unknown }
+  | { ok: false; code: PsdInspectionErrorCode; message: string };
 
 export class WebtoonPsdLayerInspector implements PsdLayerInspector {
   public readonly engineId = PSD_INSPECTOR_ENGINE_ID;
+  private readonly workerScriptPath?: string;
+
+  constructor(options?: { workerScriptPath?: string }) {
+    this.workerScriptPath = options?.workerScriptPath;
+  }
 
   async inspectBuffer(input: PsdInspectInput): Promise<PsdInspectionResult> {
     const limits = resolveLimits(input.limits);
     assertValidPsdHeader(input.buffer, limits.maxFileBytes);
 
-    const parseTask = Promise.resolve().then(() => {
-      const arrayBuffer = input.buffer.buffer.slice(
-        input.buffer.byteOffset,
-        input.buffer.byteOffset + input.buffer.byteLength
-      );
+    const workerPath = this.workerScriptPath ?? resolveDefaultWorkerScriptPath();
+    const copy = new Uint8Array(input.buffer.byteLength);
+    copy.set(input.buffer);
+    const transferredBuffer: ArrayBuffer = copy.buffer;
 
-      let psd: Psd;
-      try {
-        psd = Psd.parse(arrayBuffer);
-      } catch {
-        throw new PsdInspectionError(
-          'Uploaded PSD structure is malformed or could not be parsed safely.',
-          'PSD_PARSE_FAILED'
-        );
-      }
+    return new Promise<PsdInspectionResult>((resolve, reject) => {
+      let settled = false;
 
-      if (
-        !Number.isInteger(psd.width) ||
-        !Number.isInteger(psd.height) ||
-        psd.width <= 0 ||
-        psd.height <= 0 ||
-        psd.width > MAX_PSD_DIMENSION_PX ||
-        psd.height > MAX_PSD_DIMENSION_PX
-      ) {
-        throw new PsdInspectionError(
-          'Parsed PSD dimensions are invalid or exceed allowed bounds.',
-          'PSD_DIMENSIONS_INVALID'
-        );
-      }
+      const worker = new Worker(workerPath, {
+        env: {},
+        resourceLimits: { ...PSD_WORKER_RESOURCE_LIMITS },
+        workerData: {
+          arrayBuffer: transferredBuffer,
+          limits,
+          maxDimensionPx: MAX_PSD_DIMENSION_PX,
+          engineId: this.engineId,
+        },
+        transferList: [transferredBuffer],
+      });
 
-      const nodes: PsdLayerNode[] = [];
-      let truncated = false;
-      let counter = 0;
+      const timer = setTimeout(() => {
+        void worker.terminate();
+        finish(() => {
+          reject(
+            new PsdInspectionError(
+              'PSD inspection timed out under bounded worker execution limits.',
+              'PSD_INSPECTION_TIMEOUT'
+            )
+          );
+        });
+      }, limits.timeoutMs);
 
-      const visit = (children: NodeChild[], parentPath: string[], depth: number): void => {
-        if (depth >= limits.maxGroupDepth) {
-          truncated = true;
-          return;
-        }
-        for (const child of children) {
-          if (nodes.length >= limits.maxLayerNodes) {
-            truncated = true;
-            return;
-          }
-          counter += 1;
-
-          if (child.type === 'Group') {
-            const group = child as Group;
-            const groupName = sanitizeLayerName(group.name, `Group ${counter}`);
-            const currentPath = [...parentPath, groupName].slice(
-              0,
-              limits.maxGroupDepth
-            );
-            nodes.push({
-              id: `node-${counter}`,
-              name: groupName,
-              kind: 'GROUP',
-              path: currentPath,
-              visible: true,
-              opacityPercent: toSafeOpacityPercent(group.opacity),
-              childCount: group.children.length,
-            });
-            visit(group.children, currentPath, depth + 1);
-          } else {
-            const layer = child as Layer;
-            const layerName = sanitizeLayerName(layer.name, `Layer ${counter}`);
-            const kind = classifyLayerKind(layer);
-            const currentPath = [...parentPath, layerName].slice(
-              0,
-              limits.maxGroupDepth
-            );
-            const textPreview =
-              typeof layer.text === 'string' && layer.text.length > 0
-                ? layer.text
-                    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
-                    .slice(0, limits.maxTextPreviewChars)
-                : undefined;
-
-            nodes.push({
-              id: `node-${counter}`,
-              name: layerName,
-              kind,
-              path: currentPath,
-              visible: !layer.isHidden,
-              opacityPercent: toSafeOpacityPercent(layer.opacity),
-              bounds:
-                layer.width >= 0 && layer.height >= 0
-                  ? {
-                      left: Math.trunc(layer.left),
-                      top: Math.trunc(layer.top),
-                      width: Math.max(0, Math.trunc(layer.width)),
-                      height: Math.max(0, Math.trunc(layer.height)),
-                    }
-                  : undefined,
-              textPreview,
-            });
-          }
-        }
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn();
       };
 
-      visit(psd.children, [], 0);
-
-      const summary = truncated
-        ? `Extracted ${nodes.length} PSD layer node(s) (truncated at bounded cap); Affinity 3.3 editability requires artist verification.`
-        : `Extracted ${nodes.length} PSD layer node(s); Affinity 3.3 editability requires artist verification.`;
-
-      return psdInspectionResultSchema.parse({
-        engineId: this.engineId,
-        detectionSource: 'PSD_PARSER',
-        status: 'INSPECTED',
-        widthPx: psd.width,
-        heightPx: psd.height,
-        layerCount: nodes.length,
-        layerCountTruncated: truncated,
-        extractedMetadataOnly: true,
-        editabilityVerified: false,
-        summary,
-        layers: nodes,
-      });
-    });
-
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        parseTask,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
+      worker.once('message', (msg: WorkerPayload) => {
+        void worker.terminate();
+        if (!msg || typeof msg !== 'object') {
+          finish(() => {
             reject(
               new PsdInspectionError(
-                'PSD inspection timed out under bounded resource limits.',
-                'PSD_INSPECTION_TIMEOUT'
+                'PSD inspection worker returned an invalid response.',
+                'PSD_PARSE_FAILED'
               )
             );
-          }, limits.timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+          });
+          return;
+        }
+        if (!msg.ok) {
+          finish(() => {
+            reject(new PsdInspectionError(msg.message, msg.code));
+          });
+          return;
+        }
+
+        const parsed = psdInspectionResultSchema.safeParse(msg.result);
+        if (!parsed.success) {
+          finish(() => {
+            reject(
+              new PsdInspectionError(
+                'PSD inspection output failed schema validation.',
+                'PSD_PARSE_FAILED'
+              )
+            );
+          });
+          return;
+        }
+
+        finish(() => {
+          resolve(parsed.data);
+        });
+      });
+
+      worker.once('error', () => {
+        void worker.terminate();
+        finish(() => {
+          reject(
+            new PsdInspectionError(
+              'PSD inspection worker failed during bounded parsing.',
+              'PSD_PARSE_FAILED'
+            )
+          );
+        });
+      });
+
+      worker.once('exit', (code) => {
+        if (!settled && code !== 0) {
+          finish(() => {
+            reject(
+              new PsdInspectionError(
+                'PSD inspection worker terminated unexpectedly under resource bounds.',
+                'PSD_WORKER_TERMINATED'
+              )
+            );
+          });
+        }
+      });
+    });
   }
 }
 
 export const defaultPsdLayerInspector = new WebtoonPsdLayerInspector();
-
