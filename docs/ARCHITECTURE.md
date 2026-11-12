@@ -184,3 +184,19 @@ sequenceDiagram
 2. **No Unauthenticated Public Endpoints**: All member records, photos, calendar feeds, and design assets require authenticated session credentials.
 3. **No In-Place Template Mutations**: Automation scripts are physically isolated to working copy paths.
 4. **No WebView Wrappers**: CRELUNE Mobile must run on native React Native components with native navigation stacks.
+
+---
+
+## 7. Stage 5.2 Template Backend Architecture
+
+1. **Dedicated Private Creative Bucket (`crelune-dev-creative`)**:
+   - Template masters (`TEMPLATE_MASTER`) and optional previews (`TEMPLATE_PREVIEW`) are stored in a dedicated private Neon Object Storage bucket separate from `crelune-dev-member-photos`, enforced by [`getCreativeObjectStorageConfig`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts) and [`NeonS3CreativeStorageProvider`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/creative-storage.ts).
+   - Object keys follow strict scoped prefixes (`{envPrefix}/organisations/{organisationId}/templates/{templateId}/...`) verified before signing, reading, or deletion.
+2. **Authoritative Presigned PUT & Verification Lifecycle**:
+   - [`createTemplateUploadIntent`](file:///d:/Projects/Crelune/apps/web/src/lib/templates/template-service.ts) issues time-bounded (`<= 900s`) S3 presigned PUT URLs keyed by idempotency key and records `CreativeUploadIntent` (`PENDING`).
+   - [`completeTemplateVersionUpload`](file:///d:/Projects/Crelune/apps/web/src/lib/templates/template-service.ts) downloads uploaded bytes under bounded stream limits (`getObjectBounded`), verifies exact `byteSize` and `sha256`, rejects mismatched or corrupt payloads with durable `CreativeStorageCleanup` deletion, and atomically allocates sequential immutable `TemplateVersion` records.
+3. **Bounded PSD Inspection & Native Affinity Fallback**:
+   - PSD v1 (`8BPS`) masters are inspected read-only by [`WebtoonPsdLayerInspector`](file:///d:/Projects/Crelune/apps/web/src/lib/templates/psd-inspector.ts) (`@webtoon/psd`), always recording `extractedMetadataOnly: true` and `editabilityVerified: false` under strict node (`500`), depth (`16`), dimension (`30,000px`), size (`100 MB`), and timeout (`10s`) bounds.
+   - Native Affinity documents (`.af`, `.afdesign`, `.afphoto`, `.afpub`) bypass binary parsing and register with `inspectionStatus: 'MANUAL_REQUIRED'` for artist-verified field mapping.
+4. **Versioning, Rollback, Mappings & Soft Archival**:
+   - Templates support immutable version history, instant active-version rollback (`PATCH /api/templates/[id]`), version-scoped `TemplateFieldMapping` replacement (`PUT /api/templates/[id]/versions/[versionId]/mappings`), and soft archival/restore (`POST .../archive`, `POST .../restore`) without breaking linked `DesignJob` history.

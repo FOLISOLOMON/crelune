@@ -407,3 +407,45 @@ export async function clearAccountThrottle(
 }
 
 export const clearIpAccountThrottle = clearAccountThrottle;
+
+export const UPLOAD_INTENT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+export const UPLOAD_INTENT_RATE_LIMIT_MAX_ATTEMPTS = 60;
+export const UPLOAD_INTENT_RATE_LIMIT_BLOCK_MS = 5 * 60 * 1000;
+
+/**
+ * Enforces a bounded PostgreSQL-backed rate limit on creative upload-intent creation
+ * to prevent presigned-URL issuance flooding.
+ */
+export async function consumeUploadIntentRateLimit(
+  organisationId: string,
+  userId: string,
+  options: {
+    now?: Date;
+    windowMs?: number;
+    maxAttempts?: number;
+    blockMs?: number;
+  } = {}
+): Promise<{ allowed: boolean; blockedUntil: Date | null }> {
+  const now = options.now ?? new Date();
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${organisationId}:${userId}`)
+    .digest('hex')
+    .slice(0, 32);
+  const bucketKey = `upload_intent:${digest}`;
+
+  const row = await recordAtomicBucketFailure(bucketKey, {
+    now,
+    windowMs: options.windowMs ?? UPLOAD_INTENT_RATE_LIMIT_WINDOW_MS,
+    maxAttempts: options.maxAttempts ?? UPLOAD_INTENT_RATE_LIMIT_MAX_ATTEMPTS,
+    blockMs: options.blockMs ?? UPLOAD_INTENT_RATE_LIMIT_BLOCK_MS,
+  });
+
+  maybePruneExpiredThrottles(now);
+
+  const blocked = Boolean(row?.blockedUntil && row.blockedUntil > now);
+  return {
+    allowed: !blocked,
+    blockedUntil: blocked ? (row?.blockedUntil ?? null) : null,
+  };
+}

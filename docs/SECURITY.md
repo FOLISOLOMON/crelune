@@ -268,3 +268,17 @@ Implemented in Milestone 2.1.2:
    - [`processUploadedMemberPhoto`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/image-processor.ts) decodes via `sharp` (`0.35.5`), bakes EXIF orientation into pixels, strips EXIF (including GPS), XMP, IPTC, ICC, and comments, re-encodes in canonical JPEG/PNG/WebP while preserving alpha transparency, and re-validates final bytes before [`uploadMemberPhoto`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-photo-service.ts) persists only processed output.
    - [`getObjectStorageConfig`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts) enforces exact runtime allowlisting for `development` (`br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech`, `us-east-2`, `crelune-dev-member-photos`, `NEON_BRANCH`, `NEON_BRANCH_ID`) and fails closed on unapproved production configurations.
    - Failed object deletions (compensation, replacement, or removal) record scope-verified `PendingStorageCleanup` rows (`status: 'PENDING'`) with sanitized error labels (never URLs or credentials); [`retryPendingStorageCleanups`](file:///d:/Projects/Crelune/apps/web/src/lib/members/member-photo-service.ts) rejects out-of-scope or actively referenced keys (`REJECTED`) and idempotently retries valid keys without blocking committed metadata/audit transactions. Audit metadata blocks storage keys, signed URLs, credentials, and raw image bytes.
+
+---
+
+## 12. Milestone 5 Stage 5.2 Template Storage & Upload Security
+
+1. **Isolated Creative Bucket & Scope Enforcement**:
+   - Template masters and previews use `crelune-dev-creative` via [`getCreativeObjectStorageConfig`](file:///d:/Projects/Crelune/apps/web/src/lib/storage/storage-config.ts) (`development` branch `br-nameless-silence-bexjp44k`), strictly separated from `crelune-dev-member-photos`. Production endpoints/buckets are rejected fail-closed in development.
+2. **Owner Authentication, CSRF, Rate Limiting & Organisation Isolation**:
+   - All `/api/templates/**` endpoints require `requireAuthenticatedOwnerApi`, enforce `verifyCsrf: true` on all mutating (`POST`/`PATCH`/`PUT`) routes, and scope every DB query and object key to `actor.organisationId`.
+   - `POST /api/templates/[id]/upload-intents` applies [`consumeUploadIntentRateLimit`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.ts) (`60` attempts per `15m` window, `5m` block) keyed by `upload_intent:<sha256(org:user)>`.
+3. **Zero-Trust Post-PUT Verification & Bounded Parsers**:
+   - Presigned PUTs (`<= 900s` TTL) are never trusted on upload alone: `completeTemplateVersionUpload` verifies exact `byteSize`, `sha256`, preview magic bytes (`JPEG`/`PNG`/`WebP`) + `sharp` dimensions, and bounded PSD v1 inspection (`8BPS` header check, `<= 100 MB`, `1..30000px`, `<= 500` nodes, `<= 16` depth, `10s` timeout).
+   - Failed verifications mark the intent `REJECTED`, enqueue `CreativeStorageCleanup`, delete the orphan object, and sanitize all HTTP error responses and `AuditLog` entries so storage keys, signed URLs, and AWS credentials never leak.
+   - `GET /api/templates/[id]/versions/[versionId]/preview` streams private preview bytes with `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, and `X-Robots-Tag: noindex, nofollow, noarchive`.

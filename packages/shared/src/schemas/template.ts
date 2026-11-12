@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import type { PsdInspectionResult } from '../contracts/psd-inspector.js';
 import { DESIGN_CATEGORIES } from '../domain/design-job.js';
+import { memberIdParamSchema } from './member.js';
 import {
   CREATIVE_BYTE_LIMITS,
   EXPORT_FILE_FORMATS,
@@ -335,6 +337,42 @@ export interface CreativeUploadIntentSummary {
   maxAllowedBytes: number;
   expiresAt: string;
   verifiedAt: string | null;
+}
+
+export const templateIdParamSchema = memberIdParamSchema;
+export const templateVersionIdParamSchema = memberIdParamSchema;
+export const uploadIntentIdParamSchema = memberIdParamSchema;
+
+export const createTemplateUploadIntentRequestSchema = z.union([
+  z
+    .object({
+      kind: z.literal('TEMPLATE_MASTER'),
+    })
+    .and(createTemplateVersionUploadIntentSchema),
+  z
+    .object({
+      kind: z.literal('TEMPLATE_PREVIEW'),
+    })
+    .and(createTemplatePreviewUploadIntentSchema),
+]);
+
+export type CreateTemplateUploadIntentRequest = z.infer<
+  typeof createTemplateUploadIntentRequestSchema
+>;
+
+export interface TemplateVersionDetail extends TemplateVersionSummary {
+  detectedLayers: PsdInspectionResult | null;
+  mappings: TemplateFieldMappingSummary[];
+}
+
+export interface PresignedUploadTarget {
+  url: string;
+  method: 'PUT';
+  requiredHeaders: {
+    'content-type': string;
+    'content-length': string;
+  };
+  expiresAt: string;
 }
 
 export interface ExportRecordSummary {
