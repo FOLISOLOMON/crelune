@@ -11,11 +11,11 @@
 ## 1. Database Overview
 
 > [!IMPORTANT]
-> **Implementation Status: Milestone 2 Minimum Schema Applied**
+> **Implementation Status: Milestone 5 Stage 5.1 Schema Applied on Neon Development**
 >
-> As of Milestone 2, the core foundation models (`Organisation`, `User`, `UserPreference`) have been synchronized with the Neon Lakebase Postgres development branch (`ep-mute-forest-bepsjmsu`).
+> Through Stage 5.1, the authoritative implemented schema in [`packages/database/prisma/schema.prisma`](file:///d:/Projects/Crelune/packages/database/prisma/schema.prisma) covers Foundation (`Organisation`, `User`, `UserPreference`, `AuthThrottle`), Members & Birthdays (`Member`, `BirthdayPreparation`, `BirthdayReminder`, `Notification`, `AuditLog`, `PendingStorageCleanup`), Design Management (`DesignJob`, `DesignJobHistory`), and Stage 5.1 Templates, Creative Storage & Windows Agent Contracts (`Template`, `TemplateVersion`, `TemplateFieldMapping`, `CreativeUploadIntent`, `CreativeAgent`, `CreativeJobDispatch`, `ExportRecord`, `CreativeStorageCleanup`), synchronized to the Neon `development` branch (`br-nameless-silence-bexjp44k`).
 >
-> In strict accordance with Milestone 2 boundaries, future domain models (`Member`, `DesignJob`, `Template`, `Asset`, `Event`) are documented in the specification below but will only be migrated during their designated feature milestones (Milestone 3 through Milestone 8).
+> Future domain modules (`Event`, general `Asset`, `DeviceRegistration`) remain draft design specifications below until their designated milestones (Milestone 6–8).
 
 The proposed CRELUNE data layer will run on **PostgreSQL 15+** (hosted on **Neon Lakebase Postgres**, AWS `us-east-2`) and be managed via **Prisma ORM**.
 
@@ -47,10 +47,17 @@ erDiagram
 
     Event ||--o{ DesignJob : "requires"
 
-    Template ||--o{ TemplateFieldMapping : "defines"
-    Template ||--o{ DesignJob : "applies_to"
+    Template ||--o{ TemplateVersion : "versions"
+    Template ||--o{ DesignJob : "defaults_for"
+    TemplateVersion ||--o{ TemplateFieldMapping : "defines"
+    TemplateVersion ||--o{ DesignJob : "pinned_to"
+    TemplateVersion ||--o{ CreativeJobDispatch : "dispatched_as"
+
+    CreativeAgent ||--o{ CreativeJobDispatch : "claims"
+    CreativeAgent ||--o{ ExportRecord : "uploads"
 
     DesignJob ||--o{ DesignJobHistory : "audits"
+    DesignJob ||--o{ CreativeJobDispatch : "queues"
     DesignJob ||--o{ ExportRecord : "produces"
 
     Member {
@@ -307,6 +314,8 @@ model DesignJob {
   dimensions            String?
   targetPlatform        String?            @map("target_platform")
   preferredTemplateNote String?            @map("preferred_template_note")
+  templateId            String?            @map("template_id")
+  templateVersionId     String?            @map("template_version_id")
   referenceNotes        String?            @map("reference_notes")
   notes                 String?
   dueDate               DateTime?          @map("due_date") @db.Date
@@ -348,47 +357,281 @@ model DesignJobHistory {
 }
 
 // -----------------------------------------------------------------------------
-// TEMPLATES & AFFINITY INTEGRATION
+// TEMPLATES, CREATIVE STORAGE & WINDOWS AGENT (Authoritative Stage 5.1)
 // -----------------------------------------------------------------------------
 
+enum TemplateStudioType {
+  AFFINITY_PHOTO
+  AFFINITY_DESIGNER
+  AFFINITY_PUBLISHER
+  AFFINITY_STUDIO
+}
+
+enum TemplateFileFormat {
+  PSD
+  AF
+  AFPHOTO
+  AFDESIGN
+  AFPUB
+}
+
+enum TemplateInspectionStatus {
+  PENDING
+  INSPECTED
+  MANUAL_REQUIRED
+  FAILED
+}
+
+enum TemplateFieldType {
+  TEXT
+  IMAGE
+  DATE
+  COLOR
+}
+
+enum CreativeUploadKind {
+  TEMPLATE_MASTER
+  TEMPLATE_PREVIEW
+  WORKING_ASSET
+  EXPORT_DELIVERABLE
+}
+
+enum CreativeUploadStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+  ABANDONED
+}
+
+enum CreativeAgentStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum CreativeDispatchStatus {
+  QUEUED
+  CLAIMED
+  DOWNLOADING_ASSETS
+  OPENING_TEMPLATE
+  READY_FOR_ARTIST
+  EXPORTING
+  EXPORTED
+  FAILED
+  CANCELLED
+}
+
+enum ExportFileFormat {
+  PNG
+  JPEG
+  PDF
+}
+
+enum CreativeStorageCleanupReason {
+  UPLOAD_ABANDONED
+  UPLOAD_REJECTED
+  TEMPLATE_VERSION_RETIRED
+  DISPATCH_CLEANUP
+  EXPORT_SUPERSEDED
+}
+
 model Template {
-  id             String                 @id @default(cuid())
-  organisationId String                 @map("organisation_id")
-  name           String
-  studioType     String                 @map("studio_type") // PIXEL, VECTOR, LAYOUT
-  format         String                 // AFDESIGN, AFTEMPLATE, AFPHOTO, PSD
-  masterFilePath String                 @map("master_file_path") // Relative local path or storage key
-  previewAssetId String?                @map("preview_asset_id")
-  isActive       Boolean                @default(true) @map("is_active")
-  createdAt      DateTime               @default(now()) @map("created_at")
-  updatedAt      DateTime               @updatedAt @map("updated_at")
+  id              String             @id @default(cuid())
+  organisationId  String             @map("organisation_id")
+  name            String
+  normalizedName  String             @map("normalized_name")
+  category        DesignCategory     @default(GENERAL_GRAPHIC_DESIGN)
+  studioType      TemplateStudioType @map("studio_type")
+  description     String?
+  activeVersionId String?            @unique @map("active_version_id")
+  createdByUserId String             @map("created_by_user_id")
+  isActive        Boolean            @default(true) @map("is_active")
+  archivedAt      DateTime?          @map("archived_at")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
 
-  organisation   Organisation           @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  previewAsset   Asset?                 @relation("TemplatePreview", fields: [previewAssetId], references: [id], onDelete: SetNull)
-  fieldMappings  TemplateFieldMapping[]
-  designJobs     DesignJob[]
-
-  @@index([organisationId, isActive])
+  @@index([organisationId, category, isActive])
+  @@index([organisationId, archivedAt])
+  @@index([organisationId, normalizedName])
   @@map("templates")
 }
 
+model TemplateVersion {
+  id                 String                   @id @default(cuid())
+  organisationId     String                   @map("organisation_id")
+  templateId         String                   @map("template_id")
+  versionNumber      Int                      @map("version_number")
+  format             TemplateFileFormat
+  storageBucket      String                   @map("storage_bucket")
+  storageKey         String                   @unique @map("storage_key")
+  previewStorageKey  String?                  @unique @map("preview_storage_key")
+  previewMimeType    String?                  @map("preview_mime_type")
+  previewByteSize    Int?                     @map("preview_byte_size")
+  originalFilename   String                   @map("original_filename")
+  mimeType           String                   @map("mime_type")
+  byteSize           Int                      @map("byte_size")
+  sha256             String
+  widthPx            Int?                     @map("width_px")
+  heightPx           Int?                     @map("height_px")
+  inspectionStatus   TemplateInspectionStatus @default(PENDING) @map("inspection_status")
+  inspectionSummary  String?                  @map("inspection_summary")
+  detectedLayersJson Json?                    @map("detected_layers_json")
+  inspectedAt        DateTime?                @map("inspected_at")
+  uploadedByUserId   String                   @map("uploaded_by_user_id")
+  uploadIntentId     String?                  @unique @map("upload_intent_id")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+
+  @@unique([templateId, versionNumber])
+  @@index([organisationId, templateId, createdAt])
+  @@map("template_versions")
+}
+
 model TemplateFieldMapping {
-  id              String   @id @default(cuid())
-  templateId      String   @map("template_id")
-  fieldKey        String   @map("field_key")        // e.g. "member_name", "birth_date"
-  layerIdentifier String   @map("layer_identifier") // Target layer name or ID in Affinity
-  targetType      String   @map("target_type")      // TEXT, PLACED_IMAGE, SHAPE_FILL
-  defaultFallback String?  @map("default_fallback")
-  createdAt       DateTime @default(now()) @map("created_at")
+  id                String            @id @default(cuid())
+  organisationId    String            @map("organisation_id")
+  templateVersionId String            @map("template_version_id")
+  fieldKey          String            @map("field_key")
+  fieldType         TemplateFieldType @map("field_type")
+  targetLayerName   String            @map("target_layer_name")
+  layerPathJson     Json?             @map("layer_path_json")
+  isRequired        Boolean           @default(false) @map("is_required")
+  defaultValue      String?           @map("default_value")
+  notes             String?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
 
-  template        Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
-
-  @@unique([templateId, fieldKey])
+  @@unique([templateVersionId, fieldKey])
+  @@index([organisationId, templateVersionId])
   @@map("template_field_mappings")
 }
 
+model CreativeUploadIntent {
+  id                String               @id @default(cuid())
+  organisationId    String               @map("organisation_id")
+  requestedByUserId String?              @map("requested_by_user_id")
+  agentId           String?              @map("agent_id")
+  kind              CreativeUploadKind
+  idempotencyKey    String               @unique @map("idempotency_key")
+  storageBucket     String               @map("storage_bucket")
+  storageKey        String               @unique @map("storage_key")
+  expectedMimeType  String               @map("expected_mime_type")
+  expectedByteSize  Int                  @map("expected_byte_size")
+  expectedSha256    String?              @map("expected_sha256")
+  maxAllowedBytes   Int                  @map("max_allowed_bytes")
+  status            CreativeUploadStatus @default(PENDING)
+  verifiedByteSize  Int?                 @map("verified_byte_size")
+  verifiedSha256    String?              @map("verified_sha256")
+  rejectionReason   String?              @map("rejection_reason")
+  expiresAt         DateTime             @map("expires_at")
+  verifiedAt        DateTime?            @map("verified_at")
+  createdAt         DateTime             @default(now()) @map("created_at")
+  updatedAt         DateTime             @updatedAt @map("updated_at")
+
+  @@index([organisationId, status, expiresAt])
+  @@index([agentId, status])
+  @@map("creative_upload_intents")
+}
+
+model CreativeAgent {
+  id                 String              @id @default(cuid())
+  organisationId     String              @map("organisation_id")
+  registeredByUserId String              @map("registered_by_user_id")
+  name               String
+  machineLabel       String              @map("machine_label")
+  tokenHash          String              @unique @map("token_hash")
+  tokenPrefix        String              @map("token_prefix")
+  status             CreativeAgentStatus @default(ACTIVE)
+  agentVersion       String?             @map("agent_version")
+  affinityVersion    String?             @map("affinity_version")
+  capabilitiesJson   Json?               @map("capabilities_json")
+  lastHeartbeatAt    DateTime?           @map("last_heartbeat_at")
+  revokedAt          DateTime?           @map("revoked_at")
+  revokedByUserId    String?             @map("revoked_by_user_id")
+  revocationReason   String?             @map("revocation_reason")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+
+  @@index([organisationId, status])
+  @@map("creative_agents")
+}
+
+model CreativeJobDispatch {
+  id                String                 @id @default(cuid())
+  organisationId    String                 @map("organisation_id")
+  designJobId       String                 @map("design_job_id")
+  templateVersionId String                 @map("template_version_id")
+  assignedAgentId   String?                @map("assigned_agent_id")
+  requestedByUserId String                 @map("requested_by_user_id")
+  idempotencyKey    String                 @unique @map("idempotency_key")
+  manifestVersion   Int                    @default(1) @map("manifest_version")
+  manifestJson      Json                   @map("manifest_json")
+  status            CreativeDispatchStatus @default(QUEUED)
+  claimTokenHash    String?                @map("claim_token_hash")
+  leaseExpiresAt    DateTime?              @map("lease_expires_at")
+  claimedAt         DateTime?              @map("claimed_at")
+  readyForArtistAt  DateTime?              @map("ready_for_artist_at")
+  completedAt       DateTime?              @map("completed_at")
+  failedAt          DateTime?              @map("failed_at")
+  errorCode         String?                @map("error_code")
+  errorMessage      String?                @map("error_message")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  @@index([organisationId, status, createdAt])
+  @@index([designJobId, createdAt])
+  @@index([assignedAgentId, status])
+  @@map("creative_job_dispatches")
+}
+
+model ExportRecord {
+  id                    String           @id @default(cuid())
+  organisationId        String           @map("organisation_id")
+  designJobId           String           @map("design_job_id")
+  dispatchId            String?          @map("dispatch_id")
+  uploadedByAgentId     String?          @map("uploaded_by_agent_id")
+  uploadedByUserId      String?          @map("uploaded_by_user_id")
+  uploadIntentId        String?          @unique @map("upload_intent_id")
+  format                ExportFileFormat
+  storageBucket         String           @map("storage_bucket")
+  storageKey            String           @unique @map("storage_key")
+  mimeType              String           @map("mime_type")
+  byteSize              Int              @map("byte_size")
+  sha256                String
+  widthPx               Int?             @map("width_px")
+  heightPx              Int?             @map("height_px")
+  resolutionDpi         Int?             @map("resolution_dpi")
+  isApprovedForPublish  Boolean          @default(false) @map("is_approved_for_publish")
+  ownerApprovedAt       DateTime?        @map("owner_approved_at")
+  ownerApprovedByUserId String?          @map("owner_approved_by_user_id")
+  publishedAt           DateTime?        @map("published_at")
+  createdAt             DateTime         @default(now()) @map("created_at")
+
+  @@index([organisationId, designJobId, createdAt])
+  @@index([dispatchId])
+  @@map("export_records")
+}
+
+model CreativeStorageCleanup {
+  id             String                       @id @default(cuid())
+  organisationId String                       @map("organisation_id")
+  bucket         String
+  objectKey      String                       @unique @map("object_key")
+  reason         CreativeStorageCleanupReason
+  status         StorageCleanupStatus         @default(PENDING)
+  attempts       Int                          @default(0)
+  lastError      String?                      @map("last_error")
+  nextRetryAt    DateTime                     @default(now()) @map("next_retry_at")
+  resolvedAt     DateTime?                    @map("resolved_at")
+  createdAt      DateTime                     @default(now()) @map("created_at")
+  updatedAt      DateTime                     @updatedAt @map("updated_at")
+
+  @@index([status, nextRetryAt])
+  @@index([organisationId, createdAt])
+  @@map("creative_storage_cleanups")
+}
+
 // -----------------------------------------------------------------------------
-// ASSETS & DELIVERABLES
+// FUTURE ASSETS (Milestone 8 Draft Specification)
 // -----------------------------------------------------------------------------
 
 model Asset {
@@ -407,49 +650,14 @@ model Asset {
 
   organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Restrict)
   memberPhotos   Member[]     @relation("MemberPhoto")
-  templatePreviews Template[] @relation("TemplatePreview")
-  exportRecords  ExportRecord[]
 
   @@index([organisationId, category])
   @@map("assets")
 }
 
-model ExportRecord {
-  id             String    @id @default(cuid())
-  designJobId    String    @map("design_job_id")
-  assetId        String    @map("asset_id")
-  format         String    // PNG, JPEG, PDF
-  resolutionDpi  Int       @default(300) @map("resolution_dpi")
-  exportDurationMs Int?    @map("export_duration_ms")
-  createdAt      DateTime  @default(now()) @map("created_at")
-
-  designJob      DesignJob @relation(fields: [designJobId], references: [id], onDelete: Cascade)
-  asset          Asset     @relation(fields: [assetId], references: [id], onDelete: Restrict)
-
-  @@index([designJobId])
-  @@map("export_records")
-}
-
 // -----------------------------------------------------------------------------
-// INFRASTRUCTURE & AGENT AUDIT
+// INFRASTRUCTURE & NOTIFICATIONS
 // -----------------------------------------------------------------------------
-
-model CreativeAgent {
-  id             String    @id @default(cuid())
-  organisationId String    @map("organisation_id")
-  agentName      String    @map("agent_name")
-  machineHostname String   @map("machine_hostname")
-  tokenHash      String    @unique @map("token_hash")
-  affinityVersion String?  @map("affinity_version")
-  lastHeartbeat  DateTime  @default(now()) @map("last_heartbeat")
-  isOnline       Boolean   @default(false) @map("is_online")
-  createdAt      DateTime  @default(now()) @map("created_at")
-
-  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-
-  @@index([organisationId])
-  @@map("creative_agents")
-}
 
 model Notification {
   id             String    @id @default(cuid())

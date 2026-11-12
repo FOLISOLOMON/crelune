@@ -115,6 +115,8 @@ export const createDesignJobSchema = z
       DESIGN_JOB_SHORT_FIELD_MAX_LENGTH,
       'Preferred template'
     ),
+    templateId: optionalMemberIdSchema,
+    templateVersionId: optionalMemberIdSchema,
     referenceNotes: preprocessOptionalTrimmedString(
       DESIGN_JOB_TEXT_MAX_LENGTH,
       'Reference notes'
@@ -187,6 +189,8 @@ export const updateDesignJobSchema = z
       DESIGN_JOB_SHORT_FIELD_MAX_LENGTH,
       'Preferred template'
     ),
+    templateId: optionalMemberIdSchema,
+    templateVersionId: optionalMemberIdSchema,
     referenceNotes: preprocessOptionalTrimmedString(
       DESIGN_JOB_TEXT_MAX_LENGTH,
       'Reference notes'
@@ -312,6 +316,8 @@ export interface DesignJobSummary {
   memberId: string | null;
   member: LinkedMemberSummary | null;
   birthdayTargetYear: number | null;
+  templateId?: string | null;
+  templateVersionId?: string | null;
   targetPlatform: string | null;
   dimensions: string | null;
   dueDate: string | null;

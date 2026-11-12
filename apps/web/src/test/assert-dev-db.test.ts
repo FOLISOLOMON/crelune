@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   APPROVED_DEV_BRANCH_ID,
   APPROVED_DEV_BRANCH_NAME,
+  APPROVED_DEV_CREATIVE_STORAGE_BUCKET,
   APPROVED_DEV_DATABASE,
   APPROVED_DEV_DIRECT_HOST,
   APPROVED_DEV_POOLED_HOST,
@@ -10,6 +11,7 @@ import {
   APPROVED_DEV_STORAGE_HOST,
   APPROVED_DEV_STORAGE_REGION,
   assertNoShellEnvConflict,
+  assertSafeDevCreativeStorageEnvironment,
   assertSafeDevDatabaseEnvironment,
   assertSafeDevStorageEnvironment,
 } from './assert-dev-db';
@@ -317,5 +319,32 @@ describe('PostgreSQL Integration Database Safety Guard', () => {
         DATABASE_URL_UNPOOLED: `postgresql://user:super_secret_pw@${APPROVED_DEV_DIRECT_HOST}/${APPROVED_DEV_DATABASE}?host=evil.example&sslmode=require`,
       })
     ).toThrow(/disallowed connection override/i);
+  });
+
+  it('requires exact approved crelune-dev-creative bucket for creative storage integration tests', () => {
+    const validCreativeEnv = {
+      ...validDevEnv,
+      AWS_ENDPOINT_URL_S3: `https://${APPROVED_DEV_STORAGE_HOST}`,
+      AWS_REGION: APPROVED_DEV_STORAGE_REGION,
+      OBJECT_STORAGE_CREATIVE_BUCKET: APPROVED_DEV_CREATIVE_STORAGE_BUCKET,
+      OBJECT_STORAGE_ENV_PREFIX: APPROVED_DEV_STORAGE_ENV_PREFIX,
+      OBJECT_STORAGE_CREDENTIAL_BRANCH_ID: APPROVED_DEV_BRANCH_ID,
+      AWS_ACCESS_KEY_ID: 'nak_dev_id',
+      AWS_SECRET_ACCESS_KEY: 'nsk_dev_secret',
+    };
+
+    expect(assertSafeDevCreativeStorageEnvironment(validCreativeEnv)).toEqual({
+      endpointHost: APPROVED_DEV_STORAGE_HOST,
+      region: APPROVED_DEV_STORAGE_REGION,
+      bucket: APPROVED_DEV_CREATIVE_STORAGE_BUCKET,
+      envPrefix: APPROVED_DEV_STORAGE_ENV_PREFIX,
+    });
+
+    expect(() =>
+      assertSafeDevCreativeStorageEnvironment({
+        ...validCreativeEnv,
+        OBJECT_STORAGE_CREATIVE_BUCKET: APPROVED_DEV_STORAGE_BUCKET,
+      })
+    ).toThrow(/OBJECT_STORAGE_CREATIVE_BUCKET/i);
   });
 });

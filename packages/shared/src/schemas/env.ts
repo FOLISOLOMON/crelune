@@ -19,6 +19,8 @@ export const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'production', 'test'])
     .default('development'),
+  OBJECT_STORAGE_BUCKET: z.string().min(1).optional(),
+  OBJECT_STORAGE_CREATIVE_BUCKET: z.string().min(1).optional(),
 });
 
 export type ValidatedEnv = z.infer<typeof envSchema>;

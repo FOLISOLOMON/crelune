@@ -44,6 +44,7 @@ for (const key of [
   'AWS_ENDPOINT_URL_S3',
   'AWS_REGION',
   'OBJECT_STORAGE_BUCKET',
+  'OBJECT_STORAGE_CREATIVE_BUCKET',
   'OBJECT_STORAGE_ENV_PREFIX',
   'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID',
 ]) {
@@ -216,6 +217,14 @@ if (
   mergedEnv.OBJECT_STORAGE_ENV_PREFIX.trim() !== 'development'
 ) {
   fail('OBJECT_STORAGE_ENV_PREFIX must equal "development" for integration tests.');
+}
+if (
+  mergedEnv.OBJECT_STORAGE_CREATIVE_BUCKET &&
+  mergedEnv.OBJECT_STORAGE_CREATIVE_BUCKET.trim() !== 'crelune-dev-creative'
+) {
+  fail(
+    'OBJECT_STORAGE_CREATIVE_BUCKET must equal "crelune-dev-creative" for integration tests.'
+  );
 }
 if (
   !mergedEnv.OBJECT_STORAGE_CREDENTIAL_BRANCH_ID ||

@@ -54,10 +54,16 @@ export const APPROVED_DEV_STORAGE_TARGET: ApprovedStorageTarget = {
   databaseName: 'neondb',
 };
 
+export const APPROVED_DEV_CREATIVE_STORAGE_TARGET: ApprovedStorageTarget = {
+  ...APPROVED_DEV_STORAGE_TARGET,
+  bucket: 'crelune-dev-creative',
+};
+
 // Production object storage and production DB pairing have not yet been provisioned or approved.
 // Keep null until an explicit production endpoint, bucket, region, branch ID,
 // pooled DB host, direct DB host, and prefix are provisioned and approved.
 export const APPROVED_PROD_STORAGE_TARGET: ApprovedStorageTarget | null = null;
+export const APPROVED_PROD_CREATIVE_STORAGE_TARGET: ApprovedStorageTarget | null = null;
 
 const KNOWN_PROD_BRANCH_ID = 'br-withered-moon-be8coj8h';
 const KNOWN_PROD_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
@@ -149,7 +155,8 @@ function assertTargetEquality(
     directDbHost: string;
     directDbName: string;
   },
-  approved: ApprovedStorageTarget
+  approved: ApprovedStorageTarget,
+  bucketEnvVarName: 'OBJECT_STORAGE_BUCKET' | 'OBJECT_STORAGE_CREATIVE_BUCKET' = 'OBJECT_STORAGE_BUCKET'
 ): void {
   if (actual.branchName !== approved.branchName) {
     throw new StorageConfigError(
@@ -178,7 +185,7 @@ function assertTargetEquality(
   }
   if (actual.bucket !== approved.bucket) {
     throw new StorageConfigError(
-      `OBJECT_STORAGE_BUCKET "${actual.bucket}" does not match exact approved ${approved.envPrefix} bucket "${approved.bucket}".`
+      `${bucketEnvVarName} "${actual.bucket}" does not match exact approved ${approved.envPrefix} bucket "${approved.bucket}".`
     );
   }
   if (actual.pooledDbHost !== approved.pooledDbHost) {
@@ -203,20 +210,19 @@ function assertTargetEquality(
   }
 }
 
-/**
- * Loads and validates Neon Object Storage credentials against an exact runtime
- * allowlist pairing storage endpoints, buckets, credential branch assertions,
- * and pooled/direct PostgreSQL URLs (failing closed for unapproved production).
- * Never embeds database usernames, passwords, full URLs, or storage secrets in errors.
- */
-export function getObjectStorageConfig(
-  env: Record<string, string | undefined> = process.env
+function resolveObjectStorageConfig(
+  env: Record<string, string | undefined>,
+  options: {
+    bucketEnvVarName: 'OBJECT_STORAGE_BUCKET' | 'OBJECT_STORAGE_CREATIVE_BUCKET';
+    approvedDevTarget: ApprovedStorageTarget;
+    approvedProdTarget: ApprovedStorageTarget | null;
+  }
 ): ObjectStorageConfig {
   const endpointRaw = (env.AWS_ENDPOINT_URL_S3 || '').trim();
   const region = (env.AWS_REGION || '').trim();
   const accessKeyId = (env.AWS_ACCESS_KEY_ID || '').trim();
   const secretAccessKey = (env.AWS_SECRET_ACCESS_KEY || '').trim();
-  const bucket = (env.OBJECT_STORAGE_BUCKET || '').trim();
+  const bucket = (env[options.bucketEnvVarName] || '').trim();
   const envPrefixRaw = (env.OBJECT_STORAGE_ENV_PREFIX || '').trim();
   const neonBranch = (env.NEON_BRANCH || '').trim();
   const neonBranchId = (env.NEON_BRANCH_ID || '').trim();
@@ -270,7 +276,7 @@ export function getObjectStorageConfig(
   const endpointHost = parsedEndpoint.hostname.toLowerCase();
 
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) {
-    throw new StorageConfigError('OBJECT_STORAGE_BUCKET has an invalid S3 bucket name.');
+    throw new StorageConfigError(`${options.bucketEnvVarName} has an invalid S3 bucket name.`);
   }
 
   const pooledDb = parsePostgresUrl(env.DATABASE_URL, 'DATABASE_URL');
@@ -309,7 +315,8 @@ export function getObjectStorageConfig(
         directDbHost: directDb.hostname,
         directDbName: directDb.database,
       },
-      APPROVED_DEV_STORAGE_TARGET
+      options.approvedDevTarget,
+      options.bucketEnvVarName
     );
   } else {
     // Reject obvious development contamination under production prefix first
@@ -320,6 +327,7 @@ export function getObjectStorageConfig(
       endpointHost === APPROVED_DEV_STORAGE_TARGET.endpointHost ||
       endpointHost.includes(APPROVED_DEV_STORAGE_TARGET.branchId) ||
       bucket === APPROVED_DEV_STORAGE_TARGET.bucket ||
+      bucket === APPROVED_DEV_CREATIVE_STORAGE_TARGET.bucket ||
       pooledDb.hostname === APPROVED_DEV_STORAGE_TARGET.pooledDbHost ||
       directDb.hostname === APPROVED_DEV_STORAGE_TARGET.directDbHost ||
       accessKeyId.includes(APPROVED_DEV_STORAGE_TARGET.branchId) ||
@@ -330,7 +338,7 @@ export function getObjectStorageConfig(
       );
     }
 
-    if (!APPROVED_PROD_STORAGE_TARGET) {
+    if (!options.approvedProdTarget) {
       throw new StorageConfigError(
         'Production object storage target is not approved or configured. Failing closed.'
       );
@@ -350,7 +358,8 @@ export function getObjectStorageConfig(
         directDbHost: directDb.hostname,
         directDbName: directDb.database,
       },
-      APPROVED_PROD_STORAGE_TARGET
+      options.approvedProdTarget,
+      options.bucketEnvVarName
     );
   }
 
@@ -368,6 +377,34 @@ export function getObjectStorageConfig(
     directDbHost: directDb.hostname,
     databaseName: pooledDb.database,
   };
+}
+
+/**
+ * Loads and validates Neon Object Storage credentials for private member photos
+ * against the exact runtime allowlist.
+ */
+export function getObjectStorageConfig(
+  env: Record<string, string | undefined> = process.env
+): ObjectStorageConfig {
+  return resolveObjectStorageConfig(env, {
+    bucketEnvVarName: 'OBJECT_STORAGE_BUCKET',
+    approvedDevTarget: APPROVED_DEV_STORAGE_TARGET,
+    approvedProdTarget: APPROVED_PROD_STORAGE_TARGET,
+  });
+}
+
+/**
+ * Loads and validates Neon Object Storage credentials for the dedicated creative bucket
+ * (`crelune-dev-creative`), isolated from member-photo storage.
+ */
+export function getCreativeObjectStorageConfig(
+  env: Record<string, string | undefined> = process.env
+): ObjectStorageConfig {
+  return resolveObjectStorageConfig(env, {
+    bucketEnvVarName: 'OBJECT_STORAGE_CREATIVE_BUCKET',
+    approvedDevTarget: APPROVED_DEV_CREATIVE_STORAGE_TARGET,
+    approvedProdTarget: APPROVED_PROD_CREATIVE_STORAGE_TARGET,
+  });
 }
 
 function assertSafeIdentifier(value: string, label: string): string {
@@ -416,13 +453,10 @@ export function buildMemberPhotoObjectKey(params: {
  * Verifies a stored key strictly belongs to the target environment, organisation,
  * and member namespace before any read or delete call hits object storage.
  */
-export function assertKeyMatchesMemberScope(
+function assertSafeScopedKeyLeaf(
   key: string,
-  params: {
-    envPrefix: StorageEnvPrefix;
-    organisationId: string;
-    memberId: string;
-  }
+  expectedPrefix: string,
+  leafRegex: RegExp
 ): void {
   if (
     !key ||
@@ -434,14 +468,248 @@ export function assertKeyMatchesMemberScope(
   ) {
     throw new StorageKeyViolationError('Unsafe object storage key rejected.');
   }
-  const expectedPrefix = buildMemberPhotoPrefix(params);
   if (!key.startsWith(expectedPrefix)) {
     throw new StorageKeyViolationError(
       'Object storage key does not match the authorised environment or organisation scope.'
     );
   }
   const filenamePart = key.slice(expectedPrefix.length);
-  if (!/^[a-zA-Z0-9_-]+\.(jpg|png|webp)$/.test(filenamePart)) {
+  if (!leafRegex.test(filenamePart)) {
     throw new StorageKeyViolationError('Object storage key leaf has an invalid format.');
   }
+}
+
+export function assertKeyMatchesMemberScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    memberId: string;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildMemberPhotoPrefix(params),
+    /^[a-zA-Z0-9_-]+\.(jpg|png|webp)$/
+  );
+}
+
+const CREATIVE_MASTER_EXTENSIONS = new Set(['psd', 'af', 'afphoto', 'afdesign', 'afpub']);
+const CREATIVE_PREVIEW_EXTENSIONS = new Set(['png', 'jpg', 'webp']);
+const CREATIVE_WORKING_ASSET_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'webp',
+  'pdf',
+  'psd',
+  'af',
+  'afphoto',
+  'afdesign',
+  'afpub',
+]);
+const CREATIVE_EXPORT_EXTENSIONS = new Set(['png', 'jpg', 'pdf']);
+
+export type CreativeMasterExtension = 'psd' | 'af' | 'afphoto' | 'afdesign' | 'afpub';
+export type CreativePreviewExtension = 'png' | 'jpg' | 'webp';
+export type CreativeWorkingAssetExtension =
+  | 'png'
+  | 'jpg'
+  | 'webp'
+  | 'pdf'
+  | 'psd'
+  | 'af'
+  | 'afphoto'
+  | 'afdesign'
+  | 'afpub';
+export type CreativeExportExtension = 'png' | 'jpg' | 'pdf';
+
+function assertPositiveVersionNumber(versionNumber: number): number {
+  if (!Number.isInteger(versionNumber) || versionNumber < 1 || versionNumber > 100000) {
+    throw new StorageKeyViolationError('Invalid template version number for storage path.');
+  }
+  return versionNumber;
+}
+
+function assertValidObjectId(objectId?: string): string {
+  const resolved = objectId ?? crypto.randomUUID();
+  if (!VALID_ID_REGEX.test(resolved)) {
+    throw new StorageKeyViolationError('Invalid generated object identifier.');
+  }
+  return resolved;
+}
+
+export function buildTemplateMasterPrefix(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+  versionNumber: number;
+}): string {
+  if (!ALLOWED_ENV_PREFIXES.has(params.envPrefix)) {
+    throw new StorageKeyViolationError('Invalid storage environment prefix.');
+  }
+  const orgId = assertSafeIdentifier(params.organisationId, 'organisationId');
+  const templateId = assertSafeIdentifier(params.templateId, 'templateId');
+  const version = assertPositiveVersionNumber(params.versionNumber);
+  return `${params.envPrefix}/organisations/${orgId}/templates/${templateId}/versions/v${version}/`;
+}
+
+export function buildTemplateMasterObjectKey(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+  versionNumber: number;
+  extension: CreativeMasterExtension;
+  objectId?: string;
+}): string {
+  if (!CREATIVE_MASTER_EXTENSIONS.has(params.extension)) {
+    throw new StorageKeyViolationError('Unsupported template master extension.');
+  }
+  const objectId = assertValidObjectId(params.objectId);
+  return `${buildTemplateMasterPrefix(params)}${objectId}.${params.extension}`;
+}
+
+export function assertKeyMatchesTemplateMasterScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    templateId: string;
+    versionNumber: number;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildTemplateMasterPrefix(params),
+    /^[a-zA-Z0-9_-]+\.(psd|af|afphoto|afdesign|afpub)$/
+  );
+}
+
+export function buildTemplatePreviewPrefix(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+  versionNumber: number;
+}): string {
+  if (!ALLOWED_ENV_PREFIXES.has(params.envPrefix)) {
+    throw new StorageKeyViolationError('Invalid storage environment prefix.');
+  }
+  const orgId = assertSafeIdentifier(params.organisationId, 'organisationId');
+  const templateId = assertSafeIdentifier(params.templateId, 'templateId');
+  const version = assertPositiveVersionNumber(params.versionNumber);
+  return `${params.envPrefix}/organisations/${orgId}/templates/${templateId}/previews/v${version}/`;
+}
+
+export function buildTemplatePreviewObjectKey(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  templateId: string;
+  versionNumber: number;
+  extension: CreativePreviewExtension;
+  objectId?: string;
+}): string {
+  if (!CREATIVE_PREVIEW_EXTENSIONS.has(params.extension)) {
+    throw new StorageKeyViolationError('Unsupported template preview extension.');
+  }
+  const objectId = assertValidObjectId(params.objectId);
+  return `${buildTemplatePreviewPrefix(params)}${objectId}.${params.extension}`;
+}
+
+export function assertKeyMatchesTemplatePreviewScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    templateId: string;
+    versionNumber: number;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildTemplatePreviewPrefix(params),
+    /^[a-zA-Z0-9_-]+\.(png|jpg|webp)$/
+  );
+}
+
+export function buildWorkingAssetPrefix(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  scopeId: string;
+}): string {
+  if (!ALLOWED_ENV_PREFIXES.has(params.envPrefix)) {
+    throw new StorageKeyViolationError('Invalid storage environment prefix.');
+  }
+  const orgId = assertSafeIdentifier(params.organisationId, 'organisationId');
+  const scopeId = assertSafeIdentifier(params.scopeId, 'scopeId');
+  return `${params.envPrefix}/organisations/${orgId}/working_assets/${scopeId}/`;
+}
+
+export function buildWorkingAssetObjectKey(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  scopeId: string;
+  extension: CreativeWorkingAssetExtension;
+  objectId?: string;
+}): string {
+  if (!CREATIVE_WORKING_ASSET_EXTENSIONS.has(params.extension)) {
+    throw new StorageKeyViolationError('Unsupported working asset extension.');
+  }
+  const objectId = assertValidObjectId(params.objectId);
+  return `${buildWorkingAssetPrefix(params)}${objectId}.${params.extension}`;
+}
+
+export function assertKeyMatchesWorkingAssetScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    scopeId: string;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildWorkingAssetPrefix(params),
+    /^[a-zA-Z0-9_-]+\.(png|jpg|webp|pdf|psd|af|afphoto|afdesign|afpub)$/
+  );
+}
+
+export function buildExportDeliverablePrefix(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  designJobId: string;
+}): string {
+  if (!ALLOWED_ENV_PREFIXES.has(params.envPrefix)) {
+    throw new StorageKeyViolationError('Invalid storage environment prefix.');
+  }
+  const orgId = assertSafeIdentifier(params.organisationId, 'organisationId');
+  const designJobId = assertSafeIdentifier(params.designJobId, 'designJobId');
+  return `${params.envPrefix}/organisations/${orgId}/exports/jobs/${designJobId}/`;
+}
+
+export function buildExportDeliverableObjectKey(params: {
+  envPrefix: StorageEnvPrefix;
+  organisationId: string;
+  designJobId: string;
+  extension: CreativeExportExtension;
+  objectId?: string;
+}): string {
+  if (!CREATIVE_EXPORT_EXTENSIONS.has(params.extension)) {
+    throw new StorageKeyViolationError('Unsupported export deliverable extension.');
+  }
+  const objectId = assertValidObjectId(params.objectId);
+  return `${buildExportDeliverablePrefix(params)}${objectId}.${params.extension}`;
+}
+
+export function assertKeyMatchesExportDeliverableScope(
+  key: string,
+  params: {
+    envPrefix: StorageEnvPrefix;
+    organisationId: string;
+    designJobId: string;
+  }
+): void {
+  assertSafeScopedKeyLeaf(
+    key,
+    buildExportDeliverablePrefix(params),
+    /^[a-zA-Z0-9_-]+\.(png|jpg|pdf)$/
+  );
 }

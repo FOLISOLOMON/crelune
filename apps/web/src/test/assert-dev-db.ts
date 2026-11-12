@@ -17,6 +17,7 @@ export const APPROVED_DEV_STORAGE_HOST =
   'br-nameless-silence-bexjp44k.storage.c-9.us-east-2.aws.neon.tech';
 export const APPROVED_DEV_STORAGE_REGION = 'us-east-2';
 export const APPROVED_DEV_STORAGE_BUCKET = 'crelune-dev-member-photos';
+export const APPROVED_DEV_CREATIVE_STORAGE_BUCKET = 'crelune-dev-creative';
 export const APPROVED_DEV_STORAGE_ENV_PREFIX = 'development';
 
 const KNOWN_PRODUCTION_BRANCH_NAMES = new Set(['production', 'prod', 'main']);
@@ -34,6 +35,7 @@ const PROTECTED_ENV_KEYS = [
   'AWS_ENDPOINT_URL_S3',
   'AWS_REGION',
   'OBJECT_STORAGE_BUCKET',
+  'OBJECT_STORAGE_CREATIVE_BUCKET',
   'OBJECT_STORAGE_ENV_PREFIX',
   'OBJECT_STORAGE_CREDENTIAL_BRANCH_ID',
 ] as const;
@@ -175,12 +177,10 @@ export function assertSafeDevDatabaseEnvironment(
   };
 }
 
-/**
- * Fails closed if storage integration tests target a production Neon branch endpoint,
- * missing/wrong bucket, wrong environment prefix, or missing storage credentials.
- */
-export function assertSafeDevStorageEnvironment(
-  env: Record<string, string | undefined> = process.env
+function assertSafeDevStorageBucketEnvironment(
+  env: Record<string, string | undefined>,
+  envVarName: 'OBJECT_STORAGE_BUCKET' | 'OBJECT_STORAGE_CREATIVE_BUCKET',
+  expectedBucket: string
 ): VerifiedDevStorageTarget {
   assertSafeDevDatabaseEnvironment(env);
 
@@ -228,10 +228,10 @@ export function assertSafeDevStorageEnvironment(
     );
   }
 
-  const bucket = (env.OBJECT_STORAGE_BUCKET || '').trim();
-  if (bucket !== APPROVED_DEV_STORAGE_BUCKET) {
+  const bucket = (env[envVarName] || '').trim();
+  if (bucket !== expectedBucket) {
     throw new Error(
-      `Refusing to run storage integration tests: OBJECT_STORAGE_BUCKET must equal "${APPROVED_DEV_STORAGE_BUCKET}".`
+      `Refusing to run storage integration tests: ${envVarName} must equal "${expectedBucket}".`
     );
   }
 
@@ -261,4 +261,32 @@ export function assertSafeDevStorageEnvironment(
     bucket,
     envPrefix,
   };
+}
+
+/**
+ * Fails closed if storage integration tests target a production Neon branch endpoint,
+ * missing/wrong bucket, wrong environment prefix, or missing storage credentials.
+ */
+export function assertSafeDevStorageEnvironment(
+  env: Record<string, string | undefined> = process.env
+): VerifiedDevStorageTarget {
+  return assertSafeDevStorageBucketEnvironment(
+    env,
+    'OBJECT_STORAGE_BUCKET',
+    APPROVED_DEV_STORAGE_BUCKET
+  );
+}
+
+/**
+ * Fails closed if creative-bucket integration tests target anything other than
+ * the approved development `crelune-dev-creative` bucket and dev storage branch.
+ */
+export function assertSafeDevCreativeStorageEnvironment(
+  env: Record<string, string | undefined> = process.env
+): VerifiedDevStorageTarget {
+  return assertSafeDevStorageBucketEnvironment(
+    env,
+    'OBJECT_STORAGE_CREATIVE_BUCKET',
+    APPROVED_DEV_CREATIVE_STORAGE_BUCKET
+  );
 }

@@ -103,7 +103,15 @@ model Organisation {
   notifications        Notification[]
   auditLogs            AuditLog[]
   pendingCleanups      PendingStorageCleanup[]
-  designJobs           DesignJob[]
+  designJobs              DesignJob[]
+  templates               Template[]
+  templateVersions        TemplateVersion[]
+  templateFieldMappings   TemplateFieldMapping[]
+  creativeUploadIntents   CreativeUploadIntent[]
+  creativeAgents          CreativeAgent[]
+  creativeJobDispatches   CreativeJobDispatch[]
+  exportRecords           ExportRecord[]
+  creativeStorageCleanups CreativeStorageCleanup[]
 
   @@map("organisations")
 }
@@ -128,7 +136,15 @@ model User {
   preferences         UserPreference?
   notifications       Notification[]
   auditLogs           AuditLog[]
-  designJobChanges    DesignJobHistory[]
+  designJobChanges          DesignJobHistory[]
+  templatesCreated          Template[]              @relation("TemplateCreator")
+  templateVersionsUploaded  TemplateVersion[]       @relation("TemplateVersionUploader")
+  creativeUploadIntents     CreativeUploadIntent[]  @relation("CreativeUploadRequester")
+  creativeAgentsRegistered  CreativeAgent[]         @relation("CreativeAgentRegistrar")
+  creativeAgentsRevoked     CreativeAgent[]         @relation("CreativeAgentRevoker")
+  creativeDispatchesOrdered CreativeJobDispatch[]   @relation("CreativeDispatchRequester")
+  exportsUploaded           ExportRecord[]          @relation("ExportUploader")
+  exportsOwnerApproved      ExportRecord[]          @relation("ExportOwnerApprover")
 
   @@index([organisationId])
   @@map("users")
@@ -339,6 +355,8 @@ model DesignJob {
   dimensions            String?
   targetPlatform        String?               @map("target_platform")
   preferredTemplateNote String?               @map("preferred_template_note")
+  templateId            String?               @map("template_id")
+  templateVersionId     String?               @map("template_version_id")
   referenceNotes        String?               @map("reference_notes")
   notes                 String?
   dueDate               DateTime?             @map("due_date") @db.Date
@@ -351,11 +369,17 @@ model DesignJob {
 
   organisation          Organisation          @relation(fields: [organisationId], references: [id], onDelete: Restrict)
   member                Member?               @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  template              Template?             @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateVersion       TemplateVersion?      @relation(fields: [templateVersionId], references: [id], onDelete: SetNull)
   birthdayPreparations  BirthdayPreparation[]
   history               DesignJobHistory[]
+  creativeDispatches    CreativeJobDispatch[]
+  exportRecords         ExportRecord[]
 
   @@index([organisationId, status])
   @@index([organisationId, memberId])
+  @@index([organisationId, templateId])
+  @@index([organisationId, templateVersionId])
   @@index([organisationId, dueDate])
   @@map("design_jobs")
 }
@@ -375,4 +399,326 @@ model DesignJobHistory {
 
   @@index([organisationId, designJobId, createdAt])
   @@map("design_job_history")
+}
+
+// -----------------------------------------------------------------------------
+// TEMPLATES, CREATIVE STORAGE & WINDOWS CREATIVE AGENT (Milestone 5.1)
+// -----------------------------------------------------------------------------
+
+enum TemplateStudioType {
+  AFFINITY_PHOTO
+  AFFINITY_DESIGNER
+  AFFINITY_PUBLISHER
+  AFFINITY_STUDIO
+}
+
+enum TemplateFileFormat {
+  PSD
+  AF
+  AFPHOTO
+  AFDESIGN
+  AFPUB
+}
+
+enum TemplateInspectionStatus {
+  PENDING
+  INSPECTED
+  MANUAL_REQUIRED
+  FAILED
+}
+
+enum TemplateFieldType {
+  TEXT
+  IMAGE
+  DATE
+  COLOR
+}
+
+enum CreativeUploadKind {
+  TEMPLATE_MASTER
+  TEMPLATE_PREVIEW
+  WORKING_ASSET
+  EXPORT_DELIVERABLE
+}
+
+enum CreativeUploadStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+  ABANDONED
+}
+
+enum CreativeAgentStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum CreativeDispatchStatus {
+  QUEUED
+  CLAIMED
+  DOWNLOADING_ASSETS
+  OPENING_TEMPLATE
+  READY_FOR_ARTIST
+  EXPORTING
+  EXPORTED
+  FAILED
+  CANCELLED
+}
+
+enum ExportFileFormat {
+  PNG
+  JPEG
+  PDF
+}
+
+enum CreativeStorageCleanupReason {
+  UPLOAD_ABANDONED
+  UPLOAD_REJECTED
+  TEMPLATE_VERSION_RETIRED
+  DISPATCH_CLEANUP
+  EXPORT_SUPERSEDED
+}
+
+model Template {
+  id              String             @id @default(cuid())
+  organisationId  String             @map("organisation_id")
+  name            String
+  normalizedName  String             @map("normalized_name")
+  category        DesignCategory     @default(GENERAL_GRAPHIC_DESIGN)
+  studioType      TemplateStudioType @map("studio_type")
+  description     String?
+  activeVersionId String?            @unique @map("active_version_id")
+  createdByUserId String             @map("created_by_user_id")
+  isActive        Boolean            @default(true) @map("is_active")
+  archivedAt      DateTime?          @map("archived_at")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  organisation    Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  createdByUser   User               @relation("TemplateCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  versions        TemplateVersion[]  @relation("TemplateVersions")
+  activeVersion   TemplateVersion?   @relation("ActiveTemplateVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  designJobs      DesignJob[]
+
+  @@index([organisationId, category, isActive])
+  @@index([organisationId, archivedAt])
+  @@index([organisationId, normalizedName])
+  @@map("templates")
+}
+
+model TemplateVersion {
+  id                 String                   @id @default(cuid())
+  organisationId     String                   @map("organisation_id")
+  templateId         String                   @map("template_id")
+  versionNumber      Int                      @map("version_number")
+  format             TemplateFileFormat
+  storageBucket      String                   @map("storage_bucket")
+  storageKey         String                   @unique @map("storage_key")
+  previewStorageKey  String?                  @unique @map("preview_storage_key")
+  previewMimeType    String?                  @map("preview_mime_type")
+  previewByteSize    Int?                     @map("preview_byte_size")
+  originalFilename   String                   @map("original_filename")
+  mimeType           String                   @map("mime_type")
+  byteSize           Int                      @map("byte_size")
+  sha256             String
+  widthPx            Int?                     @map("width_px")
+  heightPx           Int?                     @map("height_px")
+  inspectionStatus   TemplateInspectionStatus @default(PENDING) @map("inspection_status")
+  inspectionSummary  String?                  @map("inspection_summary")
+  detectedLayersJson Json?                    @map("detected_layers_json")
+  inspectedAt        DateTime?                @map("inspected_at")
+  uploadedByUserId   String                   @map("uploaded_by_user_id")
+  uploadIntentId     String?                  @unique @map("upload_intent_id")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+
+  organisation       Organisation             @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  template           Template                 @relation("TemplateVersions", fields: [templateId], references: [id], onDelete: Restrict)
+  activeForTemplate  Template?                @relation("ActiveTemplateVersion")
+  uploadedByUser     User                     @relation("TemplateVersionUploader", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  uploadIntent       CreativeUploadIntent?    @relation(fields: [uploadIntentId], references: [id], onDelete: SetNull)
+  fieldMappings      TemplateFieldMapping[]
+  designJobs         DesignJob[]
+  dispatches         CreativeJobDispatch[]
+
+  @@unique([templateId, versionNumber])
+  @@index([organisationId, templateId, createdAt])
+  @@map("template_versions")
+}
+
+model TemplateFieldMapping {
+  id                String            @id @default(cuid())
+  organisationId    String            @map("organisation_id")
+  templateVersionId String            @map("template_version_id")
+  fieldKey          String            @map("field_key")
+  fieldType         TemplateFieldType @map("field_type")
+  targetLayerName   String            @map("target_layer_name")
+  layerPathJson     Json?             @map("layer_path_json")
+  isRequired        Boolean           @default(false) @map("is_required")
+  defaultValue      String?           @map("default_value")
+  notes             String?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  organisation      Organisation      @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  templateVersion   TemplateVersion   @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([templateVersionId, fieldKey])
+  @@index([organisationId, templateVersionId])
+  @@map("template_field_mappings")
+}
+
+model CreativeUploadIntent {
+  id                String               @id @default(cuid())
+  organisationId    String               @map("organisation_id")
+  requestedByUserId String?              @map("requested_by_user_id")
+  agentId           String?              @map("agent_id")
+  kind              CreativeUploadKind
+  idempotencyKey    String               @unique @map("idempotency_key")
+  storageBucket     String               @map("storage_bucket")
+  storageKey        String               @unique @map("storage_key")
+  expectedMimeType  String               @map("expected_mime_type")
+  expectedByteSize  Int                  @map("expected_byte_size")
+  expectedSha256    String?              @map("expected_sha256")
+  maxAllowedBytes   Int                  @map("max_allowed_bytes")
+  status            CreativeUploadStatus @default(PENDING)
+  verifiedByteSize  Int?                 @map("verified_byte_size")
+  verifiedSha256    String?              @map("verified_sha256")
+  rejectionReason   String?              @map("rejection_reason")
+  expiresAt         DateTime             @map("expires_at")
+  verifiedAt        DateTime?            @map("verified_at")
+  createdAt         DateTime             @default(now()) @map("created_at")
+  updatedAt         DateTime             @updatedAt @map("updated_at")
+
+  organisation      Organisation         @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  requestedByUser   User?                @relation("CreativeUploadRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  agent             CreativeAgent?       @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  templateVersion   TemplateVersion?
+  exportRecord      ExportRecord?
+
+  @@index([organisationId, status, expiresAt])
+  @@index([agentId, status])
+  @@map("creative_upload_intents")
+}
+
+model CreativeAgent {
+  id                 String                @id @default(cuid())
+  organisationId     String                @map("organisation_id")
+  registeredByUserId String                @map("registered_by_user_id")
+  name               String
+  machineLabel       String                @map("machine_label")
+  tokenHash          String                @unique @map("token_hash")
+  tokenPrefix        String                @map("token_prefix")
+  status             CreativeAgentStatus   @default(ACTIVE)
+  agentVersion       String?               @map("agent_version")
+  affinityVersion    String?               @map("affinity_version")
+  capabilitiesJson   Json?                 @map("capabilities_json")
+  lastHeartbeatAt    DateTime?             @map("last_heartbeat_at")
+  revokedAt          DateTime?             @map("revoked_at")
+  revokedByUserId    String?               @map("revoked_by_user_id")
+  revocationReason   String?               @map("revocation_reason")
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @updatedAt @map("updated_at")
+
+  organisation       Organisation          @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  registeredByUser   User                  @relation("CreativeAgentRegistrar", fields: [registeredByUserId], references: [id], onDelete: Restrict)
+  revokedByUser      User?                 @relation("CreativeAgentRevoker", fields: [revokedByUserId], references: [id], onDelete: SetNull)
+  dispatches         CreativeJobDispatch[]
+  uploadIntents      CreativeUploadIntent[]
+  exportRecords      ExportRecord[]
+
+  @@index([organisationId, status])
+  @@map("creative_agents")
+}
+
+model CreativeJobDispatch {
+  id                String                 @id @default(cuid())
+  organisationId    String                 @map("organisation_id")
+  designJobId       String                 @map("design_job_id")
+  templateVersionId String                 @map("template_version_id")
+  assignedAgentId   String?                @map("assigned_agent_id")
+  requestedByUserId String                 @map("requested_by_user_id")
+  idempotencyKey    String                 @unique @map("idempotency_key")
+  manifestVersion   Int                    @default(1) @map("manifest_version")
+  manifestJson      Json                   @map("manifest_json")
+  status            CreativeDispatchStatus @default(QUEUED)
+  claimTokenHash    String?                @map("claim_token_hash")
+  leaseExpiresAt    DateTime?              @map("lease_expires_at")
+  claimedAt         DateTime?              @map("claimed_at")
+  readyForArtistAt  DateTime?              @map("ready_for_artist_at")
+  completedAt       DateTime?              @map("completed_at")
+  failedAt          DateTime?              @map("failed_at")
+  errorCode         String?                @map("error_code")
+  errorMessage      String?                @map("error_message")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  organisation      Organisation           @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  designJob         DesignJob              @relation(fields: [designJobId], references: [id], onDelete: Cascade)
+  templateVersion   TemplateVersion        @relation(fields: [templateVersionId], references: [id], onDelete: Restrict)
+  assignedAgent     CreativeAgent?         @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  requestedByUser   User                   @relation("CreativeDispatchRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  exportRecords     ExportRecord[]
+
+  @@index([organisationId, status, createdAt])
+  @@index([designJobId, createdAt])
+  @@index([assignedAgentId, status])
+  @@map("creative_job_dispatches")
+}
+
+model ExportRecord {
+  id                    String               @id @default(cuid())
+  organisationId        String               @map("organisation_id")
+  designJobId           String               @map("design_job_id")
+  dispatchId            String?              @map("dispatch_id")
+  uploadedByAgentId     String?              @map("uploaded_by_agent_id")
+  uploadedByUserId      String?              @map("uploaded_by_user_id")
+  uploadIntentId        String?              @unique @map("upload_intent_id")
+  format                ExportFileFormat
+  storageBucket         String               @map("storage_bucket")
+  storageKey            String               @unique @map("storage_key")
+  mimeType              String               @map("mime_type")
+  byteSize              Int                  @map("byte_size")
+  sha256                String
+  widthPx               Int?                 @map("width_px")
+  heightPx              Int?                 @map("height_px")
+  resolutionDpi         Int?                 @map("resolution_dpi")
+  isApprovedForPublish  Boolean              @default(false) @map("is_approved_for_publish")
+  ownerApprovedAt       DateTime?            @map("owner_approved_at")
+  ownerApprovedByUserId String?              @map("owner_approved_by_user_id")
+  publishedAt           DateTime?            @map("published_at")
+  createdAt             DateTime             @default(now()) @map("created_at")
+
+  organisation          Organisation         @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  designJob             DesignJob            @relation(fields: [designJobId], references: [id], onDelete: Cascade)
+  dispatch              CreativeJobDispatch? @relation(fields: [dispatchId], references: [id], onDelete: SetNull)
+  uploadedByAgent       CreativeAgent?       @relation(fields: [uploadedByAgentId], references: [id], onDelete: SetNull)
+  uploadedByUser        User?                @relation("ExportUploader", fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+  ownerApprovedByUser   User?                @relation("ExportOwnerApprover", fields: [ownerApprovedByUserId], references: [id], onDelete: SetNull)
+  uploadIntent          CreativeUploadIntent? @relation(fields: [uploadIntentId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, designJobId, createdAt])
+  @@index([dispatchId])
+  @@map("export_records")
+}
+
+model CreativeStorageCleanup {
+  id             String                       @id @default(cuid())
+  organisationId String                       @map("organisation_id")
+  bucket         String
+  objectKey      String                       @unique @map("object_key")
+  reason         CreativeStorageCleanupReason
+  status         StorageCleanupStatus         @default(PENDING)
+  attempts       Int                          @default(0)
+  lastError      String?                      @map("last_error")
+  nextRetryAt    DateTime                     @default(now()) @map("next_retry_at")
+  resolvedAt     DateTime?                    @map("resolved_at")
+  createdAt      DateTime                     @default(now()) @map("created_at")
+  updatedAt      DateTime                     @updatedAt @map("updated_at")
+
+  organisation   Organisation                 @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+
+  @@index([status, nextRetryAt])
+  @@index([organisationId, createdAt])
+  @@map("creative_storage_cleanups")
 }

@@ -2,9 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
+  APPROVED_DEV_CREATIVE_STORAGE_TARGET,
   APPROVED_DEV_STORAGE_TARGET,
+  assertKeyMatchesExportDeliverableScope,
   assertKeyMatchesMemberScope,
+  assertKeyMatchesTemplateMasterScope,
+  assertKeyMatchesTemplatePreviewScope,
+  assertKeyMatchesWorkingAssetScope,
+  buildExportDeliverableObjectKey,
   buildMemberPhotoObjectKey,
+  buildTemplateMasterObjectKey,
+  buildTemplatePreviewObjectKey,
+  buildWorkingAssetObjectKey,
+  getCreativeObjectStorageConfig,
   getObjectStorageConfig,
   StorageConfigError,
   StorageKeyViolationError,
@@ -455,5 +465,147 @@ describe('Object Storage Configuration & Exact Runtime Allowlist', () => {
       expect(content).not.toContain('lib/storage/object-storage');
       expect(content).not.toContain('lib/storage/image-processor');
     }
+  });
+
+  it('enforces dedicated crelune-dev-creative bucket isolation and rejects cross-bucket pairing', () => {
+    const creativeCfg = getCreativeObjectStorageConfig({
+      ...validDevEnv,
+      OBJECT_STORAGE_CREATIVE_BUCKET: APPROVED_DEV_CREATIVE_STORAGE_TARGET.bucket,
+    });
+    expect(creativeCfg.bucket).toBe('crelune-dev-creative');
+    expect(creativeCfg.branchId).toBe(APPROVED_DEV_CREATIVE_STORAGE_TARGET.branchId);
+
+    // Member-photo bucket must NOT satisfy creative bucket loader and vice versa
+    expect(() =>
+      getCreativeObjectStorageConfig({
+        ...validDevEnv,
+        OBJECT_STORAGE_CREATIVE_BUCKET: APPROVED_DEV_STORAGE_TARGET.bucket,
+      })
+    ).toThrow(StorageConfigError);
+
+    expect(() =>
+      getObjectStorageConfig({
+        ...validDevEnv,
+        OBJECT_STORAGE_BUCKET: APPROVED_DEV_CREATIVE_STORAGE_TARGET.bucket,
+      })
+    ).toThrow(StorageConfigError);
+
+    // Production fails closed when targeting crelune-dev-creative
+    expect(() =>
+      getCreativeObjectStorageConfig({
+        ...validDevEnv,
+        OBJECT_STORAGE_CREATIVE_BUCKET: APPROVED_DEV_CREATIVE_STORAGE_TARGET.bucket,
+        OBJECT_STORAGE_ENV_PREFIX: 'production',
+        NEON_BRANCH: 'production',
+        NEON_BRANCH_ID: 'br-withered-moon-be8coj8h',
+      })
+    ).toThrow(StorageConfigError);
+  });
+
+  it('enforces environment, organisation, and namespace key boundaries across templates, working assets, and exports', () => {
+    const masterKey = buildTemplateMasterObjectKey({
+      envPrefix: 'development',
+      organisationId: 'org_1',
+      templateId: 'tpl_1',
+      versionNumber: 2,
+      extension: 'psd',
+      objectId: 'obj_master_1',
+    });
+    expect(masterKey).toBe(
+      'development/organisations/org_1/templates/tpl_1/versions/v2/obj_master_1.psd'
+    );
+    expect(() =>
+      assertKeyMatchesTemplateMasterScope(masterKey, {
+        envPrefix: 'development',
+        organisationId: 'org_1',
+        templateId: 'tpl_1',
+        versionNumber: 2,
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertKeyMatchesTemplateMasterScope(masterKey, {
+        envPrefix: 'development',
+        organisationId: 'org_1',
+        templateId: 'tpl_1',
+        versionNumber: 1,
+      })
+    ).toThrow(StorageKeyViolationError);
+
+    const previewKey = buildTemplatePreviewObjectKey({
+      envPrefix: 'development',
+      organisationId: 'org_1',
+      templateId: 'tpl_1',
+      versionNumber: 2,
+      extension: 'webp',
+      objectId: 'obj_prev_1',
+    });
+    expect(previewKey).toBe(
+      'development/organisations/org_1/templates/tpl_1/previews/v2/obj_prev_1.webp'
+    );
+    expect(() =>
+      assertKeyMatchesTemplatePreviewScope(previewKey, {
+        envPrefix: 'development',
+        organisationId: 'org_1',
+        templateId: 'tpl_1',
+        versionNumber: 2,
+      })
+    ).not.toThrow();
+
+    const workingKey = buildWorkingAssetObjectKey({
+      envPrefix: 'development',
+      organisationId: 'org_1',
+      scopeId: 'disp_1',
+      extension: 'afphoto',
+      objectId: 'obj_work_1',
+    });
+    expect(workingKey).toBe(
+      'development/organisations/org_1/working_assets/disp_1/obj_work_1.afphoto'
+    );
+    expect(() =>
+      assertKeyMatchesWorkingAssetScope(workingKey, {
+        envPrefix: 'development',
+        organisationId: 'org_1',
+        scopeId: 'disp_1',
+      })
+    ).not.toThrow();
+
+    const exportKey = buildExportDeliverableObjectKey({
+      envPrefix: 'development',
+      organisationId: 'org_1',
+      designJobId: 'job_1',
+      extension: 'pdf',
+      objectId: 'obj_exp_1',
+    });
+    expect(exportKey).toBe(
+      'development/organisations/org_1/exports/jobs/job_1/obj_exp_1.pdf'
+    );
+    expect(() =>
+      assertKeyMatchesExportDeliverableScope(exportKey, {
+        envPrefix: 'development',
+        organisationId: 'org_1',
+        designJobId: 'job_1',
+      })
+    ).not.toThrow();
+
+    // Cross-namespace and path-traversal checks
+    expect(() =>
+      assertKeyMatchesExportDeliverableScope(workingKey, {
+        envPrefix: 'development',
+        organisationId: 'org_1',
+        designJobId: 'job_1',
+      })
+    ).toThrow(StorageKeyViolationError);
+
+    expect(() =>
+      assertKeyMatchesTemplateMasterScope(
+        'development/organisations/org_1/templates/tpl_1/versions/v2/../v1/obj.psd',
+        {
+          envPrefix: 'development',
+          organisationId: 'org_1',
+          templateId: 'tpl_1',
+          versionNumber: 2,
+        }
+      )
+    ).toThrow(StorageKeyViolationError);
   });
 });

@@ -24,6 +24,19 @@ export const AUDIT_ACTIONS = {
   DESIGN_JOB_CREATED: 'DESIGN_JOB_CREATED',
   DESIGN_JOB_UPDATED: 'DESIGN_JOB_UPDATED',
   DESIGN_JOB_STATUS_CHANGED: 'DESIGN_JOB_STATUS_CHANGED',
+  TEMPLATE_CREATED: 'TEMPLATE_CREATED',
+  TEMPLATE_UPDATED: 'TEMPLATE_UPDATED',
+  TEMPLATE_ARCHIVED: 'TEMPLATE_ARCHIVED',
+  TEMPLATE_VERSION_UPLOADED: 'TEMPLATE_VERSION_UPLOADED',
+  TEMPLATE_VERSION_ACTIVATED: 'TEMPLATE_VERSION_ACTIVATED',
+  TEMPLATE_MAPPINGS_UPDATED: 'TEMPLATE_MAPPINGS_UPDATED',
+  CREATIVE_AGENT_REGISTERED: 'CREATIVE_AGENT_REGISTERED',
+  CREATIVE_AGENT_REVOKED: 'CREATIVE_AGENT_REVOKED',
+  CREATIVE_DISPATCH_CREATED: 'CREATIVE_DISPATCH_CREATED',
+  CREATIVE_DISPATCH_CLAIMED: 'CREATIVE_DISPATCH_CLAIMED',
+  CREATIVE_DISPATCH_STATUS_CHANGED: 'CREATIVE_DISPATCH_STATUS_CHANGED',
+  EXPORT_RECORD_CREATED: 'EXPORT_RECORD_CREATED',
+  EXPORT_OWNER_APPROVAL_CHANGED: 'EXPORT_OWNER_APPROVAL_CHANGED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
@@ -54,6 +67,10 @@ const FORBIDDEN_METADATA_KEYS = new Set([
   'imagebytes',
   'accesskeyid',
   'secretaccesskey',
+  'agenttoken',
+  'claimtoken',
+  'manifestjson',
+  'detectlayersjson',
 ]);
 
 const MAX_METADATA_DEPTH = 3;
@@ -70,7 +87,14 @@ export interface RecordAuditEventInput {
     | 'BirthdayReminder'
     | 'Notification'
     | 'UserPreference'
-    | 'DesignJob';
+    | 'DesignJob'
+    | 'Template'
+    | 'TemplateVersion'
+    | 'TemplateFieldMapping'
+    | 'CreativeUploadIntent'
+    | 'CreativeAgent'
+    | 'CreativeJobDispatch'
+    | 'ExportRecord';
   entityId: string;
   metadata?: Record<string, unknown> | null;
 }
