@@ -16,6 +16,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "owner:create": "node scripts/create-owner.mjs",
     "db:push": "node -r dotenv/config node_modules/prisma/build/index.js db push --schema=packages/database/prisma/schema.prisma dotenv_config_path=.env.local",
+    "db:integrity": "node -r dotenv/config node_modules/prisma/build/index.js db execute --schema=packages/database/prisma/schema.prisma --file=packages/database/prisma/sql/milestone_5_1_1_integrity.sql dotenv_config_path=.env.local",
     "db:generate": "node -r dotenv/config node_modules/prisma/build/index.js generate --schema=packages/database/prisma/schema.prisma dotenv_config_path=.env.local"
   },
   "engines": {

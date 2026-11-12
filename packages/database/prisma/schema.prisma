@@ -146,6 +146,7 @@ model User {
   exportsUploaded           ExportRecord[]          @relation("ExportUploader")
   exportsOwnerApproved      ExportRecord[]          @relation("ExportOwnerApprover")
 
+  @@unique([organisationId, id])
   @@index([organisationId])
   @@map("users")
 }
@@ -369,13 +370,14 @@ model DesignJob {
 
   organisation          Organisation          @relation(fields: [organisationId], references: [id], onDelete: Restrict)
   member                Member?               @relation(fields: [memberId], references: [id], onDelete: SetNull)
-  template              Template?             @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  templateVersion       TemplateVersion?      @relation(fields: [templateVersionId], references: [id], onDelete: SetNull)
+  template              Template?             @relation(fields: [organisationId, templateId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  templateVersion       TemplateVersion?      @relation(fields: [organisationId, templateId, templateVersionId], references: [organisationId, templateId, id], onDelete: NoAction, onUpdate: NoAction)
   birthdayPreparations  BirthdayPreparation[]
   history               DesignJobHistory[]
   creativeDispatches    CreativeJobDispatch[]
   exportRecords         ExportRecord[]
 
+  @@unique([organisationId, id])
   @@index([organisationId, status])
   @@index([organisationId, memberId])
   @@index([organisationId, templateId])
@@ -496,11 +498,13 @@ model Template {
   updatedAt       DateTime           @updatedAt @map("updated_at")
 
   organisation    Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  createdByUser   User               @relation("TemplateCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByUser   User               @relation("TemplateCreator", fields: [organisationId, createdByUserId], references: [organisationId, id], onDelete: Restrict)
   versions        TemplateVersion[]  @relation("TemplateVersions")
-  activeVersion   TemplateVersion?   @relation("ActiveTemplateVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  activeVersion   TemplateVersion?   @relation("ActiveTemplateVersion", fields: [organisationId, id, activeVersionId], references: [organisationId, templateId, id], onDelete: NoAction, onUpdate: NoAction)
   designJobs      DesignJob[]
 
+  @@unique([organisationId, id])
+  @@unique([organisationId, id, activeVersionId])
   @@index([organisationId, category, isActive])
   @@index([organisationId, archivedAt])
   @@index([organisationId, normalizedName])
@@ -533,14 +537,17 @@ model TemplateVersion {
   createdAt          DateTime                 @default(now()) @map("created_at")
 
   organisation       Organisation             @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  template           Template                 @relation("TemplateVersions", fields: [templateId], references: [id], onDelete: Restrict)
+  template           Template                 @relation("TemplateVersions", fields: [organisationId, templateId], references: [organisationId, id], onDelete: Restrict)
   activeForTemplate  Template?                @relation("ActiveTemplateVersion")
-  uploadedByUser     User                     @relation("TemplateVersionUploader", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
-  uploadIntent       CreativeUploadIntent?    @relation(fields: [uploadIntentId], references: [id], onDelete: SetNull)
+  uploadedByUser     User                     @relation("TemplateVersionUploader", fields: [organisationId, uploadedByUserId], references: [organisationId, id], onDelete: Restrict)
+  uploadIntent       CreativeUploadIntent?    @relation(fields: [organisationId, uploadIntentId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
   fieldMappings      TemplateFieldMapping[]
   designJobs         DesignJob[]
   dispatches         CreativeJobDispatch[]
 
+  @@unique([organisationId, id])
+  @@unique([organisationId, templateId, id])
+  @@unique([organisationId, uploadIntentId])
   @@unique([templateId, versionNumber])
   @@index([organisationId, templateId, createdAt])
   @@map("template_versions")
@@ -561,7 +568,7 @@ model TemplateFieldMapping {
   updatedAt         DateTime          @updatedAt @map("updated_at")
 
   organisation      Organisation      @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  templateVersion   TemplateVersion   @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+  templateVersion   TemplateVersion   @relation(fields: [organisationId, templateVersionId], references: [organisationId, id], onDelete: Cascade)
 
   @@unique([templateVersionId, fieldKey])
   @@index([organisationId, templateVersionId])
@@ -591,11 +598,12 @@ model CreativeUploadIntent {
   updatedAt         DateTime             @updatedAt @map("updated_at")
 
   organisation      Organisation         @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  requestedByUser   User?                @relation("CreativeUploadRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
-  agent             CreativeAgent?       @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  requestedByUser   User?                @relation("CreativeUploadRequester", fields: [organisationId, requestedByUserId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  agent             CreativeAgent?       @relation(fields: [organisationId, agentId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
   templateVersion   TemplateVersion?
   exportRecord      ExportRecord?
 
+  @@unique([organisationId, id])
   @@index([organisationId, status, expiresAt])
   @@index([agentId, status])
   @@map("creative_upload_intents")
@@ -621,12 +629,13 @@ model CreativeAgent {
   updatedAt          DateTime              @updatedAt @map("updated_at")
 
   organisation       Organisation          @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  registeredByUser   User                  @relation("CreativeAgentRegistrar", fields: [registeredByUserId], references: [id], onDelete: Restrict)
-  revokedByUser      User?                 @relation("CreativeAgentRevoker", fields: [revokedByUserId], references: [id], onDelete: SetNull)
+  registeredByUser   User                  @relation("CreativeAgentRegistrar", fields: [organisationId, registeredByUserId], references: [organisationId, id], onDelete: Restrict)
+  revokedByUser      User?                 @relation("CreativeAgentRevoker", fields: [organisationId, revokedByUserId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
   dispatches         CreativeJobDispatch[]
   uploadIntents      CreativeUploadIntent[]
   exportRecords      ExportRecord[]
 
+  @@unique([organisationId, id])
   @@index([organisationId, status])
   @@map("creative_agents")
 }
@@ -654,12 +663,14 @@ model CreativeJobDispatch {
   updatedAt         DateTime               @updatedAt @map("updated_at")
 
   organisation      Organisation           @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  designJob         DesignJob              @relation(fields: [designJobId], references: [id], onDelete: Cascade)
-  templateVersion   TemplateVersion        @relation(fields: [templateVersionId], references: [id], onDelete: Restrict)
-  assignedAgent     CreativeAgent?         @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
-  requestedByUser   User                   @relation("CreativeDispatchRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  designJob         DesignJob              @relation(fields: [organisationId, designJobId], references: [organisationId, id], onDelete: Cascade)
+  templateVersion   TemplateVersion        @relation(fields: [organisationId, templateVersionId], references: [organisationId, id], onDelete: Restrict)
+  assignedAgent     CreativeAgent?         @relation(fields: [organisationId, assignedAgentId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  requestedByUser   User                   @relation("CreativeDispatchRequester", fields: [organisationId, requestedByUserId], references: [organisationId, id], onDelete: Restrict)
   exportRecords     ExportRecord[]
 
+  @@unique([organisationId, id])
+  @@unique([organisationId, designJobId, id])
   @@index([organisationId, status, createdAt])
   @@index([designJobId, createdAt])
   @@index([assignedAgentId, status])
@@ -690,13 +701,14 @@ model ExportRecord {
   createdAt             DateTime             @default(now()) @map("created_at")
 
   organisation          Organisation         @relation(fields: [organisationId], references: [id], onDelete: Restrict)
-  designJob             DesignJob            @relation(fields: [designJobId], references: [id], onDelete: Cascade)
-  dispatch              CreativeJobDispatch? @relation(fields: [dispatchId], references: [id], onDelete: SetNull)
-  uploadedByAgent       CreativeAgent?       @relation(fields: [uploadedByAgentId], references: [id], onDelete: SetNull)
-  uploadedByUser        User?                @relation("ExportUploader", fields: [uploadedByUserId], references: [id], onDelete: SetNull)
-  ownerApprovedByUser   User?                @relation("ExportOwnerApprover", fields: [ownerApprovedByUserId], references: [id], onDelete: SetNull)
-  uploadIntent          CreativeUploadIntent? @relation(fields: [uploadIntentId], references: [id], onDelete: SetNull)
+  designJob             DesignJob            @relation(fields: [organisationId, designJobId], references: [organisationId, id], onDelete: Cascade)
+  dispatch              CreativeJobDispatch? @relation(fields: [organisationId, designJobId, dispatchId], references: [organisationId, designJobId, id], onDelete: NoAction, onUpdate: NoAction)
+  uploadedByAgent       CreativeAgent?       @relation(fields: [organisationId, uploadedByAgentId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  uploadedByUser        User?                @relation("ExportUploader", fields: [organisationId, uploadedByUserId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  ownerApprovedByUser   User?                @relation("ExportOwnerApprover", fields: [organisationId, ownerApprovedByUserId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  uploadIntent          CreativeUploadIntent? @relation(fields: [organisationId, uploadIntentId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
 
+  @@unique([organisationId, uploadIntentId])
   @@index([organisationId, designJobId, createdAt])
   @@index([dispatchId])
   @@map("export_records")
