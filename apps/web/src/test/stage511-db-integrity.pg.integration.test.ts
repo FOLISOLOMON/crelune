@@ -1,8 +1,42 @@
 import crypto from 'node:crypto';
+import { PrismaClient } from '@prisma/client';
 import { prisma } from '@crelune/database';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildTemplateMasterObjectKey } from '../lib/storage/storage-config';
 import { assertSafeDevDatabaseEnvironment } from './assert-dev-db';
+
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForDesignJobsLockWait(
+  observer: PrismaClient,
+  timeoutMs = 15_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await observer.$queryRaw<Array<{ waiting: bigint | number }>>`
+      SELECT COUNT(*) AS waiting
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+        AND wait_event IN ('transactionid', 'tuple')
+    `;
+    if (Number(rows[0]?.waiting ?? 0) > 0) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  throw new Error('Timed out waiting for PostgreSQL row-lock wait.');
+}
 
 describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Version Consistency & Immutability (Neon Dev)', () => {
   const runId = `s511_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
@@ -944,5 +978,213 @@ describe('PostgreSQL Stage 5.1.1 Integrity Hardening: Organisation Isolation, Ve
     await expect(
       prisma.templateVersion.delete({ where: { id: versionA1v2Id } })
     ).rejects.toThrow();
+  });
+
+  it('Scenario A: serializes concurrent DesignJob template update behind in-flight CreativeJobDispatch insert and rejects mismatch', async () => {
+    const connUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+    const client1 = new PrismaClient({ datasources: { db: { url: connUrl } } });
+    const client2 = new PrismaClient({ datasources: { db: { url: connUrl } } });
+
+    const concJob = await prisma.designJob.create({
+      data: {
+        organisationId: orgAId,
+        title: `Concurrency Scenario A ${runId}`,
+        category: 'EVENT_ANNOUNCEMENT',
+        templateId: templateA1Id,
+        templateVersionId: versionA1v1Id,
+      },
+    });
+
+    const dispatchInserted = createDeferred();
+    const allowDispatchCommit = createDeferred();
+    let updateSettled = false;
+
+    try {
+      const tx1Promise = client1.$transaction(
+        async (tx1) => {
+          await tx1.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+          const created = await tx1.creativeJobDispatch.create({
+            data: {
+              organisationId: orgAId,
+              designJobId: concJob.id,
+              templateVersionId: versionA1v1Id,
+              requestedByUserId: userAId,
+              idempotencyKey: `conc_a_disp_${runId}`,
+              manifestJson: { manifestVersion: 1 },
+            },
+          });
+          dispatchInserted.resolve();
+          await allowDispatchCommit.promise;
+          return created;
+        },
+        { maxWait: 15_000, timeout: 30_000 }
+      );
+
+      await dispatchInserted.promise;
+
+      const tx2Promise = client2
+        .$transaction(
+          async (tx2) => {
+            await tx2.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+            return tx2.designJob.update({
+              where: { id: concJob.id },
+              data: {
+                templateId: templateA2Id,
+                templateVersionId: versionA2v1Id,
+              },
+            });
+          },
+          { maxWait: 15_000, timeout: 30_000 }
+        )
+        .finally(() => {
+          updateSettled = true;
+        });
+
+      const tx2Rejection = expect(tx2Promise).rejects.toThrow(
+        /conflicts with active CreativeJobDispatch/i
+      );
+
+      // Deterministic verification: tx2 must be blocked in PostgreSQL on design_jobs row lock while tx1 is uncommitted
+      await waitForDesignJobsLockWait(prisma, 15_000);
+      expect(updateSettled).toBe(false);
+
+      // Release tx1 so it commits the dispatch; tx2 then wakes up, sees committed dispatch, and must reject
+      allowDispatchCommit.resolve();
+
+      const [committedDispatch] = await Promise.all([tx1Promise, tx2Rejection]);
+      expect(committedDispatch.templateVersionId).toBe(versionA1v1Id);
+
+      // Verify committed DB state is strictly consistent
+      const persistedJob = await prisma.designJob.findUniqueOrThrow({
+        where: { id: concJob.id },
+      });
+      expect(persistedJob.templateId).toBe(templateA1Id);
+      expect(persistedJob.templateVersionId).toBe(versionA1v1Id);
+
+      const persistedDispatches = await prisma.creativeJobDispatch.findMany({
+        where: { designJobId: concJob.id },
+      });
+      expect(persistedDispatches).toHaveLength(1);
+      expect(persistedDispatches[0]?.templateVersionId).toBe(versionA1v1Id);
+
+      // Preserve cancelled-dispatch handling: cancelling unlocks template change
+      await prisma.creativeJobDispatch.update({
+        where: { id: committedDispatch.id },
+        data: { status: 'CANCELLED' },
+      });
+      const switchedAfterCancel = await prisma.designJob.update({
+        where: { id: concJob.id },
+        data: { templateId: templateA2Id, templateVersionId: versionA2v1Id },
+      });
+      expect(switchedAfterCancel.templateId).toBe(templateA2Id);
+      expect(switchedAfterCancel.templateVersionId).toBe(versionA2v1Id);
+    } finally {
+      allowDispatchCommit.resolve();
+      await Promise.allSettled([client1.$disconnect(), client2.$disconnect()]);
+    }
+  });
+
+  it('Scenario B: blocks concurrent CreativeJobDispatch behind in-flight DesignJob template update and validates committed parent state', async () => {
+    const connUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+    const client1 = new PrismaClient({ datasources: { db: { url: connUrl } } });
+    const client2 = new PrismaClient({ datasources: { db: { url: connUrl } } });
+
+    const concJob = await prisma.designJob.create({
+      data: {
+        organisationId: orgAId,
+        title: `Concurrency Scenario B ${runId}`,
+        category: 'EVENT_ANNOUNCEMENT',
+        templateId: templateA1Id,
+        templateVersionId: versionA1v1Id,
+      },
+    });
+
+    const templateUpdated = createDeferred();
+    const allowTemplateCommit = createDeferred();
+    let dispatchSettled = false;
+
+    try {
+      const tx1Promise = client1.$transaction(
+        async (tx1) => {
+          await tx1.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+          const updated = await tx1.designJob.update({
+            where: { id: concJob.id },
+            data: {
+              templateId: templateA2Id,
+              templateVersionId: versionA2v1Id,
+            },
+          });
+          templateUpdated.resolve();
+          await allowTemplateCommit.promise;
+          return updated;
+        },
+        { maxWait: 15_000, timeout: 30_000 }
+      );
+
+      await templateUpdated.promise;
+
+      const tx2Promise = client2
+        .$transaction(
+          async (tx2) => {
+            await tx2.$executeRawUnsafe(`SET LOCAL lock_timeout = '15s'`);
+            return tx2.creativeJobDispatch.create({
+              data: {
+                organisationId: orgAId,
+                designJobId: concJob.id,
+                // Deliberately references the PREVIOUS template version (T1 v1)
+                templateVersionId: versionA1v1Id,
+                requestedByUserId: userAId,
+                idempotencyKey: `conc_b_disp_${runId}`,
+                manifestJson: { manifestVersion: 1 },
+              },
+            });
+          },
+          { maxWait: 15_000, timeout: 30_000 }
+        )
+        .finally(() => {
+          dispatchSettled = true;
+        });
+
+      const tx2Rejection = expect(tx2Promise).rejects.toThrow(/expected DesignJob template/i);
+
+      // Deterministic verification: tx2 must wait for tx1's row lock on design_jobs rather than reading stale state
+      await waitForDesignJobsLockWait(prisma, 15_000);
+      expect(dispatchSettled).toBe(false);
+
+      // Commit tx1 (T2/v2); tx2 then wakes up, re-reads committed parent T2/v2, and must reject T1/v1 dispatch
+      allowTemplateCommit.resolve();
+
+      const [committedJob] = await Promise.all([tx1Promise, tx2Rejection]);
+      expect(committedJob.templateId).toBe(templateA2Id);
+      expect(committedJob.templateVersionId).toBe(versionA2v1Id);
+
+      // Verify committed DB state is strictly consistent: T2/v2 with zero stale dispatches
+      const persistedJob = await prisma.designJob.findUniqueOrThrow({
+        where: { id: concJob.id },
+      });
+      expect(persistedJob.templateId).toBe(templateA2Id);
+      expect(persistedJob.templateVersionId).toBe(versionA2v1Id);
+
+      const persistedDispatches = await prisma.creativeJobDispatch.findMany({
+        where: { designJobId: concJob.id },
+      });
+      expect(persistedDispatches).toHaveLength(0);
+
+      // And a subsequent dispatch matching the newly committed T2/v2 succeeds cleanly
+      const validDispatch = await prisma.creativeJobDispatch.create({
+        data: {
+          organisationId: orgAId,
+          designJobId: concJob.id,
+          templateVersionId: versionA2v1Id,
+          requestedByUserId: userAId,
+          idempotencyKey: `conc_b_valid_${runId}`,
+          manifestJson: { manifestVersion: 1 },
+        },
+      });
+      expect(validDispatch.templateVersionId).toBe(versionA2v1Id);
+    } finally {
+      allowTemplateCommit.resolve();
+      await Promise.allSettled([client1.$disconnect(), client2.$disconnect()]);
+    }
   });
 });

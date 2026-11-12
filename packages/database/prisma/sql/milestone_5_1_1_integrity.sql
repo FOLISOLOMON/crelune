@@ -1,5 +1,5 @@
 -- =============================================================================
--- CRELUNE Milestone 5.1.1 — PostgreSQL Database Integrity Triggers
+-- CRELUNE Milestone 5.1.1 / 5.1.2 — PostgreSQL Database Integrity Triggers
 --
 -- Complements Prisma composite unique constraints and composite foreign keys in
 -- `packages/database/prisma/schema.prisma` for invariants that cannot be
@@ -8,14 +8,31 @@
 --      (closing PostgreSQL MATCH SIMPLE multi-column FK null bypass) and keeps
 --      design_jobs aligned with active creative_job_dispatches.
 --   2. Enforces `creative_job_dispatches` organisation, template, and version
---      consistency against the parent `design_jobs` row.
+--      consistency against the parent `design_jobs` row under concurrency.
 --   3. Enforces `template_versions` immutability for file identity and
 --      integrity columns while allowing controlled inspection metadata updates.
+--
+-- Concurrency & Locking Strategy (Milestone 5.1.2):
+--   - Every parent `design_jobs` row is the single serialization point for
+--     template/version changes and dispatch creation/reassignment on that job.
+--   - `UPDATE design_jobs` acquires a row-level `FOR NO KEY UPDATE` tuple lock
+--     on the target `design_jobs` row before running its `BEFORE UPDATE`
+--     trigger (`crelune_enforce_design_job_template_consistency`).
+--   - `INSERT` or active `UPDATE` on `creative_job_dispatches` acquires
+--     `SELECT ... FROM design_jobs WHERE id = NEW.design_job_id FOR NO KEY UPDATE`
+--     inside `crelune_enforce_dispatch_template_consistency` before reading the
+--     parent job's `template_id` / `template_version_id`.
+--   - Because `FOR NO KEY UPDATE` conflicts with `UPDATE` and other
+--     `FOR NO KEY UPDATE` locks on the same `design_jobs` row, concurrent
+--     operations on the same job serialize in either direction without global
+--     locks or cross-organisation contention, and PostgreSQL re-reads the
+--     committed parent state after lock acquisition.
 --
 -- Limitations:
 --   - Triggers execute inside PostgreSQL for all SQL/Prisma writes, including
 --     direct SQL connections, but a superuser or table owner executing DDL
---     (`ALTER TABLE ... DISABLE TRIGGER` or `DROP TRIGGER`) can bypass them.
+--     (`ALTER TABLE ... DISABLE TRIGGER` or `DROP TRIGGER`) or a session with
+--     `session_replication_role = replica` can bypass them.
 --   - Idempotent (`CREATE OR REPLACE FUNCTION`, `DROP TRIGGER IF EXISTS` +
 --     `CREATE TRIGGER`); apply via `DATABASE_URL_UNPOOLED` / `npm run db:integrity`.
 -- =============================================================================
@@ -79,10 +96,24 @@ DECLARE
   v_job RECORD;
   v_version RECORD;
 BEGIN
+  -- Terminal status transitions (e.g. cancelling or failing an existing dispatch)
+  -- that do not alter organisation, job, or template version cannot introduce
+  -- an active-dispatch template mismatch.
+  IF TG_OP = 'UPDATE'
+     AND NEW.status IN ('CANCELLED', 'FAILED')
+     AND NEW.organisation_id IS NOT DISTINCT FROM OLD.organisation_id
+     AND NEW.design_job_id IS NOT DISTINCT FROM OLD.design_job_id
+     AND NEW.template_version_id IS NOT DISTINCT FROM OLD.template_version_id THEN
+    RETURN NEW;
+  END IF;
+
+  -- Serialize against concurrent DesignJob template/version updates and other
+  -- dispatches for the same DesignJob by locking the parent DesignJob row.
   SELECT organisation_id, template_id, template_version_id
     INTO v_job
     FROM design_jobs
-   WHERE id = NEW.design_job_id;
+   WHERE id = NEW.design_job_id
+     FOR NO KEY UPDATE;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION
@@ -142,7 +173,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_creative_job_dispatches_template_consistency ON creative_job_dispatches;
 CREATE TRIGGER trg_creative_job_dispatches_template_consistency
-  BEFORE INSERT OR UPDATE OF organisation_id, design_job_id, template_version_id
+  BEFORE INSERT OR UPDATE OF organisation_id, design_job_id, template_version_id, status
   ON creative_job_dispatches
   FOR EACH ROW
   EXECUTE FUNCTION crelune_enforce_dispatch_template_consistency();
