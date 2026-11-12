@@ -57,3 +57,5 @@ Stage 5.2 delivers the production-oriented Template Management backend while pre
 
 Following Product Owner review of Stage 5.2 (`3a5ec077b960ebb776cab26a46c9cc0faaa8025e`), targeted upload-integrity, worker-isolation, and cleanup-timing corrections were implemented in [MILESTONE_5_2_1_UPLOAD_INTEGRITY_CORRECTIONS.md](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_5_2_1_UPLOAD_INTEGRITY_CORRECTIONS.md).
 
+Following Product Owner review of Stage 5.2.1 (`468684e`), automatic PSD parsing was disabled in favour of minimal bounded header validation and manual Affinity fallback in [MILESTONE_5_2_2_SAFE_PSD_INSPECTION_FALLBACK.md](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_5_2_2_SAFE_PSD_INSPECTION_FALLBACK.md).
+

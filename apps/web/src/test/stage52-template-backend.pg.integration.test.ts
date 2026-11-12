@@ -292,25 +292,32 @@ describe('Milestone 5 Stage 5.2 Template Backend (PostgreSQL + Neon Object Stora
     });
     expect(previewPut.ok).toBe(true);
 
-    // 4. Complete version v1
+    // 4. Complete version v1 (PSD header validated; manual inspection fallback)
     const v1Res = await completeTemplateVersionUpload(actorA, created.id, {
       uploadIntentId: masterIntent1.intent.id,
       previewUploadIntentId: previewIntent.intent.id,
       activateImmediately: true,
     });
     const v1 = v1Res.version;
+    expect(v1Res.inspection).toBeNull();
+    expect(v1Res.editabilityVerified).toBe(false);
     expect(v1.versionNumber).toBe(1);
-    expect(v1.inspectionStatus).toBe('INSPECTED');
+    expect(v1.inspectionStatus).toBe('MANUAL_REQUIRED');
+    expect(v1.inspectionSummary).toContain('manually in Affinity');
+    expect(v1.inspectedAt).toBeNull();
     expect(v1.widthPx).toBe(1200);
     expect(v1.heightPx).toBe(1500);
     expect(v1.byteSize).toBe(psdBytes.byteLength);
     expect(v1.sha256).toBe(psdSha);
     expect(v1.hasPreview).toBe(true);
-    expect(v1.detectedLayers?.editabilityVerified).toBe(false);
-    expect(v1.detectedLayers?.extractedMetadataOnly).toBe(true);
-    expect(v1.detectedLayers?.layers.some((l) => l.name === 'Celebrant Name')).toBe(
-      true
-    );
+    expect(v1.detectedLayers).toBeNull();
+
+    const v1Row = await prisma.templateVersion.findUniqueOrThrow({
+      where: { id: v1.id },
+      select: { detectedLayersJson: true, inspectionStatus: true },
+    });
+    expect(v1Row.inspectionStatus).toBe('MANUAL_REQUIRED');
+    expect(v1Row.detectedLayersJson).toBeNull();
 
     // Preview binary download matches
     const downloadedPreview = await getTemplateVersionPreview(

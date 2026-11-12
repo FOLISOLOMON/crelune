@@ -13,16 +13,16 @@ import {
 import { DESIGN_CATEGORIES } from './design-job.js';
 
 describe('Template & Creative Workflow Domain Rules (Stage 5.1)', () => {
-  it('enforces honest capability truth between PSD inspection and native Affinity opacity', () => {
+  it('enforces honest capability truth for manual PSD and native Affinity fallback', () => {
     const psd = getTemplateFormatCapabilities('PSD');
     expect(psd).toEqual({
       format: 'PSD',
       isNativeAffinity: false,
-      supportsNodeLayerInspection: true,
-      requiresManualMappingFallback: false,
+      supportsNodeLayerInspection: false,
+      requiresManualMappingFallback: true,
       supportsAffinityOpen: true,
       preserveMasterImmutable: true,
-      recommendedDefaultInspectionStatus: 'PENDING',
+      recommendedDefaultInspectionStatus: 'MANUAL_REQUIRED',
     });
 
     for (const nativeFmt of ['AF', 'AFPHOTO', 'AFDESIGN', 'AFPUB'] as const) {

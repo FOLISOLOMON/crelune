@@ -1,47 +1,26 @@
 /**
- * CRELUNE — Bounded Read-Only PSD Layer Inspector (`@webtoon/psd` Worker-Isolated Adapter)
+ * CRELUNE — Minimal Bounded PSD Header Validator (Stage 5.2.2 Safe Fallback)
  *
- * Isolates `Psd.parse()` inside a terminable Node `worker_threads.Worker` with:
- *  - Empty environment (`env: {}`) so the parser never accesses DB/storage/session secrets
- *  - Explicit V8 heap `resourceLimits` (`256 MB` old generation, `64 MB` young generation)
- *  - Real wall-clock deadline that calls `worker.terminate()` on timeout
- *  - Bounded input transfer (`<= 100 MB`) and bounded output payload (`<= 1 MiB`)
+ * Automatic PSD layer parsing is disabled in production workflows.
+ * Uploaded PSD files undergo only minimal, bounded 26-byte header validation:
+ *  - File size <= 100 MB (CREATIVE_BYTE_LIMITS.TEMPLATE_MASTER_MAX_BYTES)
+ *  - Adobe PSD magic signature ("8BPS")
+ *  - Standard PSD v1 format (version === 1; PSB v2 rejected)
+ *  - Valid canvas dimensions (1..30,000px)
  *
- * Extracted layer metadata NEVER implies live editability inside Affinity 3.3
- * (`editabilityVerified: false` always).
+ * Layer inspection and field mapping must be completed manually in Affinity.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { Worker } from 'node:worker_threads';
-import {
-  DEFAULT_PSD_INSPECTION_LIMITS,
-  psdInspectionResultSchema,
-  type PsdInspectInput,
-  type PsdInspectionLimits,
-  type PsdInspectionResult,
-  type PsdLayerInspector,
-} from '@crelune/shared';
+import { CREATIVE_BYTE_LIMITS } from '@crelune/shared';
 
-export const PSD_INSPECTOR_ENGINE_ID = 'webtoon-psd-0.4.0' as const;
-const MAX_PSD_DIMENSION_PX = 30_000;
-const PSD_HEADER_MIN_BYTES = 26;
-
-export const PSD_WORKER_RESOURCE_LIMITS = {
-  maxOldGenerationSizeMb: 256,
-  maxYoungGenerationSizeMb: 64,
-  codeRangeSizeMb: 16,
-} as const;
+export const MAX_PSD_DIMENSION_PX = 30_000;
+export const PSD_HEADER_MIN_BYTES = 26;
 
 export type PsdInspectionErrorCode =
   | 'INVALID_PSD_HEADER'
   | 'UNSUPPORTED_PSD_VERSION'
   | 'PSD_SIZE_EXCEEDED'
-  | 'PSD_DIMENSIONS_INVALID'
-  | 'PSD_PARSE_FAILED'
-  | 'PSD_INSPECTION_TIMEOUT'
-  | 'PSD_OUTPUT_EXCEEDED'
-  | 'PSD_WORKER_TERMINATED';
+  | 'PSD_DIMENSIONS_INVALID';
 
 export class PsdInspectionError extends Error {
   constructor(
@@ -53,22 +32,17 @@ export class PsdInspectionError extends Error {
   }
 }
 
-function resolveLimits(partial?: Partial<PsdInspectionLimits>): PsdInspectionLimits {
-  return {
-    maxFileBytes:
-      partial?.maxFileBytes ?? DEFAULT_PSD_INSPECTION_LIMITS.maxFileBytes,
-    maxLayerNodes:
-      partial?.maxLayerNodes ?? DEFAULT_PSD_INSPECTION_LIMITS.maxLayerNodes,
-    maxGroupDepth:
-      partial?.maxGroupDepth ?? DEFAULT_PSD_INSPECTION_LIMITS.maxGroupDepth,
-    maxTextPreviewChars:
-      partial?.maxTextPreviewChars ??
-      DEFAULT_PSD_INSPECTION_LIMITS.maxTextPreviewChars,
-    timeoutMs: partial?.timeoutMs ?? DEFAULT_PSD_INSPECTION_LIMITS.timeoutMs,
-  };
+export interface PsdHeaderValidationResult {
+  version: 1;
+  widthPx: number;
+  heightPx: number;
+  editabilityVerified: false;
 }
 
-function assertValidPsdHeader(buffer: Uint8Array, maxFileBytes: number): void {
+export function validatePsdHeader(
+  buffer: Uint8Array,
+  maxFileBytes: number = CREATIVE_BYTE_LIMITS.TEMPLATE_MASTER_MAX_BYTES
+): PsdHeaderValidationResult {
   if (buffer.byteLength > maxFileBytes) {
     throw new PsdInspectionError(
       `PSD file exceeds maximum allowed size of ${maxFileBytes} bytes.`,
@@ -119,143 +93,11 @@ function assertValidPsdHeader(buffer: Uint8Array, maxFileBytes: number): void {
       'PSD_DIMENSIONS_INVALID'
     );
   }
+
+  return {
+    version: 1,
+    widthPx: width,
+    heightPx: height,
+    editabilityVerified: false,
+  };
 }
-
-function resolveDefaultWorkerScriptPath(): string {
-  const candidates = [
-    path.resolve(process.cwd(), 'src/lib/templates/psd-parse-worker.mjs'),
-    path.resolve(process.cwd(), 'apps/web/src/lib/templates/psd-parse-worker.mjs'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  throw new PsdInspectionError(
-    'PSD inspection worker script is unavailable in the runtime environment.',
-    'PSD_PARSE_FAILED'
-  );
-}
-
-type WorkerPayload =
-  | { ok: true; result: unknown }
-  | { ok: false; code: PsdInspectionErrorCode; message: string };
-
-export class WebtoonPsdLayerInspector implements PsdLayerInspector {
-  public readonly engineId = PSD_INSPECTOR_ENGINE_ID;
-  private readonly workerScriptPath?: string;
-
-  constructor(options?: { workerScriptPath?: string }) {
-    this.workerScriptPath = options?.workerScriptPath;
-  }
-
-  async inspectBuffer(input: PsdInspectInput): Promise<PsdInspectionResult> {
-    const limits = resolveLimits(input.limits);
-    assertValidPsdHeader(input.buffer, limits.maxFileBytes);
-
-    const workerPath = this.workerScriptPath ?? resolveDefaultWorkerScriptPath();
-    const copy = new Uint8Array(input.buffer.byteLength);
-    copy.set(input.buffer);
-    const transferredBuffer: ArrayBuffer = copy.buffer;
-
-    return new Promise<PsdInspectionResult>((resolve, reject) => {
-      let settled = false;
-
-      const worker = new Worker(workerPath, {
-        env: {},
-        resourceLimits: { ...PSD_WORKER_RESOURCE_LIMITS },
-        workerData: {
-          arrayBuffer: transferredBuffer,
-          limits,
-          maxDimensionPx: MAX_PSD_DIMENSION_PX,
-          engineId: this.engineId,
-        },
-        transferList: [transferredBuffer],
-      });
-
-      const timer = setTimeout(() => {
-        void worker.terminate();
-        finish(() => {
-          reject(
-            new PsdInspectionError(
-              'PSD inspection timed out under bounded worker execution limits.',
-              'PSD_INSPECTION_TIMEOUT'
-            )
-          );
-        });
-      }, limits.timeoutMs);
-
-      const finish = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        fn();
-      };
-
-      worker.once('message', (msg: WorkerPayload) => {
-        void worker.terminate();
-        if (!msg || typeof msg !== 'object') {
-          finish(() => {
-            reject(
-              new PsdInspectionError(
-                'PSD inspection worker returned an invalid response.',
-                'PSD_PARSE_FAILED'
-              )
-            );
-          });
-          return;
-        }
-        if (!msg.ok) {
-          finish(() => {
-            reject(new PsdInspectionError(msg.message, msg.code));
-          });
-          return;
-        }
-
-        const parsed = psdInspectionResultSchema.safeParse(msg.result);
-        if (!parsed.success) {
-          finish(() => {
-            reject(
-              new PsdInspectionError(
-                'PSD inspection output failed schema validation.',
-                'PSD_PARSE_FAILED'
-              )
-            );
-          });
-          return;
-        }
-
-        finish(() => {
-          resolve(parsed.data);
-        });
-      });
-
-      worker.once('error', () => {
-        void worker.terminate();
-        finish(() => {
-          reject(
-            new PsdInspectionError(
-              'PSD inspection worker failed during bounded parsing.',
-              'PSD_PARSE_FAILED'
-            )
-          );
-        });
-      });
-
-      worker.once('exit', (code) => {
-        if (!settled && code !== 0) {
-          finish(() => {
-            reject(
-              new PsdInspectionError(
-                'PSD inspection worker terminated unexpectedly under resource bounds.',
-                'PSD_WORKER_TERMINATED'
-              )
-            );
-          });
-        }
-      });
-    });
-  }
-}
-
-export const defaultPsdLayerInspector = new WebtoonPsdLayerInspector();

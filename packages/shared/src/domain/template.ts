@@ -162,8 +162,10 @@ export function isNativeAffinityFormat(
 }
 
 /**
- * Capability truth table grounded in Stage 5.0 Milestone 1 findings:
- * - PSD supports automated metadata inspection (bounded layer tree) in Stage 5.2+.
+ * Capability truth table grounded in Stage 5.0 Milestone 1 and Stage 5.2.2 findings:
+ * - PSD automatic layer parsing is disabled in production; uploaded PSDs undergo
+ *   bounded header validation only and require manual layer inspection & field
+ *   mapping in Affinity.
  * - Native Affinity formats (.af, .afphoto, .afdesign, .afpub) remain opaque binaries
  *   and must default to manual mapping fallback rather than pretending automated parsing exists.
  */
@@ -174,13 +176,11 @@ export function getTemplateFormatCapabilities(
   return {
     format,
     isNativeAffinity: nativeAffinity,
-    supportsNodeLayerInspection: format === 'PSD',
-    requiresManualMappingFallback: nativeAffinity,
+    supportsNodeLayerInspection: false,
+    requiresManualMappingFallback: true,
     supportsAffinityOpen: true,
     preserveMasterImmutable: true,
-    recommendedDefaultInspectionStatus: nativeAffinity
-      ? 'MANUAL_REQUIRED'
-      : 'PENDING',
+    recommendedDefaultInspectionStatus: 'MANUAL_REQUIRED',
   };
 }
 

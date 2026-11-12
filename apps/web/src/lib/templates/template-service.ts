@@ -30,7 +30,6 @@ import {
   type CreativeUploadIntentSummary,
   type PresignedUploadTarget,
   type PsdInspectionResult,
-  type PsdLayerInspector,
   type TemplateDetail,
   type TemplateFieldMappingSummary,
   type TemplateFileFormat,
@@ -61,8 +60,8 @@ import {
   type CreativePreviewExtension,
 } from '@/lib/storage/storage-config';
 import {
-  defaultPsdLayerInspector,
   PsdInspectionError,
+  validatePsdHeader,
 } from '@/lib/templates/psd-inspector';
 
 function detectPreviewImageMagicMime(
@@ -173,7 +172,6 @@ export class UploadIntentExpiredError extends Error {
 
 export interface TemplateServiceDependencies {
   storage?: CreativeObjectStorageProvider;
-  psdInspector?: PsdLayerInspector;
   now?: () => Date;
 }
 
@@ -1063,9 +1061,9 @@ export async function completeTemplateVersionUpload(
   template: TemplateDetail;
   version: TemplateVersionDetail;
   inspection: PsdInspectionResult | null;
+  editabilityVerified: false;
 }> {
   const storage = deps.storage ?? createCreativeObjectStorageProvider();
-  const psdInspector = deps.psdInspector ?? defaultPsdLayerInspector;
   const now = (deps.now ?? (() => new Date()))();
 
   const templateExists = await prisma.template.findFirst({
@@ -1218,30 +1216,27 @@ export async function completeTemplateVersionUpload(
   const leafFilename =
     masterIntent.storageKey.split('/').pop() ?? `template.${format.toLowerCase()}`;
 
-  let inspectionResult: PsdInspectionResult | null = null;
+  const inspectionResult: PsdInspectionResult | null = null;
   let widthPx: number | null = input.widthPx ?? null;
   let heightPx: number | null = input.heightPx ?? null;
-  let inspectionStatus: 'INSPECTED' | 'MANUAL_REQUIRED' =
+  const inspectionStatus: 'MANUAL_REQUIRED' =
     capabilities.recommendedDefaultInspectionStatus === 'MANUAL_REQUIRED'
       ? 'MANUAL_REQUIRED'
-      : 'INSPECTED';
+      : 'MANUAL_REQUIRED';
   let inspectionSummary =
     'Native Affinity document registered; manual layer mapping required in Affinity 3.3.';
-  let inspectedAt: Date | null = null;
+  const inspectedAt: Date | null = null;
 
   if (format === 'PSD') {
     try {
-      inspectionResult = await psdInspector.inspectBuffer({
-        buffer: masterBytes,
-        filename: leafFilename,
-      });
-      widthPx = inspectionResult.widthPx;
-      heightPx = inspectionResult.heightPx;
-      inspectionStatus = 'INSPECTED';
+      const psdHeader = validatePsdHeader(
+        masterBytes,
+        masterIntent.maxAllowedBytes
+      );
+      widthPx = input.widthPx ?? psdHeader.widthPx;
+      heightPx = input.heightPx ?? psdHeader.heightPx;
       inspectionSummary =
-        inspectionResult.summary ??
-        'Extracted PSD layer metadata; Affinity 3.3 editability requires artist verification.';
-      inspectedAt = now;
+        'PSD header validated; automatic layer inspection is disabled for safety. Complete layer inspection and field mapping manually in Affinity.';
     } catch (err) {
       const reason =
         err instanceof PsdInspectionError
@@ -1673,6 +1668,7 @@ export async function completeTemplateVersionUpload(
     template,
     version,
     inspection: inspectionResult,
+    editabilityVerified: false,
   };
 }
 
