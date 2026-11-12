@@ -202,3 +202,28 @@ sequenceDiagram
    - Native Affinity documents (`.af`, `.afdesign`, `.afphoto`, `.afpub`) bypass binary parsing and register with `inspectionStatus: 'MANUAL_REQUIRED'` for artist-verified field mapping.
 4. **Versioning, Rollback, Mappings & Soft Archival**:
    - Templates support immutable version history, instant active-version rollback (`PATCH /api/templates/[id]`), version-scoped `TemplateFieldMapping` replacement (`PUT /api/templates/[id]/versions/[versionId]/mappings`), and soft archival/restore (`POST .../archive`, `POST .../restore`) without breaking linked `DesignJob` history.
+
+---
+
+## 8. Stage 5.3 Web Catalog & Design Integration Architecture
+
+1. **Owner-Only Catalog & Template Details Interface (`apps/web`)**:
+   - Catalog view (`/templates`) provides fast client filtering by search query, template category, Affinity studio type (`VECTOR`, `PIXEL`, `LAYOUT`), and soft-archived status, backed by paginated API queries (`/api/templates`).
+   - Template details view (`/templates/[id]`) presents full template metadata, active version status, immutable version history timeline with version switcher, active version rollback, soft archival/restore actions, and responsive layout.
+2. **Authenticated Private Preview Card (`VersionPreviewCard`)**:
+   - Preview images are never exposed via public URLs or direct S3 URLs.
+   - The UI streams previews via the authenticated endpoint `/api/templates/[id]/versions/[versionId]/preview`, verifying owner session and generating short-lived stream redirects or proxy responses.
+   - When no companion preview is uploaded, the UI renders an accessible placeholder illustrating the template studio type without broken images.
+3. **Multi-Step Upload & Intent Workflow (`TemplateUploadModal`)**:
+   - Supports creating a brand-new template with version 1 or adding a new sequential version to an existing template.
+   - Computes SHA-256 and byte sizes client-side before upload using Web Cryptography (`globalThis.crypto.subtle`).
+   - Requests presigned staging URLs via `POST /api/templates/upload-intents` or `/api/templates/[id]/upload-intents`.
+   - Directly streams files via HTTP `PUT` to Neon Object Storage staging keys (`staging/masters/...`, `staging/previews/...`).
+   - Finalizes registration via `POST /api/templates/versions`, verifying file integrity on the backend and promoting to immutable canonical keys. On failure or modal cancellation, an intent abandonment request (`POST /api/templates/upload-intents/[intentId]/abandon`) is automatically dispatched.
+4. **Interactive Field Mapping Editor (`FieldMappingEditor`)**:
+   - Enables the owner to configure and review dynamic layer bindings for both canonical fields (`MEMBER_FULL_NAME`, `MEMBER_FIRST_NAME`, `MEMBER_PHOTO`, `EVENT_NAME`, `EVENT_DATE`, `CHURCH_LOGO`) and custom text/image bindings.
+   - Accurately conveys inspection status: renders a clear notification for `MANUAL_REQUIRED` templates (PSD and native Affinity formats) that layer names, paths, and types must be confirmed in Affinity.
+   - Validates layer names, types, and paths before atomic upsertion via `PUT /api/templates/[id]/versions/[versionId]/mappings`.
+5. **Design Management Module Integration**:
+   - Design jobs can link to templates and specific template versions (`templateId`, `templateVersionId`).
+   - Referential integrity is enforced at the database level: design jobs cannot reference an incompatible version or template from a different organisation.

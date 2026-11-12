@@ -79,15 +79,16 @@ flowchart LR
   - Design brief detail, review, export confirmation, and publication workflow interface.
 - **Exit Criteria**: Job created, linked to members/birthdays, transitioned through valid status gates, and logged in immutable audit history.
 
-### Milestone 5 — Templates & Affinity Integration
+### Milestone 5 — Templates & Affinity Integration *(Stages 5.1, 5.2, 5.3 Complete; In Progress)*
 - **Objective**: Register templates, map placeholder fields, and integrate the Windows Creative Agent.
 - **Key Deliverables**:
-  - Template catalog UI (Studio types: Pixel, Vector, Layout).
-  - Layer field mapping interface (linking member name and photo to target layers).
-  - Windows Creative Agent local daemon connecting to backend job queue.
-  - Automated job processing (download manifest $\rightarrow$ copy template $\rightarrow$ execute Affinity script $\rightarrow$ export preview).
-  - Founder creative handoff checkpoint in Affinity desktop.
-- **Exit Criteria**: Founder can trigger a birthday job, agent prepares working copy in Affinity 3.3, exports preview, and awaits final approval.
+  - Stage 5.0: Empirical discovery & capability audit (Affinity 3.3, PSD isolation, Neon creative storage).
+  - Stage 5.1 (with 5.1.1–5.1.3): Database schema, referential integrity triggers, row-locking concurrency, and contracts (`@crelune/shared`, `@crelune/database`).
+  - Stage 5.2 (with 5.2.1–5.2.2): Production template backend (`template-service`, presigned storage URLs, safe PSD header fallback with `MANUAL_REQUIRED`).
+  - Stage 5.3: Web catalog UI, version selector, authenticated preview streaming card, manual field mapping editor, upload modal, and design job integration (`apps/web`).
+  - Stage 5.4: Windows Creative Agent local daemon connecting to backend job queue.
+  - Stage 5.5: Automated job processing & Affinity scripting/MCP verification.
+- **Exit Criteria**: Founder can register and manage templates, inspect versions and previews, link templates to design jobs, configure layer bindings, and coordinate execution with Windows Creative Agent.
 
 ### Milestone 6 — Mobile Application
 - **Objective**: Develop the native React Native & Expo companion mobile application.

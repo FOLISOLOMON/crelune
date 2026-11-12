@@ -1,21 +1,39 @@
 import React from 'react';
-import { FileText } from 'lucide-react';
-import { Header, EmptyState } from '@crelune/ui';
+import { redirect } from 'next/navigation';
+import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
+import { TemplatesClient } from '@/components/templates/TemplatesClient';
+import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { listTemplates } from '@/lib/templates/template-service';
 
-export default function TemplatesPage() {
+export const dynamic = 'force-dynamic';
+
+export default async function TemplatesPage() {
+  const auth = await resolveAuthenticatedOwner();
+
+  if (auth.status === 'unauthenticated') {
+    redirect('/login');
+  }
+
+  if (auth.status === 'revoked') {
+    return <SessionRevokedNotice />;
+  }
+
+  const organisationId = auth.owner.profile.organisationId;
+  const initialData = await listTemplates(organisationId, {
+    q: '',
+    category: 'ALL',
+    studioType: 'ALL',
+    includeArchived: false,
+    page: 1,
+    pageSize: 24,
+  });
+
   return (
-    <div className="space-y-6">
-      <Header
-        title="Template Catalog"
-        description="Affinity (.afdesign) and Photoshop (.psd) templates with field bindings"
-      />
-
-      <EmptyState
-        icon={<FileText className="w-6 h-6" />}
-        badgeText="Scheduled for Milestone 5"
-        title="Template Management Activates in Milestone 5"
-        description="The template subsystem will catalog verified native Affinity and PSD templates, inspect text/image layers, map job fields to layer targets, and interface with the Windows Creative Agent."
-      />
-    </div>
+    <TemplatesClient
+      initialTemplates={initialData.items}
+      initialTotal={initialData.total}
+      initialPage={initialData.page}
+      initialPageSize={initialData.pageSize}
+    />
   );
 }
