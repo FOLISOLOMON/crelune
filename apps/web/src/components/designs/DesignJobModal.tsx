@@ -28,11 +28,24 @@ export interface DesignMemberOption {
   preferredName?: string | null;
 }
 
+export interface DesignTemplateOption {
+  id: string;
+  name: string;
+  category: DesignCategory;
+  activeVersionId: string | null;
+  versions: Array<{
+    id: string;
+    versionNumber: number;
+    format: string;
+  }>;
+}
+
 export interface DesignJobModalProps {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (job: DesignJobDetail) => void;
   memberOptions?: DesignMemberOption[];
+  templateOptions?: DesignTemplateOption[];
   initialPrefill?: Partial<DesignJobFormValues>;
   lockedMemberLabel?: string | null;
 }
@@ -42,6 +55,7 @@ export function DesignJobModal({
   onClose,
   onCreated,
   memberOptions = [],
+  templateOptions = [],
   initialPrefill,
   lockedMemberLabel = null,
 }: DesignJobModalProps) {
@@ -360,6 +374,89 @@ export function DesignJobModal({
             error={fieldErrors.preferredTemplateNote}
             disabled={isSubmitting}
           />
+
+          {templateOptions.length > 0 && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="design-template-select"
+                  className="block text-xs font-medium text-[#24212B]"
+                >
+                  Registered Template (Optional)
+                </label>
+                <select
+                  id="design-template-select"
+                  value={values.templateId}
+                  onChange={(e) => {
+                    const nextTemplateId = e.target.value;
+                    const chosen = templateOptions.find(
+                      (t) => t.id === nextTemplateId
+                    );
+                    updateField('templateId', nextTemplateId);
+                    updateField(
+                      'templateVersionId',
+                      chosen?.activeVersionId ?? chosen?.versions[0]?.id ?? ''
+                    );
+                  }}
+                  disabled={isSubmitting}
+                  className="h-9.5 w-full rounded-lg border border-[#E8E5ED] bg-white px-3 text-sm text-[#24212B] focus:border-[#6541A5] focus:outline-none focus:ring-2 focus:ring-[#6541A5]/20"
+                >
+                  <option value="">No registered template bound</option>
+                  {templateOptions.map((tpl) => (
+                    <option key={tpl.id} value={tpl.id}>
+                      {tpl.name} ({tpl.versions.length} ver)
+                    </option>
+                  ))}
+                </select>
+                {fieldErrors.templateId && (
+                  <p className="text-xs font-medium text-[#DC2626]">
+                    {fieldErrors.templateId}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="design-template-version-select"
+                  className="block text-xs font-medium text-[#24212B]"
+                >
+                  Pinned Version
+                </label>
+                <select
+                  id="design-template-version-select"
+                  value={values.templateVersionId}
+                  onChange={(e) =>
+                    updateField('templateVersionId', e.target.value)
+                  }
+                  disabled={isSubmitting || !values.templateId}
+                  className="h-9.5 w-full rounded-lg border border-[#E8E5ED] bg-white px-3 text-sm text-[#24212B] disabled:bg-[#F8F7FA] focus:border-[#6541A5] focus:outline-none focus:ring-2 focus:ring-[#6541A5]/20"
+                >
+                  <option value="">
+                    {values.templateId
+                      ? 'Pin active version'
+                      : 'Select a template first'}
+                  </option>
+                  {(
+                    templateOptions.find((t) => t.id === values.templateId)
+                      ?.versions ?? []
+                  ).map((ver) => (
+                    <option key={ver.id} value={ver.id}>
+                      v{ver.versionNumber} ({ver.format})
+                      {templateOptions.find((t) => t.id === values.templateId)
+                        ?.activeVersionId === ver.id
+                        ? ' · Active'
+                        : ''}
+                    </option>
+                  ))}
+                </select>
+                {fieldErrors.templateVersionId && (
+                  <p className="text-xs font-medium text-[#DC2626]">
+                    {fieldErrors.templateVersionId}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <label

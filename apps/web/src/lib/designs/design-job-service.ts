@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto';
 import { Prisma, prisma, type DesignJobStatus } from '@crelune/database';
 import {
+  ACTIVE_CREATIVE_DISPATCH_STATUSES,
   ACTIVE_DESIGN_JOB_STATUSES,
   canTransitionDesignJobStatus,
   civilDateToUtcMidnight,
@@ -26,8 +27,12 @@ import {
   type DesignJobListQuery,
   type DesignJobStatus as SharedDesignJobStatus,
   type DesignJobSummary,
+  type DesignJobTemplateBindingSummary,
   type DesignPriority,
   type MemberPaginationMeta,
+  type TemplateFileFormat,
+  type TemplateInspectionStatus,
+  type TemplateStudioType,
   type TransitionDesignJobInput,
   type UpdateDesignJobInput,
 } from '@crelune/shared';
@@ -56,7 +61,8 @@ export class DesignJobValidationError extends Error {
 
 export type DesignJobConflictCode =
   | 'DUPLICATE_BIRTHDAY_DESIGN_JOB'
-  | 'BIRTHDAY_PREP_ALREADY_LINKED';
+  | 'BIRTHDAY_PREP_ALREADY_LINKED'
+  | 'TEMPLATE_LOCKED_BY_ACTIVE_DISPATCH';
 
 export class DesignJobConflictError extends Error {
   public readonly code: DesignJobConflictCode;
@@ -99,6 +105,8 @@ const DESIGN_JOB_SUMMARY_SELECT = {
   priority: true,
   memberId: true,
   birthdayTargetYear: true,
+  templateId: true,
+  templateVersionId: true,
   targetPlatform: true,
   dimensions: true,
   dueDate: true,
@@ -126,6 +134,31 @@ const DESIGN_JOB_DETAIL_SELECT = {
   preferredTemplateNote: true,
   referenceNotes: true,
   notes: true,
+  template: {
+    select: {
+      id: true,
+      name: true,
+      category: true,
+      studioType: true,
+      isActive: true,
+      archivedAt: true,
+      activeVersionId: true,
+    },
+  },
+  templateVersion: {
+    select: {
+      id: true,
+      versionNumber: true,
+      format: true,
+      originalFilename: true,
+      byteSize: true,
+      sha256: true,
+      widthPx: true,
+      heightPx: true,
+      previewStorageKey: true,
+      inspectionStatus: true,
+    },
+  },
   history: {
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: {
@@ -172,6 +205,8 @@ export function mapDesignJobSummary(row: DesignJobSummaryRow): DesignJobSummary 
         }
       : null,
     birthdayTargetYear: row.birthdayTargetYear ?? null,
+    templateId: row.templateId ?? null,
+    templateVersionId: row.templateVersionId ?? null,
     targetPlatform: row.targetPlatform ?? null,
     dimensions: row.dimensions ?? null,
     dueDate: row.dueDate
@@ -198,12 +233,40 @@ export function mapDesignJobDetail(row: DesignJobDetailRow): DesignJobDetail {
     createdAt: entry.createdAt.toISOString(),
   }));
 
+  const templateBinding: DesignJobTemplateBindingSummary | null =
+    row.template && row.templateVersion
+      ? {
+          templateId: row.template.id,
+          templateName: row.template.name,
+          templateCategory: row.template.category as DesignCategory,
+          templateStudioType: row.template.studioType as TemplateStudioType,
+          templateIsActive:
+            row.template.isActive && row.template.archivedAt === null,
+          templateVersionId: row.templateVersion.id,
+          versionNumber: row.templateVersion.versionNumber,
+          format: row.templateVersion.format as TemplateFileFormat,
+          originalFilename: row.templateVersion.originalFilename,
+          byteSize: row.templateVersion.byteSize,
+          sha256: row.templateVersion.sha256,
+          widthPx: row.templateVersion.widthPx ?? null,
+          heightPx: row.templateVersion.heightPx ?? null,
+          hasPreview: Boolean(row.templateVersion.previewStorageKey),
+          inspectionStatus: row.templateVersion
+            .inspectionStatus as TemplateInspectionStatus,
+          activeVersionId: row.template.activeVersionId ?? null,
+          isPinnedToOlderVersion:
+            Boolean(row.template.activeVersionId) &&
+            row.template.activeVersionId !== row.templateVersion.id,
+        }
+      : null;
+
   return {
     ...mapDesignJobSummary(row),
     requiredText: row.requiredText ?? null,
     preferredTemplateNote: row.preferredTemplateNote ?? null,
     referenceNotes: row.referenceNotes ?? null,
     notes: row.notes ?? null,
+    templateBinding,
     history,
   };
 }
@@ -597,6 +660,73 @@ async function linkBirthdayPreparationToJob(
   });
 }
 
+async function resolveValidatedTemplateBinding(
+  tx: Prisma.TransactionClient,
+  organisationId: string,
+  templateId: string | null | undefined,
+  templateVersionId: string | null | undefined,
+  options: { allowArchivedForExistingTemplateId?: string | null } = {}
+): Promise<{ templateId: string | null; templateVersionId: string | null }> {
+  if (!templateId) {
+    if (templateVersionId) {
+      throw new DesignJobValidationError(
+        'A template must be selected before pinning a template version.'
+      );
+    }
+    return { templateId: null, templateVersionId: null };
+  }
+
+  const template = await tx.template.findFirst({
+    where: { id: templateId, organisationId },
+    select: {
+      id: true,
+      isActive: true,
+      archivedAt: true,
+      activeVersionId: true,
+    },
+  });
+
+  if (!template) {
+    throw new DesignJobValidationError(
+      'Selected template was not found in your workspace.'
+    );
+  }
+
+  const isArchived = !template.isActive || template.archivedAt !== null;
+  if (isArchived && template.id !== options.allowArchivedForExistingTemplateId) {
+    throw new DesignJobValidationError(
+      'Archived templates cannot be bound to this design job. Restore the template first.'
+    );
+  }
+
+  const targetVersionId = templateVersionId ?? template.activeVersionId;
+  if (!targetVersionId) {
+    throw new DesignJobValidationError(
+      'Selected template has no uploaded master version yet. Upload a version before binding it to a design job.'
+    );
+  }
+
+  const version = await tx.templateVersion.findFirst({
+    where: {
+      id: targetVersionId,
+      templateId: template.id,
+      organisationId,
+    },
+    select: { id: true },
+  });
+
+  if (!version) {
+    throw new DesignJobValidationError(
+      'Selected template version does not belong to the chosen template.'
+    );
+  }
+
+  return {
+    templateId: template.id,
+    templateVersionId: version.id,
+  };
+}
+
 export async function createDesignJob(
   actor: DesignActorContext,
   input: CreateDesignJobInput
@@ -620,6 +750,13 @@ export async function createDesignJob(
         'Birthday target year is only allowed for birthday flyer jobs.'
       );
     }
+
+    const templateBinding = await resolveValidatedTemplateBinding(
+      tx,
+      actor.organisationId,
+      input.templateId ?? null,
+      input.templateVersionId ?? null
+    );
 
     let linkedMember: MemberBirthdayValidationRow | null = null;
 
@@ -671,6 +808,8 @@ export async function createDesignJob(
         dimensions: input.dimensions ?? null,
         targetPlatform: input.targetPlatform ?? null,
         preferredTemplateNote: input.preferredTemplateNote ?? null,
+        templateId: templateBinding.templateId,
+        templateVersionId: templateBinding.templateVersionId,
         referenceNotes: input.referenceNotes ?? null,
         notes: input.notes ?? null,
         dueDate: parseDueDateValue(input.dueDate) ?? null,
@@ -684,7 +823,9 @@ export async function createDesignJob(
         designJobId: created.id,
         previousStatus: null,
         newStatus: created.status,
-        note: 'Design job created.',
+        note: templateBinding.templateId
+          ? 'Design job created and pinned to selected template version.'
+          : 'Design job created.',
         changedByUserId: actor.userId,
       },
     });
@@ -710,6 +851,7 @@ export async function createDesignJob(
         priority: input.priority,
         initialStatus: created.status,
         hasMemberLink: Boolean(linkedMember),
+        hasTemplateBinding: Boolean(templateBinding.templateId),
       },
     });
 
@@ -740,6 +882,8 @@ export async function updateDesignJob(
         status: true,
         memberId: true,
         birthdayTargetYear: true,
+        templateId: true,
+        templateVersionId: true,
       },
     });
 
@@ -850,8 +994,51 @@ export async function updateDesignJob(
       await assertNoBirthdayJobOrPrepConflict(tx, newTuple, existing.id);
     }
 
-    const updateData: Prisma.DesignJobUpdateInput = {};
+    const updateData: Prisma.DesignJobUncheckedUpdateInput = {};
     const changedFields: string[] = [];
+
+    if (input.templateId !== undefined || input.templateVersionId !== undefined) {
+      const requestedTemplateId =
+        input.templateId !== undefined ? input.templateId : existing.templateId;
+      const requestedVersionId =
+        input.templateVersionId !== undefined
+          ? input.templateVersionId
+          : input.templateId !== undefined && input.templateId !== existing.templateId
+            ? null
+            : existing.templateVersionId;
+
+      const resolvedBinding = await resolveValidatedTemplateBinding(
+        tx,
+        actor.organisationId,
+        requestedTemplateId,
+        requestedVersionId,
+        { allowArchivedForExistingTemplateId: existing.templateId }
+      );
+
+      if (
+        resolvedBinding.templateId !== existing.templateId ||
+        resolvedBinding.templateVersionId !== existing.templateVersionId
+      ) {
+        const activeDispatch = await tx.creativeJobDispatch.findFirst({
+          where: {
+            organisationId: actor.organisationId,
+            designJobId: existing.id,
+            status: { in: [...ACTIVE_CREATIVE_DISPATCH_STATUSES] },
+          },
+          select: { id: true },
+        });
+        if (activeDispatch) {
+          throw new DesignJobConflictError(
+            'Template and pinned version cannot be changed while a creative job dispatch is active. Cancel the active dispatch first.',
+            'TEMPLATE_LOCKED_BY_ACTIVE_DISPATCH'
+          );
+        }
+
+        updateData.templateId = resolvedBinding.templateId;
+        updateData.templateVersionId = resolvedBinding.templateVersionId;
+        changedFields.push('templateId', 'templateVersionId');
+      }
+    }
 
     if (input.title !== undefined) {
       updateData.title = input.title;
@@ -866,10 +1053,7 @@ export async function updateDesignJob(
       changedFields.push('priority');
     }
     if (input.memberId !== undefined) {
-      updateData.member =
-        input.memberId === null
-          ? { disconnect: true }
-          : { connect: { id: input.memberId } };
+      updateData.memberId = input.memberId;
       changedFields.push('memberId');
     }
     if (nextTargetYear !== existing.birthdayTargetYear) {

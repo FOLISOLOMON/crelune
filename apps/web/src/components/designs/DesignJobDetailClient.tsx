@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   AlertCircle,
   ArrowLeft,
@@ -31,6 +32,7 @@ import {
   getAllowedNextDesignJobStatuses,
   type DesignCategory,
   type DesignJobDetail,
+  type DesignJobPreparationSnapshot,
   type DesignJobStatus,
   type DesignPriority,
 } from '@crelune/shared';
@@ -49,18 +51,28 @@ import {
 } from '@/lib/designs/design-form-utils';
 import { formatMemberTimestamp } from '@/lib/members/member-form-utils';
 import { MemberAvatar } from '@/components/members/MemberAvatar';
-import type { DesignMemberOption } from './DesignJobModal';
+import { DesignJobPreparationPanel } from './DesignJobPreparationPanel';
+import type {
+  DesignMemberOption,
+  DesignTemplateOption,
+} from './DesignJobModal';
 
 export interface DesignJobDetailClientProps {
   initialJob: DesignJobDetail;
   memberOptions: DesignMemberOption[];
+  templateOptions?: DesignTemplateOption[];
+  initialPreparation?: DesignJobPreparationSnapshot | null;
 }
 
 export function DesignJobDetailClient({
   initialJob,
   memberOptions,
+  templateOptions = [],
+  initialPreparation = null,
 }: DesignJobDetailClientProps) {
+  const router = useRouter();
   const [job, setJob] = useState<DesignJobDetail>(initialJob);
+  const [prepKey, setPrepKey] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [formValues, setFormValues] = useState<DesignJobFormValues>(() =>
     designJobDetailToFormValues(initialJob)
@@ -136,6 +148,8 @@ export function DesignJobDetailClient({
       setFormValues(designJobDetailToFormValues(updated));
       setIsEditing(false);
       setStatusBanner('Design brief details saved.');
+      setPrepKey((k) => k + 1);
+      router.refresh();
     } catch (error) {
       if (error instanceof DesignApiError) {
         if (error.fieldErrors) setFieldErrors(error.fieldErrors);
@@ -485,6 +499,91 @@ export function DesignJobDetailClient({
                     />
                   </div>
 
+                  {templateOptions.length > 0 && (
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <label
+                          htmlFor="edit-design-template"
+                          className="block text-xs font-medium text-[#24212B]"
+                        >
+                          Registered Template
+                        </label>
+                        <select
+                          id="edit-design-template"
+                          value={formValues.templateId}
+                          onChange={(e) => {
+                            const nextId = e.target.value;
+                            const chosen = templateOptions.find(
+                              (t) => t.id === nextId
+                            );
+                            handleFieldChange('templateId', nextId);
+                            handleFieldChange(
+                              'templateVersionId',
+                              chosen?.activeVersionId ??
+                                chosen?.versions[0]?.id ??
+                                ''
+                            );
+                          }}
+                          disabled={isSaving}
+                          className="h-9.5 w-full rounded-lg border border-[#E8E5ED] bg-white px-3 text-sm text-[#24212B]"
+                        >
+                          <option value="">No registered template</option>
+                          {templateOptions.map((tpl) => (
+                            <option key={tpl.id} value={tpl.id}>
+                              {tpl.name}
+                            </option>
+                          ))}
+                        </select>
+                        {fieldErrors.templateId && (
+                          <p className="text-xs font-medium text-[#DC2626]">
+                            {fieldErrors.templateId}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label
+                          htmlFor="edit-design-template-version"
+                          className="block text-xs font-medium text-[#24212B]"
+                        >
+                          Pinned Template Version
+                        </label>
+                        <select
+                          id="edit-design-template-version"
+                          value={formValues.templateVersionId}
+                          onChange={(e) =>
+                            handleFieldChange(
+                              'templateVersionId',
+                              e.target.value
+                            )
+                          }
+                          disabled={isSaving || !formValues.templateId}
+                          className="h-9.5 w-full rounded-lg border border-[#E8E5ED] bg-white px-3 text-sm text-[#24212B] disabled:bg-[#F8F7FA]"
+                        >
+                          <option value="">
+                            {formValues.templateId
+                              ? 'Pin active version'
+                              : 'Select template first'}
+                          </option>
+                          {(
+                            templateOptions.find(
+                              (t) => t.id === formValues.templateId
+                            )?.versions ?? []
+                          ).map((ver) => (
+                            <option key={ver.id} value={ver.id}>
+                              v{ver.versionNumber} ({ver.format})
+                            </option>
+                          ))}
+                        </select>
+                        {fieldErrors.templateVersionId && (
+                          <p className="text-xs font-medium text-[#DC2626]">
+                            {fieldErrors.templateVersionId}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="space-y-1.5">
                     <label
                       htmlFor="edit-required-text"
@@ -626,6 +725,14 @@ export function DesignJobDetailClient({
               )}
             </CardContent>
           </Card>
+
+          {/* Stage 5.4 Creative Job Preparation, Manifest & Export Deliverables */}
+          <DesignJobPreparationPanel
+            key={`${job.id}-${prepKey}-${job.templateVersionId ?? 'none'}`}
+            jobId={job.id}
+            initialPreparation={prepKey === 0 ? initialPreparation : null}
+            onJobUpdated={() => router.refresh()}
+          />
         </div>
 
         {/* Side Column: Linked Member & Immutable History */}

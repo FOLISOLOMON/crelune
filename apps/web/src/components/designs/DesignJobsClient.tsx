@@ -50,6 +50,7 @@ import { MemberAvatar } from '@/components/members/MemberAvatar';
 import {
   DesignJobModal,
   type DesignMemberOption,
+  type DesignTemplateOption,
 } from './DesignJobModal';
 
 export interface DesignJobsClientProps {
@@ -57,6 +58,7 @@ export interface DesignJobsClientProps {
   initialPagination: MemberPaginationMeta;
   initialStatusCounts: Record<DesignJobStatus, number>;
   memberOptions: DesignMemberOption[];
+  templateOptions?: DesignTemplateOption[];
 }
 
 type StatusFilterValue = 'active' | 'all' | DesignJobStatus;
@@ -90,6 +92,7 @@ export function DesignJobsClient({
   initialPagination,
   initialStatusCounts,
   memberOptions,
+  templateOptions = [],
 }: DesignJobsClientProps) {
   const searchInputId = useId();
   const statusSelectId = useId();
@@ -721,6 +724,7 @@ export function DesignJobsClient({
         onClose={() => setIsCreateOpen(false)}
         onCreated={handleCreated}
         memberOptions={memberOptions}
+        templateOptions={templateOptions}
       />
     </div>
   );

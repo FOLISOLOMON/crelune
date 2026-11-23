@@ -3,8 +3,10 @@ import { CREATIVE_BYTE_LIMITS } from '../domain/template.js';
 import { psdInspectionResultSchema } from '../contracts/psd-inspector.js';
 import {
   CREATIVE_AGENT_MANIFEST_VERSION,
+  containsForbiddenManifestSecret,
   creativeAgentHeartbeatSchema,
   creativeJobManifestSchema,
+  jobPrepManifestSchema,
   registerCreativeAgentSchema,
   revokeCreativeAgentSchema,
   updateCreativeDispatchStatusSchema,
@@ -14,6 +16,7 @@ import {
   approveExportForPublishSchema,
   containsFilesystemPathLiteral,
   createExportRecordSchema,
+  createExportUploadIntentSchema,
   createTemplateSchema,
   createTemplateVersionUploadIntentSchema,
   updateTemplateSchema,
@@ -291,6 +294,58 @@ describe('Stage 5.1 Template, Upload Intent, Manifest & Dispatch Schemas', () =>
         templateVersionId: 'ver_1',
       }).success
     ).toBe(true);
+
+    // DesignJob rejects templateVersionId without templateId
+    expect(
+      createDesignJobSchema.safeParse({
+        title: 'Invalid Pinned Version Without Template',
+        category: 'EVENT_ANNOUNCEMENT',
+        templateVersionId: 'ver_1',
+      }).success
+    ).toBe(false);
+
+    // JobPrepManifest rejects embedded presigned URLs, DB URLs, and agent bearer secrets
+    expect(
+      jobPrepManifestSchema.safeParse({
+        ...manifest,
+        requiredText: 'https://bucket.s3.amazonaws.com/key?X-Amz-Signature=deadbeef',
+      }).success
+    ).toBe(false);
+    expect(
+      jobPrepManifestSchema.safeParse({
+        ...manifest,
+        referenceNotes: 'postgres://user:pass@host/neondb',
+      }).success
+    ).toBe(false);
+    expect(
+      containsForbiddenManifestSecret({
+        nested: { note: 'Bearer cln_agent_abcdef1234567890' },
+      })
+    ).toBe(true);
+
+    // Export upload intent validates extension/MIME match and 50 MB cap
+    expect(
+      createExportUploadIntentSchema.safeParse({
+        designJobId: 'job_1',
+        format: 'PNG',
+        originalFilename: 'final-birthday.png',
+        mimeType: 'image/png',
+        byteSize: 2048,
+        sha256: SAMPLE_SHA256,
+        idempotencyKey: 'export_intent_job1_001',
+      }).success
+    ).toBe(true);
+    expect(
+      createExportUploadIntentSchema.safeParse({
+        designJobId: 'job_1',
+        format: 'PDF',
+        originalFilename: 'final-birthday.png',
+        mimeType: 'application/pdf',
+        byteSize: 2048,
+        sha256: SAMPLE_SHA256,
+        idempotencyKey: 'export_intent_job1_002',
+      }).success
+    ).toBe(false);
   });
 });
 

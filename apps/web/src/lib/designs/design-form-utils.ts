@@ -106,6 +106,8 @@ export interface DesignJobFormValues {
   initialStatus: 'DRAFT' | 'PENDING';
   memberId: string;
   birthdayTargetYear: string;
+  templateId: string;
+  templateVersionId: string;
   dueDate: string;
   targetPlatform: string;
   dimensions: string;
@@ -122,6 +124,8 @@ export const EMPTY_DESIGN_JOB_FORM_VALUES: DesignJobFormValues = {
   initialStatus: 'DRAFT',
   memberId: '',
   birthdayTargetYear: '',
+  templateId: '',
+  templateVersionId: '',
   dueDate: '',
   targetPlatform: '',
   dimensions: '',
@@ -142,6 +146,8 @@ export function designJobDetailToFormValues(
     memberId: job.memberId ?? '',
     birthdayTargetYear:
       job.birthdayTargetYear !== null ? String(job.birthdayTargetYear) : '',
+    templateId: job.templateId ?? '',
+    templateVersionId: job.templateVersionId ?? '',
     dueDate: job.dueDate ?? '',
     targetPlatform: job.targetPlatform ?? '',
     dimensions: job.dimensions ?? '',
@@ -178,6 +184,10 @@ export function buildCreateDesignJobPayload(
     initialStatus: values.initialStatus,
     memberId: values.memberId || null,
     birthdayTargetYear,
+    templateId: values.templateId || null,
+    templateVersionId: values.templateId
+      ? values.templateVersionId || null
+      : null,
     dueDate: values.dueDate || null,
     targetPlatform: values.targetPlatform || null,
     dimensions: values.dimensions || null,
@@ -263,6 +273,17 @@ export function buildUpdateDesignJobPayload(
 
   if (nextTargetYear !== initial.birthdayTargetYear) {
     patch.birthdayTargetYear = nextTargetYear;
+  }
+
+  const nextTemplateId = values.templateId || null;
+  const nextTemplateVersionId = nextTemplateId
+    ? values.templateVersionId || null
+    : null;
+  if (nextTemplateId !== (initial.templateId ?? null)) {
+    patch.templateId = nextTemplateId;
+    patch.templateVersionId = nextTemplateVersionId;
+  } else if (nextTemplateVersionId !== (initial.templateVersionId ?? null)) {
+    patch.templateVersionId = nextTemplateVersionId;
   }
 
   const nextDueDate = normalize(values.dueDate);

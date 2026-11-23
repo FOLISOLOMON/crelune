@@ -13,6 +13,7 @@ import {
 } from '../domain/design-job.js';
 import { parseCivilDateIso } from '../domain/birthday-date.js';
 import { memberIdParamSchema } from './member.js';
+import type { DesignJobTemplateBindingSummary } from './creative-agent.js';
 
 export const DESIGN_JOB_TITLE_MAX_LENGTH = 160;
 export const DESIGN_JOB_TEXT_MAX_LENGTH = 4000;
@@ -129,6 +130,14 @@ export const createDesignJobSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
+    if (data.templateVersionId && !data.templateId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['templateVersionId'],
+        message: 'A template must be selected before pinning a template version.',
+      });
+    }
+
     if (data.category === 'BIRTHDAY_FLYER') {
       if (!data.memberId) {
         ctx.addIssue({
@@ -207,6 +216,14 @@ export const updateDesignJobSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'At least one design job field must be updated.',
+      });
+    }
+
+    if (data.templateVersionId && data.templateId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['templateVersionId'],
+        message: 'Cannot pin a template version while clearing the template.',
       });
     }
 
@@ -343,6 +360,7 @@ export interface DesignJobDetail extends DesignJobSummary {
   preferredTemplateNote: string | null;
   referenceNotes: string | null;
   notes: string | null;
+  templateBinding?: DesignJobTemplateBindingSummary | null;
   history: DesignJobHistoryEntry[];
 }
 

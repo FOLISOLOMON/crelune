@@ -11,6 +11,12 @@ import {
   DesignJobTransitionError,
   DesignJobValidationError,
 } from '@/lib/designs/design-job-service';
+import {
+  DispatchNotFoundError,
+  ExportRecordNotFoundError,
+  JobPreparationConflictError,
+  JobPreparationValidationError,
+} from '@/lib/designs/job-preparation-service';
 import { MemberNotFoundError } from '@/lib/members/member-service';
 
 const PRIVATE_NO_STORE_HEADERS = {
@@ -62,6 +68,35 @@ export function handleDesignRouteError(
 
   if (err instanceof MemberNotFoundError) {
     return designJsonResponse({ error: 'Linked member not found' }, 404);
+  }
+
+  if (err instanceof DispatchNotFoundError) {
+    return designJsonResponse({ error: 'Creative job dispatch not found' }, 404);
+  }
+
+  if (err instanceof ExportRecordNotFoundError) {
+    return designJsonResponse({ error: 'Export deliverable not found' }, 404);
+  }
+
+  if (err instanceof JobPreparationValidationError) {
+    return designJsonResponse(
+      {
+        error: err.message,
+        code: err.code,
+        preparationIssues: err.issues,
+      },
+      400
+    );
+  }
+
+  if (err instanceof JobPreparationConflictError) {
+    return designJsonResponse(
+      {
+        error: err.message,
+        code: err.code,
+      },
+      409
+    );
   }
 
   if (err instanceof DesignJobValidationError) {

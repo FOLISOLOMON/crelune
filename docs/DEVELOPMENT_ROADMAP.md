@@ -79,15 +79,15 @@ flowchart LR
   - Design brief detail, review, export confirmation, and publication workflow interface.
 - **Exit Criteria**: Job created, linked to members/birthdays, transitioned through valid status gates, and logged in immutable audit history.
 
-### Milestone 5 — Templates & Affinity Integration *(Stages 5.1, 5.2, 5.3 Complete; In Progress)*
-- **Objective**: Register templates, map placeholder fields, and integrate the Windows Creative Agent.
+### Milestone 5 — Templates & Affinity Integration *(Stages 5.1–5.4 Complete; Stage 5.5 In Progress)*
+- **Objective**: Register templates, map placeholder fields, prepare version-pinned creative jobs, and integrate the Windows Creative Agent.
 - **Key Deliverables**:
   - Stage 5.0: Empirical discovery & capability audit (Affinity 3.3, PSD isolation, Neon creative storage).
   - Stage 5.1 (with 5.1.1–5.1.3): Database schema, referential integrity triggers, row-locking concurrency, and contracts (`@crelune/shared`, `@crelune/database`).
   - Stage 5.2 (with 5.2.1–5.2.2): Production template backend (`template-service`, presigned storage URLs, safe PSD header fallback with `MANUAL_REQUIRED`).
-  - Stage 5.3: Web catalog UI, version selector, authenticated preview streaming card, manual field mapping editor, upload modal, and design job integration (`apps/web`).
-  - Stage 5.4: Windows Creative Agent local daemon connecting to backend job queue.
-  - Stage 5.5: Automated job processing & Affinity scripting/MCP verification.
+  - Stage 5.3: Web catalog UI, version selector, authenticated preview streaming card, manual field mapping editor, upload modal with recovery (`apps/web`).
+  - Stage 5.4: Creative Job Preparation — exact template/version pinning, validated secret-free `JobPrepManifest`, standalone manual preparation fallback, idempotent dispatch queue, and verified export deliverable review (`apps/web`).
+  - Stage 5.5: Windows Creative Agent local daemon (`apps/agent`) with Windows DPAPI credentials, isolated workspaces, verified Affinity 3.3 integration, and authenticated export reporting.
 - **Exit Criteria**: Founder can register and manage templates, inspect versions and previews, link templates to design jobs, configure layer bindings, and coordinate execution with Windows Creative Agent.
 
 ### Milestone 6 — Mobile Application

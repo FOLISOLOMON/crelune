@@ -227,3 +227,18 @@ sequenceDiagram
 5. **Design Management Module Integration**:
    - Design jobs can link to templates and specific template versions (`templateId`, `templateVersionId`).
    - Referential integrity is enforced at the database level: design jobs cannot reference an incompatible version or template from a different organisation.
+
+---
+
+## 9. Stage 5.4 Creative Job Preparation Architecture
+
+1. **Exact Version Pinning & Non-Substitution**:
+   - Binding a template in [`design-job-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/designs/design-job-service.ts) immediately pins an exact immutable `TemplateVersion` (`templateVersionId`), preserving traceability even if a newer template version later becomes active.
+   - Changing a job's template binding while an active `CreativeJobDispatch` exists is blocked at both application (`409 TEMPLATE_LOCKED_BY_ACTIVE_DISPATCH`) and PostgreSQL trigger (`FOR NO KEY UPDATE`) layers.
+2. **Authoritative Manifest Resolution & Secret Guard**:
+   - [`job-preparation-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/designs/job-preparation-service.ts) resolves canonical (`member.*`, `design.*`) and custom (`custom.*`) mapped fields without fabricating missing values or unknown birth years.
+   - Manifests are validated against `jobPrepManifestSchema` and `containsForbiddenManifestSecret()`, guaranteeing zero database credentials, storage credentials, presigned URLs, session tokens, or local paths appear inside `manifestJson`.
+3. **Dual Execution Support (Agent Queue + Standalone Manual Fallback)**:
+   - Owners can queue an idempotent, row-locked `CreativeJobDispatch` (`POST /api/designs/[id]/dispatches`) transitioning `DRAFT -> PENDING`, OR operate 100% standalone via authenticated manual downloads (`GET /api/designs/[id]/preparation/manifest`, `GET /api/designs/[id]/preparation/master`, `GET /api/members/[id]/photo`).
+4. **Verified Deliverable Intake (`ExportRecord`)**:
+   - Manual and agent exports (`PNG`, `JPEG`, `PDF` up to 50 MB) upload via presigned PUT into `crelune-dev-creative` (`exports/jobs/{designJobId}/...`), undergo magic-byte + `sharp`/PDF verification and SHA-256 matching, and always default to `isApprovedForPublish: false`, `publishedAt: null`, strictly separating `EXPORTED` from `PUBLISHED`.

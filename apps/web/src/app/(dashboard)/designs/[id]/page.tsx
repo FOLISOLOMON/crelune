@@ -6,6 +6,7 @@ import { prisma } from '@crelune/database';
 import { EmptyState } from '@crelune/ui';
 import {
   designJobIdParamSchema,
+  type DesignCategory,
   type DesignJobDetail,
 } from '@crelune/shared';
 import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
@@ -15,6 +16,7 @@ import {
   DesignJobNotFoundError,
   getDesignJobById,
 } from '@/lib/designs/design-job-service';
+import { getDesignJobPreparationSnapshot } from '@/lib/designs/job-preparation-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,6 +36,7 @@ export default async function DesignJobDetailPage({
   }
 
   const organisationId = auth.owner.profile.organisationId;
+  const userId = auth.owner.profile.id;
   const { id: rawId } = await params;
   const parsedId = designJobIdParamSchema.safeParse(rawId);
 
@@ -68,19 +71,60 @@ export default async function DesignJobDetailPage({
     );
   }
 
-  const memberOptions = await prisma.member.findMany({
-    where: {
-      organisationId,
-      archivedAt: null,
-    },
-    orderBy: [{ fullName: 'asc' }],
-    select: {
-      id: true,
-      fullName: true,
-      preferredName: true,
-    },
-  });
+  const [memberOptions, templateRows, initialPreparation] = await Promise.all([
+    prisma.member.findMany({
+      where: {
+        organisationId,
+        archivedAt: null,
+      },
+      orderBy: [{ fullName: 'asc' }],
+      select: {
+        id: true,
+        fullName: true,
+        preferredName: true,
+      },
+    }),
+    prisma.template.findMany({
+      where: {
+        organisationId,
+        OR: [
+          { isActive: true, archivedAt: null, versions: { some: {} } },
+          ...(job.templateId ? [{ id: job.templateId }] : []),
+        ],
+      },
+      orderBy: [{ name: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        activeVersionId: true,
+        versions: {
+          orderBy: { versionNumber: 'desc' },
+          select: {
+            id: true,
+            versionNumber: true,
+            format: true,
+          },
+        },
+      },
+    }),
+    getDesignJobPreparationSnapshot({ userId, organisationId }, job.id),
+  ]);
 
-  return <DesignJobDetailClient initialJob={job} memberOptions={memberOptions} />;
+  const templateOptions = templateRows.map((tpl) => ({
+    id: tpl.id,
+    name: tpl.name,
+    category: tpl.category as DesignCategory,
+    activeVersionId: tpl.activeVersionId,
+    versions: tpl.versions,
+  }));
+
+  return (
+    <DesignJobDetailClient
+      initialJob={job}
+      memberOptions={memberOptions}
+      templateOptions={templateOptions}
+      initialPreparation={initialPreparation}
+    />
+  );
 }
-

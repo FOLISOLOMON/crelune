@@ -245,6 +245,50 @@ export const templateListQuerySchema = z.object({
 
 export type TemplateListQuery = z.infer<typeof templateListQuerySchema>;
 
+export const createExportUploadIntentSchema = z
+  .object({
+    designJobId: z.string().trim().min(1).max(80),
+    dispatchId: z.string().trim().min(1).max(80).nullable().optional(),
+    format: z.enum(EXPORT_FILE_FORMATS),
+    originalFilename: sanitizedTemplateFilenameSchema,
+    mimeType: z.string().trim().toLowerCase().min(3).max(120),
+    byteSize: z
+      .number()
+      .int()
+      .min(1)
+      .max(CREATIVE_BYTE_LIMITS.EXPORT_DELIVERABLE_MAX_BYTES),
+    sha256: sha256HexSchema,
+    idempotencyKey: idempotencyKeySchema,
+  })
+  .superRefine((data, ctx) => {
+    const allowedMimes = EXPORT_FORMAT_MIME_TYPES[data.format];
+    if (!allowedMimes.includes(data.mimeType)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['mimeType'],
+        message: `MIME type "${data.mimeType}" does not match export format ${data.format}.`,
+      });
+    }
+
+    const ext = extractNormalizedFileExtension(data.originalFilename);
+    const validExts: Record<ExportFileFormat, readonly string[]> = {
+      PNG: ['png'],
+      JPEG: ['jpg', 'jpeg'],
+      PDF: ['pdf'],
+    };
+    if (!ext || !validExts[data.format].includes(ext)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['originalFilename'],
+        message: `Filename extension must match export format ${data.format} (${validExts[data.format].join(', ')}).`,
+      });
+    }
+  });
+
+export type CreateExportUploadIntentInput = z.infer<
+  typeof createExportUploadIntentSchema
+>;
+
 export const createExportRecordSchema = z
   .object({
     designJobId: z.string().trim().min(1).max(80),

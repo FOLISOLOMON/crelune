@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DESIGN_CATEGORIES, type DesignCategory } from '../domain/design-job.js';
 import {
   CREATIVE_AGENT_STATUSES,
   CREATIVE_DISPATCH_PUBLICATION_RULE,
@@ -9,12 +10,15 @@ import {
   TEMPLATE_STUDIO_TYPES,
   type CreativeAgentStatus,
   type CreativeDispatchStatus,
+  type ExportFileFormat,
+  type TemplateInspectionStatus,
 } from '../domain/template.js';
 import {
   containsFilesystemPathLiteral,
   idempotencyKeySchema,
   nonFilesystemTextSchema,
   sha256HexSchema,
+  type ExportRecordSummary,
 } from './template.js';
 
 export const CREATIVE_AGENT_MANIFEST_VERSION = 1 as const;
@@ -58,10 +62,23 @@ export const creativeAgentHeartbeatSchema = z.object({
     canPrepareWorkingCopy: z.boolean(),
     canLaunchAllowlistedAffinity: z.boolean(),
     canUploadVerifiedExports: z.boolean(),
+    mcpOptInConfigured: z.boolean().optional(),
   }),
 });
 
 export type CreativeAgentHeartbeatInput = z.infer<typeof creativeAgentHeartbeatSchema>;
+
+export const customFieldValuesSchema = z
+  .record(
+    z
+      .string()
+      .trim()
+      .regex(/^(custom\.[a-z][a-z0-9_]{1,47}|event\.(title|dateDisplay))$/),
+    nonFilesystemTextSchema(1000)
+  )
+  .refine((map) => Object.keys(map).length <= 50, {
+    message: 'Too many custom field overrides supplied.',
+  });
 
 export const createCreativeJobDispatchSchema = z.object({
   designJobId: z.string().trim().min(1).max(80),
@@ -69,6 +86,7 @@ export const createCreativeJobDispatchSchema = z.object({
   assignedAgentId: z.string().trim().min(1).max(80).nullable().optional(),
   idempotencyKey: idempotencyKeySchema,
   exportFormats: z.array(z.enum(EXPORT_FILE_FORMATS)).min(1).max(3).default(['PNG']),
+  customFieldValues: customFieldValuesSchema.optional(),
 });
 
 export type CreateCreativeJobDispatchInput = z.infer<
@@ -98,36 +116,112 @@ export type CreativeManifestFieldValue = z.infer<
   typeof creativeManifestFieldValueSchema
 >;
 
+const FORBIDDEN_MANIFEST_SECRET_PATTERNS: readonly RegExp[] = [
+  /postgres(?:ql)?:\/\//i,
+  /x-amz-signature=/i,
+  /x-amz-credential=/i,
+  /x-amz-security-token=/i,
+  /aws_secret_access_key/i,
+  /\bbearer\s+[a-z0-9._-]{12,}/i,
+  /\bcrelune_session=/i,
+  /\bcln_agent_[a-z0-9_-]{8,}/i,
+  /\bsession_secret\b/i,
+];
+
+export function containsForbiddenManifestSecret(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return FORBIDDEN_MANIFEST_SECRET_PATTERNS.some((pattern) =>
+      pattern.test(value)
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => containsForbiddenManifestSecret(item));
+  }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const lower = k.toLowerCase();
+      if (
+        lower.includes('presigned') ||
+        lower.includes('signedurl') ||
+        lower.includes('secret') ||
+        lower.includes('password') ||
+        lower.includes('bearertoken') ||
+        lower.includes('sessiontoken') ||
+        lower.includes('storagekey')
+      ) {
+        return true;
+      }
+      if (containsForbiddenManifestSecret(v)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
- * Versioned job manifest sent to an authenticated local Windows Creative Agent.
- * Deliberately excludes local filesystem paths, secret storage credentials, and S3 signing keys.
+ * Versioned job preparation manifest (`JobPrepManifest`) used by both the
+ * standalone web manual preparation workflow and the authenticated Windows Creative Agent.
+ * Deliberately excludes local filesystem paths, database URLs, presigned URLs,
+ * session tokens, and storage credentials.
  */
-export const creativeJobManifestSchema = z.object({
-  manifestVersion: z.literal(CREATIVE_AGENT_MANIFEST_VERSION),
-  dispatchId: z.string().trim().min(1).max(80),
-  designJobId: z.string().trim().min(1).max(80),
-  organisationId: z.string().trim().min(1).max(80),
-  templateId: z.string().trim().min(1).max(80),
-  templateVersionId: z.string().trim().min(1).max(80),
-  templateFormat: z.enum(TEMPLATE_FILE_FORMATS),
-  templateStudioType: z.enum(TEMPLATE_STUDIO_TYPES),
-  templateSha256: sha256HexSchema,
-  templateRelativeFilename: agentSafeRelativeFilenameSchema,
-  preserveMasterImmutable: z.literal(true),
-  publicationRule: z.literal(CREATIVE_DISPATCH_PUBLICATION_RULE),
-  outputSpec: z.object({
-    formats: z.array(z.enum(EXPORT_FILE_FORMATS)).min(1).max(3),
-    targetPlatform: nonFilesystemTextSchema(120).nullable(),
-    dimensions: nonFilesystemTextSchema(120).nullable(),
-  }),
-  fields: z.array(creativeManifestFieldValueSchema).max(100),
-});
+export const creativeJobManifestSchema = z
+  .object({
+    manifestVersion: z.literal(CREATIVE_AGENT_MANIFEST_VERSION),
+    dispatchId: z.string().trim().min(1).max(80),
+    designJobId: z.string().trim().min(1).max(80),
+    organisationId: z.string().trim().min(1).max(80),
+    templateId: z.string().trim().min(1).max(80),
+    templateVersionId: z.string().trim().min(1).max(80),
+    templateFormat: z.enum(TEMPLATE_FILE_FORMATS),
+    templateStudioType: z.enum(TEMPLATE_STUDIO_TYPES),
+    templateSha256: sha256HexSchema,
+    templateRelativeFilename: agentSafeRelativeFilenameSchema,
+    preserveMasterImmutable: z.literal(true),
+    publicationRule: z.literal(CREATIVE_DISPATCH_PUBLICATION_RULE),
+    outputSpec: z.object({
+      formats: z.array(z.enum(EXPORT_FILE_FORMATS)).min(1).max(3),
+      targetPlatform: nonFilesystemTextSchema(120).nullable(),
+      dimensions: nonFilesystemTextSchema(120).nullable(),
+    }),
+    fields: z.array(creativeManifestFieldValueSchema).max(100),
+    createdAt: z.string().datetime().optional(),
+    designJobTitle: nonFilesystemTextSchema(160).optional(),
+    designCategory: z.enum(DESIGN_CATEGORIES).optional(),
+    templateName: nonFilesystemTextSchema(120).optional(),
+    templateVersionNumber: z.number().int().min(1).max(100000).optional(),
+    templateByteSize: z.number().int().min(1).optional(),
+    requiredText: nonFilesystemTextSchema(4000).nullable().optional(),
+    referenceNotes: nonFilesystemTextSchema(4000).nullable().optional(),
+    manualModeNotice: nonFilesystemTextSchema(500).optional(),
+    preparationInstructions: z
+      .array(nonFilesystemTextSchema(300).pipe(z.string().min(1)))
+      .max(20)
+      .optional(),
+  })
+  .refine((data) => !containsForbiddenManifestSecret(data), {
+    message:
+      'Job preparation manifest must not contain credentials, presigned URLs, or private secrets.',
+  });
 
 export type CreativeJobManifest = z.infer<typeof creativeJobManifestSchema>;
+export const jobPrepManifestSchema = creativeJobManifestSchema;
+export type JobPrepManifest = CreativeJobManifest;
+
+export const CREATIVE_EXECUTION_MODES = [
+  'MANUAL',
+  'ASSISTED',
+  'AUTOMATED',
+] as const;
+
+export type CreativeExecutionMode = (typeof CREATIVE_EXECUTION_MODES)[number];
 
 export const updateCreativeDispatchStatusSchema = z
   .object({
     status: z.enum(CREATIVE_DISPATCH_STATUSES),
+    claimToken: z.string().trim().min(16).max(200).optional(),
+    executionMode: z.enum(CREATIVE_EXECUTION_MODES).optional(),
+    note: nonFilesystemTextSchema(500).nullable().optional(),
     errorCode: z
       .string()
       .trim()
@@ -181,5 +275,51 @@ export interface CreativeJobDispatchSummary {
   updatedAt: string;
 }
 
-export { CREATIVE_AGENT_STATUSES };
+export interface PreparationValidationIssue {
+  code: string;
+  severity: 'ERROR' | 'WARNING';
+  fieldKey?: string;
+  message: string;
+}
 
+export interface DesignJobTemplateBindingSummary {
+  templateId: string;
+  templateName: string;
+  templateCategory: DesignCategory;
+  templateStudioType: (typeof TEMPLATE_STUDIO_TYPES)[number];
+  templateIsActive: boolean;
+  templateVersionId: string;
+  versionNumber: number;
+  format: (typeof TEMPLATE_FILE_FORMATS)[number];
+  originalFilename: string;
+  byteSize: number;
+  sha256: string;
+  widthPx: number | null;
+  heightPx: number | null;
+  hasPreview: boolean;
+  inspectionStatus: TemplateInspectionStatus;
+  activeVersionId: string | null;
+  isPinnedToOlderVersion: boolean;
+}
+
+export interface DesignJobPreparationSnapshot {
+  designJobId: string;
+  ready: boolean;
+  issues: PreparationValidationIssue[];
+  warnings: PreparationValidationIssue[];
+  binding: DesignJobTemplateBindingSummary | null;
+  defaultExportFormats: ExportFileFormat[];
+  manifestPreview: JobPrepManifest | null;
+  dispatches: CreativeJobDispatchSummary[];
+  exports: ExportRecordSummary[];
+  hasActiveDispatch: boolean;
+  manualFallback: {
+    available: boolean;
+    manifestDownloadPath: string;
+    templateMasterDownloadPath: string | null;
+    memberPhotoDownloadPath: string | null;
+    notice: string;
+  };
+}
+
+export { CREATIVE_AGENT_STATUSES };

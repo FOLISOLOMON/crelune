@@ -1,10 +1,20 @@
 import type {
+  ApproveExportForPublishInput,
+  CreateCreativeJobDispatchInput,
   CreateDesignJobInput,
+  CreateExportRecordInput,
+  CreateExportUploadIntentInput,
+  CreativeJobDispatchSummary,
+  CreativeUploadIntentSummary,
   DesignJobDetail,
   DesignJobListQuery,
+  DesignJobPreparationSnapshot,
   DesignJobStatus,
   DesignJobSummary,
+  ExportRecordSummary,
+  JobPrepManifest,
   MemberPaginationMeta,
+  PresignedUploadTarget,
   TransitionDesignJobInput,
   UpdateDesignJobInput,
 } from '@crelune/shared';
@@ -143,5 +153,141 @@ export async function transitionDesignJobRequest(
     throw buildError(res, body, 'Unable to update design job status.');
   }
   return body.job as DesignJobDetail;
+}
+
+export async function fetchDesignJobPreparationRequest(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<DesignJobPreparationSnapshot> {
+  const res = await fetch(
+    `/api/designs/${encodeURIComponent(jobId)}/preparation`,
+    {
+      method: 'GET',
+      credentials: 'same-origin',
+      signal,
+    }
+  );
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to load job preparation snapshot.');
+  }
+  return body.preparation as DesignJobPreparationSnapshot;
+}
+
+export async function createCreativeDispatchRequest(
+  jobId: string,
+  payload: CreateCreativeJobDispatchInput
+): Promise<{
+  dispatch: CreativeJobDispatchSummary;
+  manifest: JobPrepManifest;
+  idempotentReplay: boolean;
+}> {
+  const res = await fetch(
+    `/api/designs/${encodeURIComponent(jobId)}/dispatches`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to prepare creative job dispatch.');
+  }
+  return body as {
+    dispatch: CreativeJobDispatchSummary;
+    manifest: JobPrepManifest;
+    idempotentReplay: boolean;
+  };
+}
+
+export async function cancelCreativeDispatchRequest(
+  jobId: string,
+  dispatchId: string,
+  reason?: string
+): Promise<CreativeJobDispatchSummary> {
+  const res = await fetch(
+    `/api/designs/${encodeURIComponent(jobId)}/dispatches/${encodeURIComponent(
+      dispatchId
+    )}/cancel`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reason ? { reason } : {}),
+    }
+  );
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to cancel creative dispatch.');
+  }
+  return body.dispatch as CreativeJobDispatchSummary;
+}
+
+export async function createExportUploadIntentRequest(
+  jobId: string,
+  payload: CreateExportUploadIntentInput
+): Promise<{
+  intent: CreativeUploadIntentSummary;
+  upload: PresignedUploadTarget;
+}> {
+  const res = await fetch(
+    `/api/designs/${encodeURIComponent(jobId)}/exports/upload-intents`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to initialize export upload.');
+  }
+  return body as {
+    intent: CreativeUploadIntentSummary;
+    upload: PresignedUploadTarget;
+  };
+}
+
+export async function completeExportRecordRequest(
+  jobId: string,
+  payload: CreateExportRecordInput
+): Promise<{ exportRecord: ExportRecordSummary; idempotentReplay: boolean }> {
+  const res = await fetch(`/api/designs/${encodeURIComponent(jobId)}/exports`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to verify and register export file.');
+  }
+  return body as { exportRecord: ExportRecordSummary; idempotentReplay: boolean };
+}
+
+export async function setExportPublishApprovalRequest(
+  jobId: string,
+  exportId: string,
+  payload: ApproveExportForPublishInput
+): Promise<ExportRecordSummary> {
+  const res = await fetch(
+    `/api/designs/${encodeURIComponent(jobId)}/exports/${encodeURIComponent(
+      exportId
+    )}/approval`,
+    {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }
+  );
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to update publish approval.');
+  }
+  return body.exportRecord as ExportRecordSummary;
 }
 
