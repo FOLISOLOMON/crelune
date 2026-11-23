@@ -49,6 +49,7 @@ import {
   computeSha256Hex,
   inspectExistingWorkspaces,
   prepareIsolatedJobWorkspace,
+  safeUnlinkTempFile,
   verifyMasterTemplateIntegrity,
   WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
 } from './workspace/job-workspace.js';
@@ -1060,6 +1061,632 @@ describe('Windows Creative Agent — Workspace Preservation, Working Assets, Aff
     expect(workerAResult.workingCopyStatus).toBe('PRESERVED_UNCHANGED');
     expect(workerAResult.workingCopySha256).toBe(psdSha);
     expect(await fs.readdir(workerBResult.tempDir)).toEqual([]);
+  });
+
+  it('handles temporary staging cleanup deterministically: success, ENOENT, transient retries, retry exhaustion, and post-publication link cleanup failure', async () => {
+    const tempDir = await makeTempDir('crelune-cleanup-unit-');
+    const noSleep = async () => {};
+
+    // 1. Successful temporary-file cleanup
+    const file1 = path.join(tempDir, '.stage_success.tmp');
+    await fs.writeFile(file1, 'staged-bytes');
+    const res1 = await safeUnlinkTempFile(file1, { sleep: noSleep });
+    expect(res1).toEqual({ removed: true, alreadyMissing: false, attempts: 1 });
+    await expect(fs.access(file1)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // 2. ENOENT treated as successful cleanup
+    const missingFile = path.join(tempDir, '.stage_missing.tmp');
+    const res2 = await safeUnlinkTempFile(missingFile, { sleep: noSleep });
+    expect(res2).toEqual({ removed: true, alreadyMissing: true, attempts: 1 });
+
+    // 3. Transient Windows EBUSY / EPERM / EACCES retries followed by successful cleanup
+    const file3 = path.join(tempDir, '.stage_transient.tmp');
+    await fs.writeFile(file3, 'staged-bytes');
+    const sleepCalls: number[] = [];
+    const transientCodes = ['EBUSY', 'EPERM', 'EACCES'] as const;
+    let transientIdx = 0;
+    const res3 = await safeUnlinkTempFile(file3, {
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+      unlinkFile: async (p) => {
+        if (transientIdx < transientCodes.length) {
+          const code = transientCodes[transientIdx++]!;
+          const err = new Error(`Transient ${code}`) as NodeJS.ErrnoException;
+          err.code = code;
+          throw err;
+        }
+        await fs.unlink(p);
+      },
+    });
+    expect(res3).toEqual({ removed: true, alreadyMissing: false, attempts: 4 });
+    expect(sleepCalls).toEqual([20, 40, 60]);
+    await expect(fs.access(file3)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // 4a. Persistent EBUSY after all retries surfaces typed STAGING_CLEANUP_FAILED
+    const file4 = path.join(tempDir, '.stage_locked.tmp');
+    await fs.writeFile(file4, 'still-locked');
+    const retrySleeps: number[] = [];
+    let exhaustedErr: unknown;
+    try {
+      await safeUnlinkTempFile(file4, {
+        sleep: async (ms) => {
+          retrySleeps.push(ms);
+        },
+        unlinkFile: async () => {
+          const err = new Error('Persistent EBUSY') as NodeJS.ErrnoException;
+          err.code = 'EBUSY';
+          throw err;
+        },
+      });
+    } catch (err) {
+      exhaustedErr = err;
+    }
+    expect(exhaustedErr).toBeInstanceOf(AgentWorkspaceError);
+    const cleanupWsErr = exhaustedErr as AgentWorkspaceError;
+    expect(cleanupWsErr.code).toBe('STAGING_CLEANUP_FAILED');
+    expect(cleanupWsErr.errnoCode).toBe('EBUSY');
+    expect(cleanupWsErr.attempts).toBe(4);
+    expect(cleanupWsErr.targetPublished).toBe(false);
+    expect(cleanupWsErr.stagedPath).toBe(file4);
+    expect(cleanupWsErr.cleanupError).toBeDefined();
+    expect(cleanupWsErr.message).not.toContain(tempDir);
+    expect(retrySleeps).toEqual([20, 40, 60]);
+    // Staged file genuinely remained on disk (never falsely reported clean)
+    await expect(fs.access(file4)).resolves.toBeUndefined();
+    await fs.unlink(file4);
+
+    // 4b. Non-transient error (EIO) fails immediately on attempt 1 without pointless retries
+    let nonTransientAttempts = 0;
+    await expect(
+      safeUnlinkTempFile(path.join(tempDir, '.stage_eio.tmp'), {
+        sleep: noSleep,
+        unlinkFile: async () => {
+          nonTransientAttempts += 1;
+          const err = new Error('Disk EIO') as NodeJS.ErrnoException;
+          err.code = 'EIO';
+          throw err;
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentWorkspaceError',
+      code: 'STAGING_CLEANUP_FAILED',
+      errnoCode: 'EIO',
+      attempts: 1,
+      targetPublished: false,
+    });
+    expect(nonTransientAttempts).toBe(1);
+
+    // 7. Hard-link publication succeeds, then staging-link cleanup persistently fails:
+    // MUST throw STAGING_LINK_CLEANUP_FAILED_AFTER_PUBLICATION with targetPublished: true
+    // and MUST NOT misleadingly claim the target was not published!
+    const pubRoot = await makeTempDir('crelune-postpub-cleanup-');
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+    const pubManifest = createValidManifest({
+      designJobId: 'job_postpub_cleanup',
+      dispatchId: 'dsp_postpub_cleanup',
+      templateSha256: psdSha,
+    });
+    const pubJobDir = path.join(pubRoot, 'jobs', pubManifest.designJobId);
+    const expectedMasterPath = path.join(pubJobDir, 'source', 'birthday_gold_frame.psd');
+    const expectedWorkingPath = path.join(
+      pubJobDir,
+      'working',
+      'birthday_gold_frame_dsp_postpub_cleanup_working.psd'
+    );
+
+    let workingStagedPath: string | null = null;
+    let postPubErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: pubRoot,
+        rawManifest: pubManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          beforeAtomicLink: async ({ stagedPath, targetPath }) => {
+            if (targetPath === expectedWorkingPath) {
+              workingStagedPath = stagedPath;
+            }
+          },
+          unlinkFile: async (p) => {
+            if (workingStagedPath && p === workingStagedPath) {
+              const err = new Error('AV scanner lock EBUSY') as NodeJS.ErrnoException;
+              err.code = 'EBUSY';
+              throw err;
+            }
+            await fs.unlink(p);
+          },
+        },
+      });
+    } catch (err) {
+      postPubErr = err;
+    }
+
+    expect(postPubErr).toBeInstanceOf(AgentWorkspaceError);
+    const postPubWsErr = postPubErr as AgentWorkspaceError;
+    expect(postPubWsErr.code).toBe('STAGING_LINK_CLEANUP_FAILED_AFTER_PUBLICATION');
+    expect(postPubWsErr.targetPublished).toBe(true);
+    expect(postPubWsErr.targetPath).toBe(expectedWorkingPath);
+    expect(postPubWsErr.stagedPath).toBe(workingStagedPath);
+    expect(postPubWsErr.errnoCode).toBe('EBUSY');
+    expect(postPubWsErr.attempts).toBe(4);
+    expect(postPubWsErr.cleanupError).toBeDefined();
+    expect(postPubWsErr.message).toMatch(/published atomically/i);
+    expect(postPubWsErr.message).not.toContain(pubRoot);
+
+    // Verify published target AND master genuinely exist intact on disk with exact SHA-256
+    expect(
+      (
+        await verifyMasterTemplateIntegrity({
+          masterSourcePath: expectedMasterPath,
+          expectedSha256: psdSha,
+        })
+      ).ok
+    ).toBe(true);
+    expect(computeSha256Hex(await fs.readFile(expectedWorkingPath))).toBe(psdSha);
+    // Staging hard link genuinely remained in working/tmp/ (link count === 2) until cleaned
+    expect((await fs.stat(expectedWorkingPath)).nlink).toBe(2);
+    expect(await fs.readdir(path.join(pubJobDir, 'working', 'tmp'))).toHaveLength(1);
+    expect(await cleanupWorkspaceTempFiles(pubRoot, pubManifest.designJobId)).toBe(1);
+    expect(await fs.readdir(path.join(pubJobDir, 'working', 'tmp'))).toEqual([]);
+    expect((await fs.stat(expectedWorkingPath)).nlink).toBe(1);
+  });
+
+  it('aborts staging on sync or close failure, never publishes target, preserves both primary and cleanup errors, and protects existing creative files', async () => {
+    const noSleep = async () => {};
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+    const photoBytes = createMinimalValidJpegBytes(320, 320);
+    const photoSha = computeSha256Hex(photoBytes);
+
+    // 5 & 9. Sync failure before publication -> handle closed, temp deleted, fs.link NEVER called, no target published
+    const syncRoot = await makeTempDir('crelune-sync-fail-');
+    const syncManifest = createValidManifest({
+      designJobId: 'job_sync_fail',
+      dispatchId: 'dsp_sync_fail',
+      templateSha256: psdSha,
+    });
+    const linkSpy = vi.fn(async (a: string, b: string) => fs.link(a, b));
+    let syncHandleClosed = false;
+
+    let syncErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: syncRoot,
+        rawManifest: syncManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          linkFile: linkSpy,
+          openFile: async (p, flags, mode) => {
+            const real = await fs.open(p, flags, mode);
+            return {
+              writeFile: (data) => real.writeFile(data),
+              sync: async () => {
+                const err = new Error('Simulated fsync EIO') as NodeJS.ErrnoException;
+                err.code = 'EIO';
+                throw err;
+              },
+              close: async () => {
+                syncHandleClosed = true;
+                await real.close();
+              },
+            };
+          },
+        },
+      });
+    } catch (err) {
+      syncErr = err;
+    }
+
+    expect(syncErr).toBeInstanceOf(AgentWorkspaceError);
+    const syncWsErr = syncErr as AgentWorkspaceError;
+    expect(syncWsErr.code).toBe('STAGING_SYNC_FAILED');
+    expect(syncWsErr.errnoCode).toBe('EIO');
+    expect(syncWsErr.targetPublished).toBe(false);
+    expect(syncWsErr.cause).toBeInstanceOf(Error);
+    expect(syncWsErr.cleanupError).toBeUndefined();
+    expect(syncHandleClosed).toBe(true);
+    expect(linkSpy).not.toHaveBeenCalled();
+
+    const syncJobDir = path.join(syncRoot, 'jobs', syncManifest.designJobId);
+    expect(await fs.readdir(path.join(syncJobDir, 'source'))).toEqual([]);
+    expect(await fs.readdir(path.join(syncJobDir, 'working'))).toEqual(['tmp']);
+    expect(await fs.readdir(path.join(syncJobDir, 'working', 'tmp'))).toEqual([]);
+
+    // 5b. Sync failure + cleanup failure simultaneously -> preserves BOTH sync cause AND cleanupError!
+    const bothRoot = await makeTempDir('crelune-sync-cleanup-both-');
+    const bothManifest = createValidManifest({
+      designJobId: 'job_sync_and_cleanup_fail',
+      dispatchId: 'dsp_sync_and_cleanup_fail',
+      templateSha256: psdSha,
+    });
+    const syncOrigErr = Object.assign(new Error('Original sync EIO'), {
+      code: 'EIO',
+    });
+    const unlinkOrigErr = Object.assign(new Error('Persistent unlink EPERM'), {
+      code: 'EPERM',
+    });
+    const linkSpy2 = vi.fn(async (a: string, b: string) => fs.link(a, b));
+
+    let bothErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: bothRoot,
+        rawManifest: bothManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          linkFile: linkSpy2,
+          openFile: async (p, flags, mode) => {
+            const real = await fs.open(p, flags, mode);
+            return {
+              writeFile: (data) => real.writeFile(data),
+              sync: async () => {
+                throw syncOrigErr;
+              },
+              close: () => real.close(),
+            };
+          },
+          unlinkFile: async () => {
+            throw unlinkOrigErr;
+          },
+        },
+      });
+    } catch (err) {
+      bothErr = err;
+    }
+
+    expect(bothErr).toBeInstanceOf(AgentWorkspaceError);
+    const bothWsErr = bothErr as AgentWorkspaceError;
+    expect(bothWsErr.code).toBe('STAGING_SYNC_FAILED');
+    expect(bothWsErr.errnoCode).toBe('EIO');
+    expect(bothWsErr.targetPublished).toBe(false);
+    expect(bothWsErr.cause).toBe(syncOrigErr);
+    expect(bothWsErr.cleanupError).toBeInstanceOf(AgentWorkspaceError);
+    expect((bothWsErr.cleanupError as AgentWorkspaceError).code).toBe(
+      'STAGING_CLEANUP_FAILED'
+    );
+    expect((bothWsErr.cleanupError as AgentWorkspaceError).cause).toBe(unlinkOrigErr);
+    expect(bothWsErr.message).toMatch(/synchronization failed \(EIO\)/i);
+    expect(bothWsErr.message).toMatch(/staging file also failed \(EPERM\)/i);
+    expect(linkSpy2).not.toHaveBeenCalled();
+    expect(
+      await fs.readdir(
+        path.join(bothRoot, 'jobs', bothManifest.designJobId, 'source')
+      )
+    ).toEqual([]);
+
+    // 6a. Close failure after write + sync -> cleans up temp file, never double-closes, never links
+    const closeRoot = await makeTempDir('crelune-close-fail-');
+    const closeManifest = createValidManifest({
+      designJobId: 'job_close_fail',
+      dispatchId: 'dsp_close_fail',
+      templateSha256: psdSha,
+    });
+    let closeCalls = 0;
+    const closeOrigErr = Object.assign(new Error('Simulated close EIO'), {
+      code: 'EIO',
+    });
+    const linkSpy3 = vi.fn(async (a: string, b: string) => fs.link(a, b));
+
+    let closeErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: closeRoot,
+        rawManifest: closeManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          linkFile: linkSpy3,
+          openFile: async (p, flags, mode) => {
+            const real = await fs.open(p, flags, mode);
+            return {
+              writeFile: (data) => real.writeFile(data),
+              sync: () => real.sync(),
+              close: async () => {
+                closeCalls += 1;
+                await real.close();
+                throw closeOrigErr;
+              },
+            };
+          },
+        },
+      });
+    } catch (err) {
+      closeErr = err;
+    }
+
+    expect(closeErr).toBeInstanceOf(AgentWorkspaceError);
+    const closeWsErr = closeErr as AgentWorkspaceError;
+    expect(closeWsErr.code).toBe('STAGING_WRITE_FAILED');
+    expect(closeWsErr.targetPublished).toBe(false);
+    expect(closeWsErr.cause).toBe(closeOrigErr);
+    expect(closeCalls).toBe(1);
+    expect(linkSpy3).not.toHaveBeenCalled();
+    const closeJobDir = path.join(closeRoot, 'jobs', closeManifest.designJobId);
+    expect(await fs.readdir(path.join(closeJobDir, 'source'))).toEqual([]);
+    expect(await fs.readdir(path.join(closeJobDir, 'working', 'tmp'))).toEqual([]);
+
+    // 6b. Write failure + close failure + cleanup failure preserves all three errors
+    const tripleRoot = await makeTempDir('crelune-triple-fail-');
+    const tripleManifest = createValidManifest({
+      designJobId: 'job_triple_fail',
+      dispatchId: 'dsp_triple_fail',
+      templateSha256: psdSha,
+    });
+    const writeFailErr = Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    const closeFailErr = Object.assign(new Error('EBADF'), { code: 'EBADF' });
+    const unlinkFailErr = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+
+    let tripleErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: tripleRoot,
+        rawManifest: tripleManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          openFile: async (p, flags, mode) => {
+            const real = await fs.open(p, flags, mode);
+            return {
+              writeFile: async () => {
+                throw writeFailErr;
+              },
+              sync: () => real.sync(),
+              close: async () => {
+                await real.close();
+                throw closeFailErr;
+              },
+            };
+          },
+          unlinkFile: async () => {
+            throw unlinkFailErr;
+          },
+        },
+      });
+    } catch (err) {
+      tripleErr = err;
+    }
+
+    expect(tripleErr).toBeInstanceOf(AgentWorkspaceError);
+    const tripleWsErr = tripleErr as AgentWorkspaceError;
+    expect(tripleWsErr.code).toBe('STAGING_WRITE_FAILED');
+    expect(tripleWsErr.cause).toBe(writeFailErr);
+    expect(tripleWsErr.closeError).toBe(closeFailErr);
+    expect(tripleWsErr.cleanupError).toBeInstanceOf(AgentWorkspaceError);
+    expect((tripleWsErr.cleanupError as AgentWorkspaceError).cause).toBe(
+      unlinkFailErr
+    );
+
+    // 8 & 9b. Existing working copies (artist edits), source masters, and exports survive
+    // sync failures and atomic-rename + cleanup failures across explicit replacement, assets,
+    // manifest.json, and PREPARATION_GUIDE.txt!
+    const preserveRoot = await makeTempDir('crelune-durability-preserve-');
+    const preserveManifest = createValidManifest({
+      designJobId: 'job_durability_preserve',
+      dispatchId: 'dsp_durability_preserve',
+      templateSha256: psdSha,
+      assetSha256: photoSha,
+    });
+    const initial = await prepareIsolatedJobWorkspace({
+      workspaceRoot: preserveRoot,
+      rawManifest: preserveManifest,
+      templateBytes: psdBytes,
+      assets: [
+        {
+          assetId: 'mem_kofi_01',
+          relativeFilename: 'assets/kofi_photo.jpg',
+          bytes: photoBytes,
+          expectedSha256: photoSha,
+        },
+      ],
+    });
+
+    const artistEditedBytes = Buffer.concat([
+      Buffer.from(psdBytes),
+      Buffer.from('ARTIST_EDITS_PROTECTED_ON_SYNC_AND_CLEANUP_FAIL'),
+    ]);
+    await fs.writeFile(initial.workingCopyPath, artistEditedBytes);
+    const exportBytes = createMinimalValidPngBytes(1080, 1350);
+    const existingExportPath = path.join(initial.exportsDir, 'keep-export.png');
+    await fs.writeFile(existingExportPath, exportBytes);
+    const originalManifestText = await fs.readFile(initial.manifestPath, 'utf8');
+
+    // 8a. Sync failure during explicit working-copy replacement (3rd stage: master, working EEXIST, then replace!)
+    let openCount = 0;
+    const renameSpy = vi.fn(async (a: string, b: string) => fs.rename(a, b));
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: preserveRoot,
+        rawManifest: preserveManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        explicitWorkingCopyReplacementApproval: {
+          approvedByUser: true,
+          confirmationToken: WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
+          reason: 'Artist requested replacement test.',
+        },
+        atomicPublicationOps: {
+          sleep: noSleep,
+          renameFile: renameSpy,
+          openFile: async (p, flags, mode) => {
+            openCount += 1;
+            const real = await fs.open(p, flags, mode);
+            const failThisSync = openCount === 3;
+            return {
+              writeFile: (data) => real.writeFile(data),
+              sync: async () => {
+                if (failThisSync) {
+                  const err = new Error('Replace sync EIO') as NodeJS.ErrnoException;
+                  err.code = 'EIO';
+                  throw err;
+                }
+                await real.sync();
+              },
+              close: () => real.close(),
+            };
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentWorkspaceError',
+      code: 'STAGING_SYNC_FAILED',
+      errnoCode: 'EIO',
+      targetPublished: false,
+    });
+    expect(renameSpy).not.toHaveBeenCalled();
+
+    // 8b. Atomic rename failure + cleanup failure on manifest.json preserves BOTH errors!
+    const manifestRenameErr = Object.assign(new Error('Rename EPERM'), {
+      code: 'EPERM',
+    });
+    const manifestUnlinkErr = Object.assign(new Error('Cleanup EBUSY'), {
+      code: 'EBUSY',
+    });
+    let manifestStagedPath: string | null = null;
+    let manifestCombinedErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: preserveRoot,
+        rawManifest: preserveManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          renameFile: async (oldPath, newPath) => {
+            if (newPath === initial.manifestPath) {
+              manifestStagedPath = oldPath;
+              throw manifestRenameErr;
+            }
+            await fs.rename(oldPath, newPath);
+          },
+          unlinkFile: async (p) => {
+            if (manifestStagedPath && p === manifestStagedPath) {
+              throw manifestUnlinkErr;
+            }
+            await fs.unlink(p);
+          },
+        },
+      });
+    } catch (err) {
+      manifestCombinedErr = err;
+    }
+    expect(manifestCombinedErr).toBeInstanceOf(AgentWorkspaceError);
+    const manifestWsErr = manifestCombinedErr as AgentWorkspaceError;
+    expect(manifestWsErr.code).toBe('ATOMIC_PUBLICATION_FAILED');
+    expect(manifestWsErr.cause).toBe(manifestRenameErr);
+    expect(manifestWsErr.cleanupError).toBeInstanceOf(AgentWorkspaceError);
+    expect((manifestWsErr.cleanupError as AgentWorkspaceError).cause).toBe(
+      manifestUnlinkErr
+    );
+    expect(await cleanupWorkspaceTempFiles(preserveRoot, initial.jobId)).toBe(1);
+
+    // 8c. Existing target (EEXIST) + cleanup failure surfaces STAGING_CLEANUP_FAILED without touching existing files
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: preserveRoot,
+        rawManifest: preserveManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          unlinkFile: async () => {
+            const err = new Error('Locked EBUSY') as NodeJS.ErrnoException;
+            err.code = 'EBUSY';
+            throw err;
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentWorkspaceError',
+      code: 'STAGING_CLEANUP_FAILED',
+      errnoCode: 'EBUSY',
+      targetPublished: false,
+    });
+    expect(await cleanupWorkspaceTempFiles(preserveRoot, initial.jobId)).toBe(1);
+
+    // Existing working copy (artist edits), source master, export, and manifest remain 100% intact!
+    expect(
+      Buffer.compare(await fs.readFile(initial.workingCopyPath), artistEditedBytes)
+    ).toBe(0);
+    expect(
+      (
+        await verifyMasterTemplateIntegrity({
+          masterSourcePath: initial.masterSourcePath,
+          expectedSha256: psdSha,
+        })
+      ).ok
+    ).toBe(true);
+    expect(
+      Buffer.compare(
+        await fs.readFile(existingExportPath),
+        Buffer.from(exportBytes)
+      )
+    ).toBe(0);
+    expect(await fs.readFile(initial.manifestPath, 'utf8')).toBe(
+      originalManifestText
+    );
+    expect(await fs.readdir(initial.tempDir)).toEqual([]);
+
+    // 10. Concurrent preparation where one worker fails sync while another succeeds via real NTFS hard link
+    const concRoot = await makeTempDir('crelune-concurrent-sync-race-');
+    const concManifest = createValidManifest({
+      designJobId: 'job_conc_sync_race',
+      dispatchId: 'dsp_conc_sync_race',
+      templateSha256: psdSha,
+    });
+    const [failingOutcome, healthyOutcome] = await Promise.allSettled([
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: concRoot,
+        rawManifest: concManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          sleep: noSleep,
+          openFile: async (p, flags, mode) => {
+            const real = await fs.open(p, flags, mode);
+            return {
+              writeFile: (data) => real.writeFile(data),
+              sync: async () => {
+                const err = new Error('Simulated concurrent sync EIO') as NodeJS.ErrnoException;
+                err.code = 'EIO';
+                throw err;
+              },
+              close: () => real.close(),
+            };
+          },
+        },
+      }),
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: concRoot,
+        rawManifest: concManifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+    ]);
+
+    expect(failingOutcome.status).toBe('rejected');
+    if (failingOutcome.status === 'rejected') {
+      expect(failingOutcome.reason).toBeInstanceOf(AgentWorkspaceError);
+      expect((failingOutcome.reason as AgentWorkspaceError).code).toBe(
+        'STAGING_SYNC_FAILED'
+      );
+    }
+    expect(healthyOutcome.status).toBe('fulfilled');
+    if (healthyOutcome.status === 'fulfilled') {
+      expect(healthyOutcome.value.workingCopyStatus).toBe('CREATED');
+      expect(healthyOutcome.value.workingCopySha256).toBe(psdSha);
+      expect(healthyOutcome.value.masterVerified).toBe(true);
+      expect(await fs.readdir(healthyOutcome.value.tempDir)).toEqual([]);
+    }
   });
 
   it('rejects tampered template downloads and unsupported WORKING_ASSET manifests before touching disk', async () => {

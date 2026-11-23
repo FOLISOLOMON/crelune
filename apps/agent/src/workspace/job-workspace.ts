@@ -4,16 +4,21 @@
  * Materializes isolated job workspaces strictly inside:
  *   `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/`
  *
- * Stage 5.5.2–5.5.3 Fail-Closed Atomic & Preservation-First Safety Invariants:
+ * Stage 5.5.2–5.5.4 Fail-Closed Atomic, Durable & Preservation-First Safety Invariants:
  * - New source masters (`source/`) and new working copies (`working/`) are created
- *   atomically via exclusive staged file creation (`open(..., 'wx')` inside
- *   `working/tmp/`) followed by atomic hard-link publication (`fs.link()`).
+ *   atomically via exclusive staged file creation (`open(..., 'wx', 0o600)` inside
+ *   `working/tmp/`), mandatory durability sync (`handle.sync()`), safe handle close,
+ *   and atomic hard-link publication (`fs.link()`).
  *   If another process creates the file first (`EEXIST`), the existing file is
- *   preserved untouched. If the filesystem does not support atomic hard-link
- *   publication (`EXDEV`, `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`), creation FAILS
- *   CLOSED with a typed `AgentWorkspaceError` — NEVER falling back to direct
- *   creation (`open(targetPath, 'wx')` + write) or unconditional `writeFile()`,
- *   and always cleaning up staged temp files on every failure path.
+ *   preserved untouched. If staging sync fails, the target is NEVER published.
+ *   If the filesystem does not support atomic hard-link publication (`EXDEV`,
+ *   `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`), creation FAILS CLOSED with a typed
+ *   `AgentWorkspaceError` — NEVER falling back to direct creation (`open(targetPath,
+ *   'wx')` + write) or unconditional `writeFile()`.
+ * - Temporary staging cleanup (`safeUnlinkTempFile`) retries bounded transient
+ *   Windows `EPERM`/`EBUSY`/`EACCES` locks, treats `ENOENT` as clean removal, and
+ *   surfaces typed cleanup errors on retry exhaustion without losing primary errors
+ *   or misleadingly reporting an already-published target as unpublished.
  * - Existing working copies are preserved even when their SHA-256 differs from the
  *   source master (legitimate artist edits are never treated as corrupted masters).
  * - Destructive replacement of an existing working copy is impossible through
@@ -48,7 +53,11 @@ import { sanitizeLogMeta } from '../security/logger.js';
 
 export type AgentWorkspaceErrorCode =
   | 'ATOMIC_PUBLICATION_UNSUPPORTED'
-  | 'ATOMIC_PUBLICATION_FAILED';
+  | 'ATOMIC_PUBLICATION_FAILED'
+  | 'STAGING_SYNC_FAILED'
+  | 'STAGING_WRITE_FAILED'
+  | 'STAGING_CLEANUP_FAILED'
+  | 'STAGING_LINK_CLEANUP_FAILED_AFTER_PUBLICATION';
 
 const UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES = new Set([
   'EXDEV',
@@ -57,17 +66,31 @@ const UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES = new Set([
   'EOPNOTSUPP',
 ]);
 
+const TRANSIENT_FS_LOCK_ERRNO_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const DEFAULT_UNLINK_MAX_ATTEMPTS = 4;
+const DEFAULT_RENAME_MAX_ATTEMPTS = 4;
+
 export class AgentWorkspaceError extends Error {
   public readonly code: AgentWorkspaceErrorCode;
   public readonly targetPath: string;
+  public readonly stagedPath?: string;
   public readonly errnoCode?: string;
+  public readonly targetPublished: boolean;
+  public readonly attempts?: number;
+  public readonly closeError?: unknown;
+  public readonly cleanupError?: unknown;
 
   constructor(params: {
     code: AgentWorkspaceErrorCode;
     message: string;
     targetPath: string;
+    stagedPath?: string;
     errnoCode?: string;
+    targetPublished?: boolean;
+    attempts?: number;
     cause?: unknown;
+    closeError?: unknown;
+    cleanupError?: unknown;
   }) {
     super(
       params.message,
@@ -76,16 +99,47 @@ export class AgentWorkspaceError extends Error {
     this.name = 'AgentWorkspaceError';
     this.code = params.code;
     this.targetPath = params.targetPath;
+    this.stagedPath = params.stagedPath;
     this.errnoCode = params.errnoCode;
+    this.targetPublished = params.targetPublished ?? false;
+    this.attempts = params.attempts;
+    this.closeError = params.closeError;
+    this.cleanupError = params.cleanupError;
   }
 }
 
+export interface WorkspaceStagingFileHandle {
+  writeFile(data: Uint8Array | string): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
 export interface WorkspaceAtomicPublicationOps {
+  /**
+   * Optional override for `fs.open` used in deterministic staging write/sync/close tests.
+   */
+  openFile?: (
+    filePath: string,
+    flags: string,
+    mode?: number
+  ) => Promise<WorkspaceStagingFileHandle>;
   /**
    * Optional override for `fs.link` used in tests to deterministically simulate
    * filesystems without hard-link support (`EXDEV`, `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`).
    */
   linkFile?: (existingPath: string, newPath: string) => Promise<void>;
+  /**
+   * Optional override for `fs.rename` used in deterministic atomic-replace failure tests.
+   */
+  renameFile?: (oldPath: string, newPath: string) => Promise<void>;
+  /**
+   * Optional override for `fs.unlink` used in deterministic staging cleanup failure tests.
+   */
+  unlinkFile?: (filePath: string) => Promise<void>;
+  /**
+   * Optional override for bounded retry backoff sleeps in deterministic tests.
+   */
+  sleep?: (ms: number) => Promise<void>;
   /**
    * Optional hook invoked after staging 100% of bytes in `working/tmp/` and
    * immediately before atomic hard-link publication at `targetPath`.
@@ -173,64 +227,247 @@ async function listRegularFilesSafe(dirPath: string): Promise<string[]> {
   }
 }
 
-async function safeUnlinkTempFile(tempPath: string): Promise<void> {
-  for (let attempt = 0; attempt < 4; attempt++) {
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface TempCleanupResult {
+  removed: true;
+  alreadyMissing: boolean;
+  attempts: number;
+}
+
+/**
+ * Removes a temporary staging file with bounded retries for transient Windows
+ * file locks (`EPERM`, `EBUSY`, `EACCES`). Treats `ENOENT` as successful cleanup.
+ *
+ * Stage 5.5.4: Never silently ignores cleanup failures after retry exhaustion.
+ * Surfaces a typed `AgentWorkspaceError` distinguishing post-publication
+ * staging-link cleanup failure (`targetPublished: true`) from pre-publication
+ * or unused staging cleanup failure (`targetPublished: false`).
+ */
+export async function safeUnlinkTempFile(
+  tempPath: string,
+  ops?: Pick<WorkspaceAtomicPublicationOps, 'unlinkFile' | 'sleep'> & {
+    targetPath?: string;
+    targetPublished?: boolean;
+  }
+): Promise<TempCleanupResult> {
+  const unlinkFn = ops?.unlinkFile ?? fs.unlink;
+  const sleepFn = ops?.sleep ?? defaultSleep;
+
+  let lastErr: unknown;
+  let lastErrno: string | undefined;
+  let attemptsExecuted = 0;
+
+  for (let attempt = 1; attempt <= DEFAULT_UNLINK_MAX_ATTEMPTS; attempt++) {
+    attemptsExecuted = attempt;
     try {
-      await fs.unlink(tempPath);
-      return;
+      await unlinkFn(tempPath);
+      return { removed: true, alreadyMissing: false, attempts: attempt };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT') {
-        return;
+        return { removed: true, alreadyMissing: true, attempts: attempt };
       }
+      lastErr = err;
+      lastErrno = code;
       if (
-        (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') &&
-        attempt < 3
+        code &&
+        TRANSIENT_FS_LOCK_ERRNO_CODES.has(code) &&
+        attempt < DEFAULT_UNLINK_MAX_ATTEMPTS
       ) {
-        await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+        await sleepFn(20 * attempt);
         continue;
       }
-      return;
+      break;
     }
   }
+
+  const targetPublished = ops?.targetPublished ?? false;
+  throw new AgentWorkspaceError({
+    code: targetPublished
+      ? 'STAGING_LINK_CLEANUP_FAILED_AFTER_PUBLICATION'
+      : 'STAGING_CLEANUP_FAILED',
+    targetPath: ops?.targetPath ?? tempPath,
+    stagedPath: tempPath,
+    errnoCode: lastErrno,
+    targetPublished,
+    attempts: attemptsExecuted,
+    cause: lastErr,
+    cleanupError: lastErr,
+    message: targetPublished
+      ? `Target file was published atomically and remains intact, but removing the temporary staging hard link failed${lastErrno ? ` (${lastErrno})` : ''} after ${attemptsExecuted} attempt(s). A leftover staging hard link may remain in working/tmp until file locks clear.`
+      : `Failed to remove temporary staging file${lastErrno ? ` (${lastErrno})` : ''} after ${attemptsExecuted} attempt(s). A leftover staging artifact may remain in working/tmp.`,
+  });
+}
+
+function preservePrimaryAndCleanupError(params: {
+  primaryError: unknown;
+  cleanupError: unknown;
+  targetPath: string;
+  stagedPath: string;
+}): Error {
+  const { primaryError, cleanupError, targetPath, stagedPath } = params;
+  const cleanupErrno =
+    cleanupError instanceof AgentWorkspaceError
+      ? cleanupError.errnoCode
+      : (cleanupError as NodeJS.ErrnoException)?.code;
+  const cleanupNote = `Removing the temporary staging file also failed${cleanupErrno ? ` (${cleanupErrno})` : ''}; a leftover staging artifact may remain in working/tmp.`;
+
+  if (primaryError instanceof AgentWorkspaceError) {
+    return new AgentWorkspaceError({
+      code: primaryError.code,
+      targetPath: primaryError.targetPath,
+      stagedPath: primaryError.stagedPath ?? stagedPath,
+      errnoCode: primaryError.errnoCode,
+      targetPublished: primaryError.targetPublished,
+      attempts: primaryError.attempts,
+      cause: primaryError.cause ?? primaryError,
+      closeError: primaryError.closeError,
+      cleanupError,
+      message: `${primaryError.message} ${cleanupNote}`,
+    });
+  }
+
+  if (primaryError instanceof AgentPathSecurityError) {
+    const errWithCleanup = new AgentPathSecurityError(
+      `${primaryError.message} ${cleanupNote}`
+    ) as AgentPathSecurityError & {
+      cause?: unknown;
+      cleanupError?: unknown;
+      stagedPath?: string;
+    };
+    errWithCleanup.cause = primaryError;
+    errWithCleanup.cleanupError = cleanupError;
+    errWithCleanup.stagedPath = stagedPath;
+    return errWithCleanup;
+  }
+
+  const primaryErrno = (primaryError as NodeJS.ErrnoException)?.code;
+  return new AgentWorkspaceError({
+    code: 'ATOMIC_PUBLICATION_FAILED',
+    targetPath,
+    stagedPath,
+    errnoCode: primaryErrno,
+    targetPublished: false,
+    cause: primaryError,
+    cleanupError,
+    message: `Atomic workspace operation failed${primaryErrno ? ` (${primaryErrno})` : ''}; target file was NOT published. ${cleanupNote}`,
+  });
 }
 
 /**
  * Writes full content into a unique temporary file inside `tempDir` using
- * OS-atomic exclusive creation (`open(..., 'wx')`). Always cleans up the
- * temporary file on any write, sync, or close failure.
+ * OS-atomic exclusive creation (`open(..., 'wx', 0o600)`), enforces durability
+ * synchronization (`handle.sync()`), and closes the file handle before returning.
+ *
+ * Stage 5.5.4: Sync failures are treated as staging failures (never ignored and
+ * never published). On any write, sync, or close error, closes the handle safely,
+ * attempts staged-file cleanup, and preserves primary, close, and cleanup errors.
  */
 async function stageUniqueTempFile(
   tempDir: string,
-  bytes: Uint8Array | string
+  targetPath: string,
+  bytes: Uint8Array | string,
+  ops?: WorkspaceAtomicPublicationOps
 ): Promise<string> {
   assertNotSymlinkIfExists(tempDir);
   const uniqueName = `.stage_${process.pid}_${crypto.randomUUID()}.tmp`;
   const tempPath = resolveStrictlyWithinRoot(tempDir, uniqueName);
-  const handle = await fs.open(tempPath, 'wx', 0o600);
+  const openFn = ops?.openFile ?? fs.open;
+  const handle = await openFn(tempPath, 'wx', 0o600);
+
+  let phase: 'write' | 'sync' | 'close' = 'write';
   let closed = false;
+  let primaryErr: unknown;
+
   try {
+    phase = 'write';
     await handle.writeFile(bytes);
-    await handle.sync().catch(() => {});
+
+    phase = 'sync';
+    await handle.sync();
+
+    phase = 'close';
     await handle.close();
     closed = true;
     return tempPath;
   } catch (err) {
-    if (!closed) {
-      await handle.close().catch(() => {});
-    }
-    await safeUnlinkTempFile(tempPath);
-    throw err;
+    primaryErr = err;
   }
+
+  // Close safely if failure occurred before close() ran, without masking primaryErr
+  let closeError: unknown;
+  if (!closed && phase !== 'close') {
+    try {
+      await handle.close();
+      closed = true;
+    } catch (cErr) {
+      closeError = cErr;
+    }
+  }
+
+  // Attempt staged-file cleanup and preserve both primary error and cleanup failure
+  let cleanupError: unknown;
+  try {
+    await safeUnlinkTempFile(tempPath, {
+      unlinkFile: ops?.unlinkFile,
+      sleep: ops?.sleep,
+      targetPath,
+      targetPublished: false,
+    });
+  } catch (uErr) {
+    cleanupError = uErr;
+  }
+
+  const primaryErrno = (primaryErr as NodeJS.ErrnoException)?.code;
+  const cleanupErrno =
+    cleanupError instanceof AgentWorkspaceError
+      ? cleanupError.errnoCode
+      : (cleanupError as NodeJS.ErrnoException)?.code;
+  const isSyncFailure = phase === 'sync';
+  const baseMessage = isSyncFailure
+    ? `Staging file durability synchronization failed${primaryErrno ? ` (${primaryErrno})` : ''}; target file was NOT published.`
+    : `Staging file ${phase} failed${primaryErrno ? ` (${primaryErrno})` : ''}; target file was NOT published.`;
+
+  const extraNotes: string[] = [];
+  if (closeError) {
+    const closeErrno = (closeError as NodeJS.ErrnoException)?.code;
+    extraNotes.push(
+      `Closing the staging handle also failed${closeErrno ? ` (${closeErrno})` : ''}.`
+    );
+  }
+  if (cleanupError) {
+    extraNotes.push(
+      `Removing the temporary staging file also failed${cleanupErrno ? ` (${cleanupErrno})` : ''}; a leftover staging artifact may remain in working/tmp.`
+    );
+  }
+
+  throw new AgentWorkspaceError({
+    code: isSyncFailure ? 'STAGING_SYNC_FAILED' : 'STAGING_WRITE_FAILED',
+    targetPath,
+    stagedPath: tempPath,
+    errnoCode: primaryErrno,
+    targetPublished: false,
+    cause: primaryErr,
+    closeError,
+    cleanupError,
+    message:
+      extraNotes.length > 0
+        ? `${baseMessage} ${extraNotes.join(' ')}`
+        : baseMessage,
+  });
 }
 
 /**
  * Atomically creates `targetPath` ONLY if it does not already exist.
  *
- * Fail-closed publication strategy (Stage 5.5.3):
+ * Fail-closed durable publication strategy (Stages 5.5.3–5.5.4):
  * 1. Stages 100% of `bytes` to a unique temp file inside `tempDir` via
- *    `open(..., 'wx', 0o600)`, syncs, and closes it so no concurrent reader can
- *    ever observe a partially written file at `targetPath`.
+ *    `open(..., 'wx', 0o600)`, enforces `handle.sync()`, and closes it so no
+ *    concurrent reader can ever observe a partially written or unsynced file at
+ *    `targetPath`.
  * 2. Publishes via atomic hard link `fs.link(stagedTemp, targetPath)`, which
  *    fails atomically with `EEXIST` on NTFS and POSIX when another process won
  *    or the file already exists.
@@ -238,7 +475,12 @@ async function stageUniqueTempFile(
  *    `writeFile(targetPath, ...)`. If the filesystem rejects hard links
  *    (`EXDEV`, `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`), fails closed with a typed
  *    `AgentWorkspaceError` (`code: 'ATOMIC_PUBLICATION_UNSUPPORTED'`).
- * 4. Always unlinks `stagedTemp` in `finally` on every success or failure path.
+ * 4. Surfaces cleanup failures explicitly:
+ *    - If publication succeeded (`created: true`) and staging-link removal fails,
+ *      throws `STAGING_LINK_CLEANUP_FAILED_AFTER_PUBLICATION` with `targetPublished: true`.
+ *    - If target already existed (`EEXIST`) and unused staging removal fails,
+ *      throws `STAGING_CLEANUP_FAILED` with `targetPublished: false`.
+ *    - If publication failed and cleanup also fails, preserves BOTH errors.
  */
 async function createFileExclusivelyAtomic(
   tempDir: string,
@@ -247,7 +489,11 @@ async function createFileExclusivelyAtomic(
   ops?: WorkspaceAtomicPublicationOps
 ): Promise<{ created: boolean }> {
   assertNotSymlinkIfExists(targetPath);
-  const stagedPath = await stageUniqueTempFile(tempDir, bytes);
+  const stagedPath = await stageUniqueTempFile(tempDir, targetPath, bytes, ops);
+
+  let created = false;
+  let primaryError: unknown;
+
   try {
     if (ops?.beforeAtomicLink) {
       await ops.beforeAtomicLink({ stagedPath, targetPath });
@@ -256,84 +502,159 @@ async function createFileExclusivelyAtomic(
     const linkFn = ops?.linkFile ?? fs.link;
     try {
       await linkFn(stagedPath, targetPath);
-      return { created: true };
+      created = true;
     } catch (linkErr) {
       if (
         linkErr instanceof AgentWorkspaceError ||
         linkErr instanceof AgentPathSecurityError
       ) {
-        throw linkErr;
+        primaryError = linkErr;
+      } else {
+        const code = (linkErr as NodeJS.ErrnoException)?.code;
+        if (code === 'EEXIST') {
+          created = false;
+        } else if (code && UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES.has(code)) {
+          primaryError = new AgentWorkspaceError({
+            code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+            targetPath,
+            stagedPath,
+            errnoCode: code,
+            targetPublished: false,
+            cause: linkErr,
+            message: `Workspace filesystem does not support atomic hard-link publication (${code}). Refusing unsafe direct-write fallback to prevent publishing partially written creative files; move the CRELUNE workspace onto a local filesystem that supports hard links (such as NTFS).`,
+          });
+        } else {
+          primaryError = new AgentWorkspaceError({
+            code: 'ATOMIC_PUBLICATION_FAILED',
+            targetPath,
+            stagedPath,
+            errnoCode: code,
+            targetPublished: false,
+            cause: linkErr,
+            message: `Atomic hard-link publication failed${code ? ` (${code})` : ''}. Refusing unsafe direct-write fallback to prevent publishing partially written creative files.`,
+          });
+        }
       }
-      const code = (linkErr as NodeJS.ErrnoException)?.code;
-      if (code === 'EEXIST') {
-        return { created: false };
-      }
-      if (code && UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES.has(code)) {
-        throw new AgentWorkspaceError({
-          code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
-          targetPath,
-          errnoCode: code,
-          cause: linkErr,
-          message: `Workspace filesystem does not support atomic hard-link publication (${code}). Refusing unsafe direct-write fallback to prevent publishing partially written creative files; move the CRELUNE workspace onto a local filesystem that supports hard links (such as NTFS).`,
-        });
-      }
-      throw new AgentWorkspaceError({
-        code: 'ATOMIC_PUBLICATION_FAILED',
+    }
+  } catch (err) {
+    primaryError = err;
+  }
+
+  if (primaryError !== undefined) {
+    try {
+      await safeUnlinkTempFile(stagedPath, {
+        unlinkFile: ops?.unlinkFile,
+        sleep: ops?.sleep,
         targetPath,
-        errnoCode: code,
-        cause: linkErr,
-        message: `Atomic hard-link publication failed${code ? ` (${code})` : ''}. Refusing unsafe direct-write fallback to prevent publishing partially written creative files.`,
+        targetPublished: false,
+      });
+    } catch (cleanupError) {
+      throw preservePrimaryAndCleanupError({
+        primaryError,
+        cleanupError,
+        targetPath,
+        stagedPath,
       });
     }
-  } finally {
-    await safeUnlinkTempFile(stagedPath);
+    throw primaryError;
   }
+
+  // Publication either succeeded (`created === true`) or target already existed (`EEXIST`).
+  // Clean up the staging hard link / unused temp file and surface any retry-exhausted failure!
+  await safeUnlinkTempFile(stagedPath, {
+    unlinkFile: ops?.unlinkFile,
+    sleep: ops?.sleep,
+    targetPath,
+    targetPublished: created,
+  });
+
+  return { created };
 }
 
 /**
  * Atomically replaces a target file (`manifest.json`, `PREPARATION_GUIDE.txt`,
  * updated assets, or explicitly user-approved working copy replacement) using
- * unique staged `'wx'` file + `fs.rename()` so concurrent writers never interleave
- * or truncate the target.
+ * unique staged `'wx'` file (with mandatory `sync()`) + `fs.rename()` so
+ * concurrent writers never interleave or truncate the target.
  */
 async function writeFileAtomicReplace(
   tempDir: string,
   targetPath: string,
-  content: Uint8Array | string
+  content: Uint8Array | string,
+  ops?: WorkspaceAtomicPublicationOps
 ): Promise<void> {
   assertNotSymlinkIfExists(targetPath);
-  const stagedPath = await stageUniqueTempFile(tempDir, content);
-  try {
-    for (let attempt = 0; attempt < 4; attempt++) {
+  const stagedPath = await stageUniqueTempFile(tempDir, targetPath, content, ops);
+  const renameFn = ops?.renameFile ?? fs.rename;
+  const sleepFn = ops?.sleep ?? defaultSleep;
+
+  let primaryError: unknown;
+
+  for (let attempt = 1; attempt <= DEFAULT_RENAME_MAX_ATTEMPTS; attempt++) {
+    try {
       assertNotSymlinkIfExists(targetPath);
-      try {
-        await fs.rename(stagedPath, targetPath);
-        return;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException)?.code;
-        if (code && UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES.has(code)) {
-          throw new AgentWorkspaceError({
-            code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
-            targetPath,
-            errnoCode: code,
-            cause: err,
-            message: `Workspace filesystem does not support atomic rename publication (${code}). Refusing unsafe direct-write replacement to protect creative workspace files.`,
-          });
-        }
-        if (
-          (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') &&
-          attempt < 3
-        ) {
-          await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
-          continue;
-        }
-        throw err;
+      await renameFn(stagedPath, targetPath);
+      return;
+    } catch (err) {
+      if (
+        err instanceof AgentWorkspaceError ||
+        err instanceof AgentPathSecurityError
+      ) {
+        primaryError = err;
+        break;
       }
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code && UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES.has(code)) {
+        primaryError = new AgentWorkspaceError({
+          code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+          targetPath,
+          stagedPath,
+          errnoCode: code,
+          targetPublished: false,
+          cause: err,
+          message: `Workspace filesystem does not support atomic rename publication (${code}). Refusing unsafe direct-write replacement to protect creative workspace files.`,
+        });
+        break;
+      }
+      if (
+        code &&
+        TRANSIENT_FS_LOCK_ERRNO_CODES.has(code) &&
+        attempt < DEFAULT_RENAME_MAX_ATTEMPTS
+      ) {
+        await sleepFn(25 * attempt);
+        continue;
+      }
+      primaryError = new AgentWorkspaceError({
+        code: 'ATOMIC_PUBLICATION_FAILED',
+        targetPath,
+        stagedPath,
+        errnoCode: code,
+        targetPublished: false,
+        attempts: attempt,
+        cause: err,
+        message: `Atomic rename publication failed${code ? ` (${code})` : ''} after ${attempt} attempt(s). Refusing unsafe direct-write replacement.`,
+      });
+      break;
     }
-  } catch (err) {
-    await safeUnlinkTempFile(stagedPath);
-    throw err;
   }
+
+  try {
+    await safeUnlinkTempFile(stagedPath, {
+      unlinkFile: ops?.unlinkFile,
+      sleep: ops?.sleep,
+      targetPath,
+      targetPublished: false,
+    });
+  } catch (cleanupError) {
+    throw preservePrimaryAndCleanupError({
+      primaryError,
+      cleanupError,
+      targetPath,
+      stagedPath,
+    });
+  }
+
+  throw primaryError;
 }
 
 function isValidWorkingCopyReplacementApproval(
@@ -561,7 +882,12 @@ export async function prepareIsolatedJobWorkspace(params: {
     preservedExistingWorkingCopy = false;
   } else if (hasExplicitApproval) {
     // Explicit user-approved destructive replacement via atomic staged rename
-    await writeFileAtomicReplace(tempDir, workingCopyPath, params.templateBytes);
+    await writeFileAtomicReplace(
+      tempDir,
+      workingCopyPath,
+      params.templateBytes,
+      params.atomicPublicationOps
+    );
     workingCopySha256 = await computeFileSha256Hex(workingCopyPath);
     if (workingCopySha256 !== manifest.templateSha256) {
       throw new Error(
@@ -617,7 +943,12 @@ export async function prepareIsolatedJobWorkspace(params: {
     if (!assetCreate.created) {
       const existingAssetSha = await computeFileSha256Hex(localAssetPath);
       if (existingAssetSha !== assetSha) {
-        await writeFileAtomicReplace(tempDir, localAssetPath, asset.bytes);
+        await writeFileAtomicReplace(
+          tempDir,
+          localAssetPath,
+          asset.bytes,
+          params.atomicPublicationOps
+        );
       }
     }
 
@@ -641,7 +972,8 @@ export async function prepareIsolatedJobWorkspace(params: {
   await writeFileAtomicReplace(
     tempDir,
     manifestPath,
-    JSON.stringify(manifest, null, 2)
+    JSON.stringify(manifest, null, 2),
+    params.atomicPublicationOps
   );
   await writeFileAtomicReplace(
     tempDir,
@@ -650,7 +982,8 @@ export async function prepareIsolatedJobWorkspace(params: {
       manifest,
       `working/${workingLeafName}`,
       workingCopyStatus
-    )
+    ),
+    params.atomicPublicationOps
   );
 
   if (preservedExistingWorkingCopy) {
