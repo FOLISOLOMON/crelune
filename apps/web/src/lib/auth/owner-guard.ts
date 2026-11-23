@@ -8,12 +8,26 @@
  */
 
 import { prisma } from '@crelune/database';
-import type { OwnerSession, OwnerProfile } from '@crelune/shared';
+import type {
+  MobileAccessTokenPayload,
+  OwnerSession,
+  OwnerProfile,
+} from '@crelune/shared';
 import { getSession } from './session';
+
+export type OwnerAuthMethod = 'cookie' | 'mobile_bearer';
+
+export interface MobileAuthContext {
+  deviceId: string;
+  sessionId: string;
+  familyId: string;
+}
 
 export interface AuthenticatedOwner {
   session: OwnerSession;
   profile: OwnerProfile;
+  authMethod?: OwnerAuthMethod;
+  mobileContext?: MobileAuthContext;
   preferences: {
     theme: string;
     dateFormat: string;
@@ -21,6 +35,9 @@ export interface AuthenticatedOwner {
     leadTimeDaysBirthday: number;
     leadTimeDaysEvent: number;
     defaultExportFormat: string;
+    pushNotificationsEnabled?: boolean;
+    pushBirthdayReminders?: boolean;
+    pushDesignUpdates?: boolean;
   } | null;
 }
 
@@ -71,6 +88,7 @@ export async function verifyActiveOwnerInDatabase(
     status: 'authenticated',
     owner: {
       session,
+      authMethod: 'cookie',
       profile: {
         id: user.id,
         firstName: user.firstName,
@@ -89,6 +107,103 @@ export async function verifyActiveOwnerInDatabase(
             leadTimeDaysBirthday: user.preferences.leadTimeDaysBirthday,
             leadTimeDaysEvent: user.preferences.leadTimeDaysEvent,
             defaultExportFormat: user.preferences.defaultExportFormat,
+            pushNotificationsEnabled: user.preferences.pushNotificationsEnabled,
+            pushBirthdayReminders: user.preferences.pushBirthdayReminders,
+            pushDesignUpdates: user.preferences.pushDesignUpdates,
+          }
+        : null,
+    },
+  };
+}
+
+/**
+ * Authoritative PostgreSQL verification for a signed Mobile Bearer access token.
+ * Enforces active owner status, sessionVersion parity, unrevoked MobileDevice binding,
+ * and active unrotated/unexpired MobileSession binding (including the 30-day family cap).
+ */
+export async function verifyActiveMobileOwnerInDatabase(
+  mobileToken: MobileAccessTokenPayload,
+  now: Date = new Date()
+): Promise<OwnerAuthState> {
+  const mobileSession = await prisma.mobileSession.findUnique({
+    where: { id: mobileToken.sid },
+    include: {
+      mobileDevice: true,
+      user: {
+        include: {
+          organisation: true,
+          preferences: true,
+        },
+      },
+    },
+  });
+
+  if (!mobileSession) {
+    return { status: 'revoked', owner: null };
+  }
+
+  const { mobileDevice, user } = mobileSession;
+
+  if (
+    mobileSession.revokedAt !== null ||
+    mobileSession.replacedBySessionId !== null ||
+    mobileSession.expiresAt <= now ||
+    mobileSession.familyExpiresAt <= now ||
+    mobileSession.organisationId !== mobileToken.org ||
+    mobileSession.userId !== mobileToken.sub ||
+    mobileSession.mobileDeviceId !== mobileToken.dev ||
+    mobileSession.sessionVersion !== mobileToken.ver ||
+    !mobileDevice ||
+    mobileDevice.revokedAt !== null ||
+    mobileDevice.organisationId !== mobileToken.org ||
+    mobileDevice.userId !== mobileToken.sub ||
+    !user ||
+    !user.isActive ||
+    user.role !== 'OWNER' ||
+    user.organisationId !== mobileToken.org ||
+    user.sessionVersion !== mobileToken.ver
+  ) {
+    return { status: 'revoked', owner: null };
+  }
+
+  return {
+    status: 'authenticated',
+    owner: {
+      session: {
+        sub: mobileToken.sub,
+        role: mobileToken.role,
+        org: mobileToken.org,
+        ver: mobileToken.ver,
+        iat: mobileToken.iat,
+        exp: mobileToken.exp,
+      },
+      authMethod: 'mobile_bearer',
+      mobileContext: {
+        deviceId: mobileDevice.id,
+        sessionId: mobileSession.id,
+        familyId: mobileSession.familyId,
+      },
+      profile: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+        organisationId: user.organisationId,
+        organisationName: user.organisation?.name || 'CRELUNE Operations',
+        timezone: user.preferences?.timezone || 'Africa/Accra',
+      },
+      preferences: user.preferences
+        ? {
+            theme: user.preferences.theme,
+            dateFormat: user.preferences.dateFormat,
+            timezone: user.preferences.timezone,
+            leadTimeDaysBirthday: user.preferences.leadTimeDaysBirthday,
+            leadTimeDaysEvent: user.preferences.leadTimeDaysEvent,
+            defaultExportFormat: user.preferences.defaultExportFormat,
+            pushNotificationsEnabled: user.preferences.pushNotificationsEnabled,
+            pushBirthdayReminders: user.preferences.pushBirthdayReminders,
+            pushDesignUpdates: user.preferences.pushDesignUpdates,
           }
         : null,
     },

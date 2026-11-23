@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { middleware } from './middleware';
+import { createMobileAccessToken } from './lib/auth/mobile-token';
 import { createSessionToken } from './lib/auth/session';
 
 describe('Middleware Route Protection & Edge Security (Milestone 2.1 & 2.1.1)', () => {
@@ -238,6 +239,143 @@ describe('Middleware Route Protection & Edge Security (Milestone 2.1 & 2.1.1)', 
 
       const postHealth = await middleware(createMockRequest('/api/health', { method: 'POST' }));
       expect(postHealth.status).toBe(503);
+    });
+
+    it('returns 503 JSON for mobile auth endpoints when SESSION_SECRET is missing', async () => {
+      delete process.env.SESSION_SECRET;
+      for (const path of ['/api/mobile/auth/login', '/api/mobile/auth/refresh']) {
+        const res = await middleware(createMockRequest(path, { method: 'POST' }));
+        expect(res.status).toBe(503);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+      }
+    });
+  });
+
+  describe('Stage 6.1 Mobile Bearer Authentication & Transport Separation', () => {
+    function mintValidMobileAccess(overrides: Partial<Parameters<typeof createMobileAccessToken>[0]> = {}) {
+      return createMobileAccessToken({
+        userId: 'usr_owner_123456',
+        organisationId: 'org_cln_123456',
+        sessionVersion: 1,
+        mobileDeviceId: 'mdev_1234567890',
+        mobileSessionId: 'mses_1234567890',
+        ...overrides,
+      }).token;
+    }
+
+    it('allows POST /api/mobile/auth/login and POST /api/mobile/auth/refresh without session, while blocking GET', async () => {
+      expect(
+        (await middleware(createMockRequest('/api/mobile/auth/login', { method: 'POST' }))).status
+      ).toBe(200);
+      expect(
+        (await middleware(createMockRequest('/api/mobile/auth/refresh', { method: 'POST' }))).status
+      ).toBe(200);
+      expect(
+        (await middleware(createMockRequest('/api/mobile/auth/login', { method: 'GET' }))).status
+      ).toBe(401);
+      expect(
+        (await middleware(createMockRequest('/api/mobile/auth/refresh', { method: 'GET' }))).status
+      ).toBe(401);
+    });
+
+    it('accepts valid Mobile Bearer access token on protected owner API routes and mobile logout', async () => {
+      const mobileToken = mintValidMobileAccess();
+      const routes: Array<[string, string]> = [
+        ['/api/dashboard', 'GET'],
+        ['/api/members', 'GET'],
+        ['/api/mobile/devices', 'GET'],
+        ['/api/mobile/devices/mdev_1234567890/revoke', 'POST'],
+        ['/api/settings/notifications', 'PATCH'],
+        ['/api/mobile/auth/logout', 'POST'],
+      ];
+      for (const [route, method] of routes) {
+        const res = await middleware(
+          createMockRequest(route, {
+            method,
+            headers: { authorization: `Bearer ${mobileToken}` },
+          })
+        );
+        expect(res.status).toBe(200);
+      }
+    });
+
+    it('rejects Mobile Bearer on HTML web pages, rejects Web cookie on mobile logout, and blocks cross-transport token replay', async () => {
+      const mobileToken = mintValidMobileAccess();
+      const webCookie = createSessionToken(mockUser);
+
+      // Mobile Bearer MUST NOT authenticate HTML dashboard pages
+      const htmlRes = await middleware(
+        createMockRequest('/settings', {
+          headers: { authorization: `Bearer ${mobileToken}` },
+        })
+      );
+      expect(htmlRes.status).toBe(307);
+      expect(htmlRes.headers.get('location')).toBe(
+        'http://localhost:3000/login?callbackUrl=%2Fsettings'
+      );
+
+      // Web cookie MUST NOT call POST /api/mobile/auth/logout
+      const webLogoutRes = await middleware(
+        createMockRequest('/api/mobile/auth/logout', {
+          method: 'POST',
+          cookie: webCookie,
+        })
+      );
+      expect(webLogoutRes.status).toBe(401);
+
+      // Web cookie token presented as Authorization: Bearer MUST be rejected
+      const webInBearer = await middleware(
+        createMockRequest('/api/dashboard', {
+          headers: { authorization: `Bearer ${webCookie}` },
+        })
+      );
+      expect(webInBearer.status).toBe(401);
+
+      // Mobile access token presented as crelune_session cookie MUST be rejected
+      const mobileInCookie = await middleware(
+        createMockRequest('/api/dashboard', {
+          cookie: mobileToken,
+        })
+      );
+      expect(mobileInCookie.status).toBe(401);
+
+      // Query-string token MUST never authenticate
+      const queryToken = await middleware(
+        createMockRequest(`/api/dashboard?token=${encodeURIComponent(mobileToken)}`)
+      );
+      expect(queryToken.status).toBe(401);
+    });
+
+    it('rejects ambiguous mixed Cookie + Authorization Bearer headers with 400 and rejects expired or malformed Bearer tokens with 401', async () => {
+      const mobileToken = mintValidMobileAccess();
+      const webCookie = createSessionToken(mockUser);
+
+      const mixedRes = await middleware(
+        createMockRequest('/api/dashboard', {
+          cookie: webCookie,
+          headers: { authorization: `Bearer ${mobileToken}` },
+        })
+      );
+      expect(mixedRes.status).toBe(400);
+      expect((await mixedRes.json()).code).toBe('AMBIGUOUS_AUTH_CREDENTIALS');
+
+      const expiredToken = mintValidMobileAccess({
+        nowSeconds: Math.floor(Date.now() / 1000) - 1000,
+        ttlSeconds: 900,
+      });
+      const expiredRes = await middleware(
+        createMockRequest('/api/dashboard', {
+          headers: { authorization: `Bearer ${expiredToken}` },
+        })
+      );
+      expect(expiredRes.status).toBe(401);
+
+      const malformedRes = await middleware(
+        createMockRequest('/api/dashboard', {
+          headers: { authorization: 'Basic dXNlcjpwYXNz' },
+        })
+      );
+      expect(malformedRes.status).toBe(401);
     });
   });
 });

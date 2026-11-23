@@ -622,7 +622,7 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
       });
       mockState.cookies.set(SESSION_COOKIE_NAME, token);
 
-      const res = await meGet();
+      const res = await meGet(new Request('https://crelune.test/api/auth/me'));
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.authenticated).toBe(true);
@@ -638,7 +638,7 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
       mockState.cookies.set(SESSION_COOKIE_NAME, token);
       mockState.users.get('owner-user-1')!.sessionVersion = 3;
 
-      const res = await meGet();
+      const res = await meGet(new Request('https://crelune.test/api/auth/me'));
       expect(res.status).toBe(401);
       expect(mockState.deletedCookies).toContain(SESSION_COOKIE_NAME);
     });
@@ -652,7 +652,7 @@ describe('Authentication Route Handlers & DB Enforcement (Milestone 2.1.1)', () 
       mockState.cookies.set(SESSION_COOKIE_NAME, token);
       mockState.users.get('owner-user-1')!.isActive = false;
 
-      const res = await meGet();
+      const res = await meGet(new Request('https://crelune.test/api/auth/me'));
       expect(res.status).toBe(401);
       expect(mockState.deletedCookies).toContain(SESSION_COOKIE_NAME);
     });

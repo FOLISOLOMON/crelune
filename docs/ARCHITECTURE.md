@@ -11,11 +11,11 @@
 ## 1. Executive Architectural Summary
 
 > [!IMPORTANT]
-> **Implementation Status: Milestone 2 Web Foundation Implemented**
+> **Implementation Status: Milestones 0–5 Complete; Milestone 6 Stage 6.1 Mobile Auth & Backend Complete**
 >
-> As of Milestone 2, the web application foundation (`apps/web`), shared domain packages (`@crelune/shared`, `@crelune/ui`, `@crelune/database`), and Neon Lakebase Postgres persistence layer are **IMPLEMENTED**.
+> Through Milestone 6 Stage 6.1, CRELUNE Web (`apps/web`), Windows Creative Agent (`apps/agent`), shared domain packages (`@crelune/shared`, `@crelune/ui`, `@crelune/database`), Neon Lakebase Postgres persistence, and Stage 6.1 mobile authentication/device-session APIs are **IMPLEMENTED**.
 >
-> Mobile companion (`apps/mobile`) and Windows Creative Agent (`apps/agent`) remain scheduled for Milestone 6 and Milestone 5 respectively. Subsystems are developed sequentially according to the Development Roadmap.
+> The native mobile client (`apps/mobile`, Stages 6.2–6.7), Programmes & Events (Milestone 7), and Asset Library (Milestone 8) remain scheduled sequentially according to the Development Roadmap.
 
 CRELUNE (*kreh-LOON*) is a personal creative and media operations platform designed for a single owner/operator (church media lead and graphic designer). The proposed architecture coordinates three distinct clients through a single unified backend and canonical PostgreSQL database:
 
@@ -263,3 +263,18 @@ sequenceDiagram
    - Each job is materialized strictly within `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/` with path-traversal/symlink/junction rejection, SHA-256 verification, fail-closed durable staging (`open(..., 'wx', 0o600)` inside `working/tmp/` + mandatory `handle.sync()` + safe close), atomic hard-link publication (`fs.link()`, failing closed with `AgentWorkspaceError('ATOMIC_PUBLICATION_UNSUPPORTED')` if hard links are unsupported rather than writing directly to the target path — Stage 5.5.3), and staged atomic renames for metadata files (`manifest.json`, `PREPARATION_GUIDE.txt`). Temporary staging cleanup retries transient Windows locks (`EPERM`/`EBUSY`/`EACCES`), treats `ENOENT` as clean removal, and surfaces typed errors (`STAGING_CLEANUP_FAILED` or `STAGING_LINK_CLEANUP_FAILED_AFTER_PUBLICATION` with `targetPublished: true`) if the OS persistently refuses deletion rather than silently ignoring leftover staging artifacts (Stage 5.5.4).
    - Original template masters in `source/` are marked read-only and verified before and after every creative action; existing working copies in `working/` and deliverables in `exports/` are preserved atomically across concurrent retries and recovery (`EEXIST` never overwrites) unless explicitly replaced via the designated approval path.
    - Verified against installed Affinity `3.3.3.5004` (`Canva.Affinity_3.3.3.5004_x64__8a0j1tnjnt4a4`): Scripting and MCP remain disabled by default and untouched. Interactive launch of allowlisted `%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe` requires explicit user approval (`ASSISTED` mode), falling back cleanly to `MANUAL` mode without breaking job completion or verified export submission.
+
+---
+
+## 11. Milestone 6 Stage 6.1 Mobile Auth, Unified Guards & Dashboard API Architecture
+
+1. **Dual-Transport Owner Authentication (`Cookie+CSRF` vs `Mobile Bearer`):**
+   - [`middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts), [`owner-guard.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/owner-guard.ts), and [`api-owner-guard.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/api-owner-guard.ts) enforce strict transport separation between Web Cookie+CSRF sessions and Mobile Bearer access tokens (`cln_mob_at.<payload>.<sig>`, domain-separated HMAC-SHA256 `crelune.mobile_access.v1`, 15-minute maximum TTL).
+   - Mixed `Cookie` + `Authorization: Bearer` requests are rejected fail-closed (`400 AMBIGUOUS_AUTH_CREDENTIALS`); Mobile Bearer tokens are never accepted on Web HTML routes; tokens are never read from query parameters.
+2. **Per-Device Rotating Refresh Sessions & Deadlock-Free Concurrency:**
+   - [`mobile-auth-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/mobile-auth-service.ts) manages per-device sessions (`MobileDevice`, `MobileSession`) via `POST /api/mobile/auth/login`, `POST /api/mobile/auth/refresh`, `POST /api/mobile/auth/logout`, `GET /api/mobile/devices`, and `POST /api/mobile/devices/[id]/revoke`.
+   - Refresh rotation locks `L0 users (FOR SHARE) -> L1 mobile_devices (FOR UPDATE) -> L2 mobile_sessions (ORDER BY id ASC FOR UPDATE)` so concurrent refresh attempts serialize cleanly, inherit the immutable 30-day `familyExpiresAt` hard cap, and atomically revoke the entire `familyId` on confirmed reuse.
+3. **Mobile-Ready Shared APIs & Web Settings Controls:**
+   - `GET /api/dashboard` wraps [`getDashboardSnapshot`](file:///d:/Projects/Crelune/apps/web/src/lib/dashboard/dashboard-service.ts) (batched into two bounded query waves for serverless pooler resilience) for authenticated owners.
+   - `GET/PATCH /api/settings/notifications` reads and updates `UserPreference` push toggles (`pushNotificationsEnabled`, `pushBirthdayReminders`, `pushDesignUpdates`) with transactional `AuditLog` tracking.
+   - Web Settings (`/settings`) renders [`MobileDevicesCard`](file:///d:/Projects/Crelune/apps/web/src/components/settings/MobileDevicesCard.tsx) for owner visibility and immediate single-device revocation; `@crelune/ui/colors` exports React-Native-safe color tokens without DOM dependencies.

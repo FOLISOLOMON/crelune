@@ -90,15 +90,12 @@ flowchart LR
   - Stage 5.5 (with 5.5.1–5.5.4 hardening): Windows Creative Agent local daemon (`apps/agent`) with Windows DPAPI credentials & claim store, mandatory `X-Crelune-Dispatch-Claim` fencing verified atomically inside final export transactions under strict DAG lock order (`L0 -> L1 -> L2 -> L3`), concurrency-safe per-state lease recovery (`READY_FOR_ARTIST` artist-work & active-lease protection), fail-closed durable atomic exclusive preservation-first workspaces (`open(..., 'wx', 0o600)` staging + mandatory `handle.sync()` + atomic `fs.link()`, failing closed with typed `AgentWorkspaceError` on unsupported hard links, sync/close failures, or retry-exhausted staging cleanup failures without losing primary errors or misreporting published targets), `MEMBER_PHOTO`-scoped asset delivery (`WORKING_ASSET` deferred to Milestone 8), verified Affinity `3.3.3.5004` assisted/manual integration, outbound Bearer APIs, Settings agent management, and verified export reporting.
 - **Exit Criteria**: Founder can register and manage templates, inspect versions and previews, link version-pinned templates to design jobs, configure layer bindings, run standalone manual preparation or coordinate execution with the Windows Creative Agent, and verify exports without automatic publication.
 
-### Milestone 6 — Mobile Application
-- **Objective**: Develop the native React Native & Expo companion mobile application.
+### Milestone 6 — Mobile Application *(In Progress — Stage 6.1 Complete; Stages 6.2–6.7 Pending)*
+- **Objective**: Develop the native React Native & Expo companion mobile application for Android and iOS.
 - **Key Deliverables**:
-  - Native Expo application scaffold (`apps/mobile`) with zero WebViews.
-  - Native bottom tab navigation (Home, Calendar, Designs, Members, More).
-  - Native camera & gallery image capture (`expo-image-picker`) with client-side compression.
-  - Fast member registration screen optimized for mobile input (< 30 seconds).
-  - Push and local notification delivery (`expo-notifications`) for birthday alerts.
-- **Exit Criteria**: Member registered with photo from phone, birthday reminder received on mobile lock screen.
+  - **Stage 6.1 (Complete)**: Shared mobile schemas (`@crelune/shared`) & RN-safe colors subpath (`@crelune/ui/colors`), additive PostgreSQL schema (`MobileDevice`, `MobileSession`, `PushDelivery`, `UserPreference` push defaults) with PostgreSQL CHECK constraints on Neon `development`, per-device rotating refresh-token & 15-minute signed Bearer auth endpoints, unified Web Cookie+CSRF / Mobile Bearer guards, `GET /api/dashboard`, `GET/PATCH /api/settings/notifications`, and Web Settings device visibility & revocation (`MobileDevicesCard`).
+  - **Stages 6.2–6.7 (Pending)**: Native Expo application scaffold (`apps/mobile`, zero WebViews), native bottom tab navigation (Home, Calendar, Designs, Members, More), native camera & gallery image capture (`expo-image-picker`) with client-side compression, fast member registration (< 30 seconds), push notification registration & Expo delivery service (`expo-notifications`), Android emulator/device QA, and EAS iOS/Android build verification (with physical iPhone runtime verification required prior to public release).
+- **Exit Criteria**: Member registered with photo from phone, birthday reminder received on mobile lock screen, and both Android and iOS build/release gates satisfied.
 
 ### Milestone 7 — Programmes & Events
 - **Objective**: Church event and programme management with linked creative deliverables.

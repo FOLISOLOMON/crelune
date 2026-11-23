@@ -53,9 +53,9 @@ Church members entrust their personal details to the founder. CRELUNE enforces r
 - **Password Storage**: Argon2id or bcrypt with a minimum work factor of 12 rounds. Plaintext or reversibly encrypted passwords are strictly prohibited.
 - **No Public Registration**: Self-service registration routes are disabled. Initial setup creates the single owner account via secure CLI initialization.
 
-### 3.2 Mobile Authentication
-- **Mechanism**: Cryptographically signed JSON Web Tokens (JWT) or session tokens stored securely on the device using `expo-secure-store` (iOS Keychain / Android Keystore).
-- **Token Expiry & Refresh**: Short-lived access tokens (1 hour) coupled with revocable refresh tokens stored in PostgreSQL.
+### 3.2 Mobile Authentication (Implemented Backend in Stage 6.1)
+- **Mechanism**: Per-device revocable mobile sessions (`MobileDevice` + `MobileSession`) pairing short-lived signed Bearer access tokens (`cln_mob_at.<payload>.<sig>`, domain-separated HMAC-SHA256 `crelune.mobile_access.v1`) with single-use rotating refresh tokens (`cln_mob_rt_<64-hex>`) stored strictly as SHA-256 hex hashes in PostgreSQL (and intended for `expo-secure-store` on iOS Keychain / Android Keystore in Stage 6.2+).
+- **Token Expiry & Refresh**: Maximum **15-minute** (`900s`) access token lifetime validating signature, `iss: 'crelune-api'`, `aud: 'crelune-mobile'`, `typ: 'mobile_access'`, expiry, clock skew, `ver`, `dev`, and `sid`, coupled with a hard **30-day** (`familyExpiresAt`) maximum session lifetime, atomic single-use rotation, entire-family revocation on confirmed reuse, and independent single-device revocation.
 
 ### 3.3 Windows Creative Agent Authentication
 - **Mechanism**: Dedicated API key generated per machine.
@@ -308,3 +308,20 @@ Implemented in Milestone 2.1.2:
 5. **Sanitized Diagnostics & Export/Publication Separation**:
    - [`logger.ts`](file:///d:/Projects/Crelune/apps/agent/src/security/logger.ts) strips Bearer tokens, `X-Crelune-Dispatch-Claim` headers, `cln_agent_*`/`clm_*` secrets, presigned query signatures, and Postgres URLs from logs and workspace `events.jsonl`.
    - Export registration (`POST /api/designs/[id]/exports` and `POST /api/agent/dispatches/[dispatchId]/exports`) verifies file signatures, dimensions, and SHA-256 digests and enforces `isApprovedForPublish: false`, `publishedAt: null` so exporting never implies publication.
+
+---
+
+## 14. Milestone 6 Stage 6.1 Mobile Authentication, Device Session Security & Guard Separation
+
+1. **Cryptographic Token & Transport Separation ([`mobile-token.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/mobile-token.ts), [`edge-session.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/edge-session.ts))**:
+   - Mobile access tokens use a distinct 3-part format (`cln_mob_at.<payload>.<sig>`) and HMAC signing domain (`crelune.mobile_access.v1.<payload>`) backed by mandatory `SESSION_SECRET` (`>= 32` chars, fail-closed, zero fallback secrets).
+   - Node (`crypto.timingSafeEqual`) and Edge (`crypto.subtle.verify`) enforce exact parity for signature, `iss: 'crelune-api'`, `aud: 'crelune-mobile'`, `typ: 'mobile_access'`, `role: 'OWNER'`, `exp - iat <= 900`, `exp > now`, `iat <= now + 60`, `ver`, `dev`, and `sid`.
+   - Web session cookies are rejected as Mobile Bearer tokens, Mobile Bearer tokens are rejected as Web cookies and on all Web HTML routes, query-string tokens are ignored/rejected, and mixed Cookie + Bearer requests fail closed with `400 AMBIGUOUS_AUTH_CREDENTIALS`.
+2. **Database-Enforced Refresh Hashing, Atomic Rotation & Replay Defense ([`mobile-auth-service.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/mobile-auth-service.ts), [`milestone_6_1_mobile_integrity.sql`](file:///d:/Projects/Crelune/packages/database/prisma/sql/milestone_6_1_mobile_integrity.sql))**:
+   - Mobile login reuses durable PostgreSQL `AuthThrottle` rate limiting and constant-time dummy `scrypt` verification (zero account enumeration).
+   - Refresh tokens (`cln_mob_rt_<64-hex>`) are persisted exclusively as lowercase 64-char SHA-256 hex hashes enforced by PostgreSQL CHECK constraint `chk_mobile_sessions_refresh_hash_sha256`; hard 30-day lifetime caps (`chk_mobile_sessions_lifetime_cap`) and rotated-session revocation (`chk_mobile_sessions_rotated_is_revoked`) are likewise enforced at the PostgreSQL engine layer.
+   - Refresh rotation locks `L0 users (FOR SHARE) -> L1 mobile_devices (FOR UPDATE) -> L2 mobile_sessions (ORDER BY id ASC FOR UPDATE)`. Concurrent refresh attempts serialize cleanly: strictly one succeeds, and any replay of a previously rotated token commits atomic revocation of the entire `familyId` and logs `MOBILE_SESSION_REUSE_DETECTED` to `AuditLog` with forbidden-key metadata redaction blocking token material.
+3. **Real-Time Server-Side & Independent Device Revocation**:
+   - [`verifyActiveMobileOwnerInDatabase`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/owner-guard.ts) verifies `User.isActive`, `User.role === 'OWNER'`, `User.sessionVersion`, `MobileDevice.revokedAt === null`, and active unrotated/unexpired `MobileSession` on every API call.
+   - Independent device revocation (`POST /api/mobile/devices/[id]/revoke` and Web Settings [`MobileDevicesCard`](file:///d:/Projects/Crelune/apps/web/src/components/settings/MobileDevicesCard.tsx)) revokes only the selected device, invalidates all its sessions, clears `expoPushToken`, returns generic `404` across organisations, and leaves other active devices unaffected.
+   - `POST /api/mobile/auth/logout` accepts Mobile Bearer exclusively, revokes the current session family, and clears `expoPushToken`. Web mutations continue to enforce mandatory Origin/Referer CSRF (`403`) whenever cookie-authenticated.

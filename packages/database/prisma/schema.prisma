@@ -112,6 +112,9 @@ model Organisation {
   creativeJobDispatches   CreativeJobDispatch[]
   exportRecords           ExportRecord[]
   creativeStorageCleanups CreativeStorageCleanup[]
+  mobileDevices           MobileDevice[]
+  mobileSessions          MobileSession[]
+  pushDeliveries          PushDelivery[]
 
   @@map("organisations")
 }
@@ -145,6 +148,9 @@ model User {
   creativeDispatchesOrdered CreativeJobDispatch[]   @relation("CreativeDispatchRequester")
   exportsUploaded           ExportRecord[]          @relation("ExportUploader")
   exportsOwnerApproved      ExportRecord[]          @relation("ExportOwnerApprover")
+  mobileDevices             MobileDevice[]          @relation("MobileDeviceOwner")
+  mobileDevicesRevoked      MobileDevice[]          @relation("MobileDeviceRevoker")
+  mobileSessions            MobileSession[]
 
   @@unique([organisationId, id])
   @@index([organisationId])
@@ -160,9 +166,12 @@ model UserPreference {
   leadTimeDaysBirthday Int           @default(14) @map("lead_time_days_birthday")
   birthdayReminderDays Int[]         @default([7, 3, 1, 0]) @map("birthday_reminder_days")
   leapDayPolicy        LeapDayPolicy @default(FEB_28) @map("leap_day_policy")
-  leadTimeDaysEvent    Int           @default(21) @map("lead_time_days_event")
-  defaultExportFormat  String        @default("PNG") @map("default_export_format")
-  updatedAt            DateTime      @updatedAt @map("updated_at")
+  leadTimeDaysEvent        Int           @default(21) @map("lead_time_days_event")
+  defaultExportFormat      String        @default("PNG") @map("default_export_format")
+  pushNotificationsEnabled Boolean       @default(true) @map("push_notifications_enabled")
+  pushBirthdayReminders    Boolean       @default(true) @map("push_birthday_reminders")
+  pushDesignUpdates        Boolean       @default(true) @map("push_design_updates")
+  updatedAt                DateTime      @updatedAt @map("updated_at")
 
   user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -290,7 +299,9 @@ model Notification {
   user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   member             Member?           @relation(fields: [memberId], references: [id], onDelete: SetNull)
   birthdayReminder   BirthdayReminder? @relation(fields: [birthdayReminderId], references: [id], onDelete: SetNull)
+  pushDeliveries     PushDelivery[]
 
+  @@unique([organisationId, id])
   @@index([organisationId, userId, readAt, createdAt])
   @@index([memberId])
   @@map("notifications")
@@ -733,4 +744,105 @@ model CreativeStorageCleanup {
   @@index([status, nextRetryAt])
   @@index([organisationId, createdAt])
   @@map("creative_storage_cleanups")
+}
+
+// -----------------------------------------------------------------------------
+// MOBILE APPLICATION AUTHENTICATION, DEVICES & PUSH OUTBOX (Milestone 6.1)
+// -----------------------------------------------------------------------------
+
+enum MobilePlatform {
+  IOS
+  ANDROID
+}
+
+enum PushDeliveryStatus {
+  PENDING
+  TICKET_ACCEPTED
+  DELIVERED
+  FAILED
+  DEVICE_UNREGISTERED
+}
+
+model MobileDevice {
+  id                   String          @id @default(cuid())
+  organisationId       String          @map("organisation_id")
+  userId               String          @map("user_id")
+  deviceInstallId      String          @map("device_install_id")
+  platform             MobilePlatform
+  deviceName           String?         @map("device_name")
+  osVersion            String?         @map("os_version")
+  appVersion           String?         @map("app_version")
+  expoPushToken        String?         @unique @map("expo_push_token")
+  pushPermissionStatus String?         @map("push_permission_status")
+  pushEnabled          Boolean         @default(true) @map("push_enabled")
+  lastSeenAt           DateTime        @default(now()) @map("last_seen_at")
+  revokedAt            DateTime?       @map("revoked_at")
+  revokedByUserId      String?         @map("revoked_by_user_id")
+  revocationReason     String?         @map("revocation_reason")
+  createdAt            DateTime        @default(now()) @map("created_at")
+  updatedAt            DateTime        @updatedAt @map("updated_at")
+
+  organisation         Organisation    @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  user                 User            @relation("MobileDeviceOwner", fields: [organisationId, userId], references: [organisationId, id], onDelete: Cascade)
+  revokedByUser        User?           @relation("MobileDeviceRevoker", fields: [organisationId, revokedByUserId], references: [organisationId, id], onDelete: NoAction, onUpdate: NoAction)
+  sessions             MobileSession[]
+  pushDeliveries       PushDelivery[]
+
+  @@unique([organisationId, id])
+  @@unique([organisationId, userId, deviceInstallId])
+  @@index([organisationId, userId, revokedAt])
+  @@index([organisationId, lastSeenAt])
+  @@map("mobile_devices")
+}
+
+model MobileSession {
+  id                  String        @id @default(cuid())
+  organisationId      String        @map("organisation_id")
+  userId              String        @map("user_id")
+  mobileDeviceId      String        @map("mobile_device_id")
+  familyId            String        @map("family_id")
+  sessionVersion      Int           @map("session_version")
+  refreshTokenHash    String        @unique @map("refresh_token_hash")
+  replacedBySessionId String?       @unique @map("replaced_by_session_id")
+  familyExpiresAt     DateTime      @map("family_expires_at")
+  expiresAt           DateTime      @map("expires_at")
+  lastUsedAt          DateTime      @default(now()) @map("last_used_at")
+  revokedAt           DateTime?     @map("revoked_at")
+  revocationReason    String?       @map("revocation_reason")
+  createdAt           DateTime      @default(now()) @map("created_at")
+
+  organisation        Organisation  @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  user                User          @relation(fields: [organisationId, userId], references: [organisationId, id], onDelete: Cascade)
+  mobileDevice        MobileDevice  @relation(fields: [organisationId, mobileDeviceId], references: [organisationId, id], onDelete: Cascade)
+
+  @@unique([organisationId, id])
+  @@index([organisationId, userId, revokedAt])
+  @@index([mobileDeviceId, revokedAt])
+  @@index([familyId, revokedAt])
+  @@index([expiresAt])
+  @@map("mobile_sessions")
+}
+
+model PushDelivery {
+  id             String             @id @default(cuid())
+  organisationId String             @map("organisation_id")
+  notificationId String             @map("notification_id")
+  mobileDeviceId String             @map("mobile_device_id")
+  status         PushDeliveryStatus @default(PENDING)
+  expoTicketId   String?            @map("expo_ticket_id")
+  attemptCount   Int                @default(0) @map("attempt_count")
+  lastError      String?            @map("last_error")
+  sentAt         DateTime?          @map("sent_at")
+  deliveredAt    DateTime?          @map("delivered_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  organisation   Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  notification   Notification       @relation(fields: [organisationId, notificationId], references: [organisationId, id], onDelete: Cascade)
+  mobileDevice   MobileDevice       @relation(fields: [organisationId, mobileDeviceId], references: [organisationId, id], onDelete: Cascade)
+
+  @@unique([notificationId, mobileDeviceId])
+  @@index([organisationId, status, createdAt])
+  @@index([mobileDeviceId, status])
+  @@map("push_deliveries")
 }

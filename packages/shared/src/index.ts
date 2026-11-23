@@ -10,6 +10,7 @@ export * from './schemas/creative-agent.js';
 export * from './schemas/design-job.js';
 export * from './schemas/env.js';
 export * from './schemas/member.js';
+export * from './schemas/mobile.js';
 export * from './schemas/template.js';
 export * from './constants/routes.js';
 export * from './contracts/psd-inspector.js';

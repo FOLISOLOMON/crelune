@@ -37,30 +37,28 @@ export async function getDashboardSnapshot(
   organisationId: string,
   ownerUserId: string
 ): Promise<DashboardSnapshot> {
-  const [
-    activeMembersCount,
-    activeTemplatesCount,
-    birthdayOverview,
-    notificationData,
-    designData,
-    dbHealth,
-  ] = await Promise.all([
-    prisma.member.count({
-      where: {
-        organisationId,
-        archivedAt: null,
-      },
-    }),
-    prisma.template.count({
-      where: {
-        organisationId,
-        isActive: true,
-        archivedAt: null,
-      },
-    }),
-    getBirthdayOverview(organisationId, ownerUserId, {
-      prepStatus: 'ALL',
-    }),
+  // Batch in two bounded waves to avoid saturating Neon's serverless pooler with 12+ parallel queries
+  const [activeMembersCount, activeTemplatesCount, birthdayOverview] =
+    await Promise.all([
+      prisma.member.count({
+        where: {
+          organisationId,
+          archivedAt: null,
+        },
+      }),
+      prisma.template.count({
+        where: {
+          organisationId,
+          isActive: true,
+          archivedAt: null,
+        },
+      }),
+      getBirthdayOverview(organisationId, ownerUserId, {
+        prepStatus: 'ALL',
+      }),
+    ]);
+
+  const [notificationData, designData, dbHealth] = await Promise.all([
     listOwnerNotifications(
       { userId: ownerUserId, organisationId },
       { unreadOnly: false, page: 1, limit: 4 }

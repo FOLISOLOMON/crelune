@@ -41,6 +41,11 @@ export const AUDIT_ACTIONS = {
   CREATIVE_DISPATCH_STATUS_CHANGED: 'CREATIVE_DISPATCH_STATUS_CHANGED',
   EXPORT_RECORD_CREATED: 'EXPORT_RECORD_CREATED',
   EXPORT_OWNER_APPROVAL_CHANGED: 'EXPORT_OWNER_APPROVAL_CHANGED',
+  MOBILE_LOGIN: 'MOBILE_LOGIN',
+  MOBILE_LOGOUT: 'MOBILE_LOGOUT',
+  MOBILE_SESSION_REUSE_DETECTED: 'MOBILE_SESSION_REUSE_DETECTED',
+  MOBILE_DEVICE_REVOKED: 'MOBILE_DEVICE_REVOKED',
+  NOTIFICATION_PREFERENCES_UPDATED: 'NOTIFICATION_PREFERENCES_UPDATED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
@@ -75,6 +80,11 @@ const FORBIDDEN_METADATA_KEYS = new Set([
   'claimtoken',
   'dispatchclaim',
   'x-crelune-dispatch-claim',
+  'refreshtoken',
+  'refreshtokenhash',
+  'accesstoken',
+  'expopushtoken',
+  'pushtoken',
   'manifestjson',
   'detectlayersjson',
 ]);
@@ -100,7 +110,9 @@ export interface RecordAuditEventInput {
     | 'CreativeUploadIntent'
     | 'CreativeAgent'
     | 'CreativeJobDispatch'
-    | 'ExportRecord';
+    | 'ExportRecord'
+    | 'MobileDevice'
+    | 'MobileSession';
   entityId: string;
   metadata?: Record<string, unknown> | null;
 }

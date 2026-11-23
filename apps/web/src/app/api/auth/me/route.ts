@@ -1,31 +1,30 @@
 import { NextResponse } from 'next/server';
-import { clearSessionCookie } from '@/lib/auth/session';
-import { resolveAuthenticatedOwner } from '@/lib/auth/owner-guard';
+import { requireAuthenticatedOwnerApi } from '@/lib/auth/api-owner-guard';
 
-export async function GET() {
-  const auth = await resolveAuthenticatedOwner();
-
-  if (auth.status === 'revoked') {
-    await clearSessionCookie();
-    return NextResponse.json({ error: 'Unauthorized: Session inactive or revoked' }, { status: 401 });
-  }
-
-  if (auth.status !== 'authenticated') {
-    return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 });
+export async function GET(request: Request) {
+  const auth = await requireAuthenticatedOwnerApi(request);
+  if (!auth.ok) {
+    return auth.response;
   }
 
   const { profile } = auth.owner;
-
-  return NextResponse.json({
-    authenticated: true,
-    user: {
-      userId: profile.id,
-      email: profile.email,
-      firstName: profile.firstName,
-      lastName: profile.lastName,
-      role: profile.role,
-      organisationId: profile.organisationId,
-      organisationName: profile.organisationName,
+  return NextResponse.json(
+    {
+      authenticated: true,
+      authMethod: auth.owner.authMethod ?? 'cookie',
+      ...(auth.owner.mobileContext
+        ? { deviceId: auth.owner.mobileContext.deviceId }
+        : {}),
+      user: {
+        userId: profile.id,
+        email: profile.email,
+        firstName: profile.firstName,
+        lastName: profile.lastName,
+        role: profile.role,
+        organisationId: profile.organisationId,
+        organisationName: profile.organisationName,
+      },
     },
-  });
+    { headers: { 'Cache-Control': 'private, no-store' } }
+  );
 }

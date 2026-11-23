@@ -181,15 +181,36 @@ The following decisions remain intentionally deferred until their corresponding 
 - **Decision**: Product Owner approved **Neon Object Storage** for member photo metadata (`Member.photoStorageKey`, `photoMimeType`, `photoByteSize`, `photoUpdatedAt` added in Stage 3.1 schema) so object storage stays aligned with Neon Postgres branching. Bucket provisioning, uploads, and pre-signed URLs remain deferred until Stage 3.3.
 
 ### Decision B: Mobile Push Notification Infrastructure
-- **Context**: Needed for mobile birthday alerts and design job review notifications (Milestone 6).
+- **Status**: Proposed Recommendation — Awaiting Product Owner Approval (Milestone 6 Phase 0).
+- **Context**: Needed for mobile birthday alerts and design job review notifications on both Android and iOS (Milestone 6). Empirical validation in Phase 0 confirmed that remote push notifications do not operate inside Expo Go on modern Expo SDKs (requiring EAS Development Builds) and require platform credentials for both Google **FCM v1** (Firebase Service Account JSON + `google-services.json`) and Apple **APNs** (`.p8` Auth Key via paid Apple Developer Program).
 - **Options**:
-  1. *Expo Push Notification Service*: Zero-config setup, native integration with Expo apps, free tier suitable for single owner.
-  2. *Firebase Cloud Messaging (FCM)*: Direct provider integration, higher initial setup complexity.
-- **Recommendation**: Use Expo Push Notifications for initial milestones; migrate to direct FCM only if multi-tenant enterprise volume is required.
-- **Approval Required**: Product Owner decision in Milestone 6.
+  1. *Expo Push Notification Service (backed by FCM v1 + APNs via EAS)*: Unified dispatch API, native integration with `expo-notifications`, automatic credential management via EAS, free tier suitable for single-owner usage, paired with a durable PostgreSQL `PushDelivery` outbox.
+  2. *Direct FCM v1 + Direct APNs from CRELUNE Backend*: Eliminates Expo Push Service hop, but requires maintaining separate OAuth2/JWT HTTP/2 clients, key rotation, and platform-specific feedback handling in the backend.
+- **Recommendation**: Use **Expo Push Notification Service** (with FCM v1 + APNs credentials managed in EAS and optional `EXPO_ACCESS_TOKEN` backend auth) paired with a decoupled PostgreSQL `PushDelivery` outbox (`UNIQUE(notification_id, mobile_device_id)`).
+- **Approval Required**: Product Owner decision before Milestone 6 Stage 6.1 / 6.6.
 
-### Decision C: Windows Creative Agent IPC Protocol & Automation Fallback (Partially Resolved — ADR 008)
-- **Status**: Partially Resolved / Contingent. Template immutability and process lifecycle are verified. Final execution bridge (native MCP vs Script Library staging vs GUI automation) is deferred to Milestone 5 evaluation. See [ADR 008](#adr-008-windows-creative-agent-inter-process-communication--affinity-33-integration) and [`docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_1_AFFINITY_VALIDATION.md).
+### Decision C: Windows Creative Agent IPC Protocol & Automation Fallback (Resolved in ADR 015)
+- **Status**: Resolved for Milestone 5 in [ADR 015](#adr-015--exact-template-version-pinning-standalone-manual-fallback--windows-creative-agent-architecture).
+
+### Decision D: Native Mobile Authentication & Token Lifecycle
+- **Status**: Proposed Recommendation — Awaiting Product Owner Approval (Milestone 6 Phase 0).
+- **Context**: Empirical source audit confirmed CRELUNE Web APIs currently enforce cookie-only `crelune_session` authentication and browser `Origin`/`Referer` CSRF checks, which native iOS/Android apps cannot safely reuse as-is.
+- **Options**:
+  1. *Per-Device `MobileDevice` + Rotating `MobileSession` Refresh Tokens (`30d`, SHA-256 hashed, family replay revocation) + Short-Lived Signed Mobile Access Tokens (`15m`, `typ: 'mobile_access'`)* stored in `expo-secure-store` (iOS Keychain / Android Keystore), with unified `requireAuthenticatedOwnerApi` handling Web Cookie (+ CSRF) and Mobile Bearer cleanly on existing `/api/*` routes.
+  2. *Long-Lived Opaque Per-Device Bearer Token*: Simpler implementation, but lacks short-lived access-token exposure reduction and automatic refresh-token theft/replay detection.
+- **Recommendation**: Option 1 (per-device rotating refresh tokens + `15m` access tokens + instant single-device revocation from Web/Mobile Settings).
+- **Approval Required**: Product Owner decision before Milestone 6 Stage 6.1.
+
+### Decision E: Unconfirmed External Accounts, Device Availability & Release Blockers
+- **Status**: External Dependencies & Release Blockers — Partially Confirmed (Milestone 6 Phase 0 Update).
+- **Confirmed Hosting & Distribution Direction (Moved to ADR 016)**: Existing **Expo account** for EAS config/cloud builds (do not assume paid tiers or configured credentials), **Vercel** as intended Web/API hosting paired with **Neon** (deployment & cron config to be validated before production changes), **Google Play Internal Testing** + **Apple TestFlight Internal Testing** as initial distribution channels, Android-first verification priority, and mandatory dual-platform Android + iOS compatibility.
+- **Unconfirmed External Accounts (Never Assumed)**:
+  1. **Apple Developer Program (\$99/yr)**: Unconfirmed — blocks iOS signing/provisioning, APNs `.p8` push keys, and TestFlight Internal Testing.
+  2. **Google Play Console (\$25 one-time)**: Unconfirmed — blocks Google Play Internal Testing uploads (does not block local Android emulator or APK sideloading).
+  3. **Firebase Project (FCM v1)**: Unconfirmed — blocks real Android remote push notification delivery (`google-services.json` + FCM v1 Service Account Key).
+  4. **App Identifiers**: Final reverse-DNS namespace (`com.crelune.app` / `com.crelune.app.dev` or founder-owned domain) pending confirmation before Stage 6.2.
+- **Physical Device Release Blocker**:
+  - **No physical iPhone is currently available.** Physical iOS runtime, camera/HEIC capture, APNs push delivery, VoiceOver/Dynamic Type, and TestFlight acceptance MUST remain marked `PENDING / BLOCKED` until tested on a real iPhone. **EAS cloud iOS builds alone do NOT constitute physical-device verification, and physical iPhone testing is mandatory before public release.**
 
 ---
 
@@ -247,3 +268,33 @@ Live workstation verification on 2026-11-23 confirmed Affinity MSIX package `Can
 
 - Preserves 100% template immutability, zero unverified automation claims, and reliable day-to-day creative production on Windows 11 with Affinity 3.3.3.5004.
 - Maintains a clean seam to introduce verified MCP or scripting tools later without breaking existing schemas, manifests, or security invariants.
+
+---
+
+## ADR 016 — Milestone 6 Mobile Platform Scope & Empirically Verified Compatibility Baseline
+
+- **Date**: 2026-11-23
+- **Status**: Confirmed Scope & Verified Baseline (Implementation Recommendations in Decisions B, D, E Remain Pending Approval)
+- **Scope**: Milestone 6 Phase 0 Planning (`apps/mobile`, `packages/shared`, `packages/ui`, `apps/web`)
+- **Detailed Plan**: [`docs/milestones/MILESTONE_6_MOBILE_ARCHITECTURE_AND_EXECUTION_PLAN.md`](file:///d:/Projects/Crelune/docs/milestones/MILESTONE_6_MOBILE_ARCHITECTURE_AND_EXECUTION_PLAN.md)
+
+### Approved Product Owner Decisions
+
+1. **Dual-Platform First Release (Mandatory)**: CRELUNE Mobile MUST support **both Android and iOS** from its initial release (resolving the prior open platform scope in `PRODUCT_MASTER_SPECIFICATION.md` Section 4.2 and `crelune-mobile` Section 4). Android-only libraries and platform assumptions are prohibited; iOS config and build compatibility must be maintained throughout development.
+2. **Android-First Development & iOS Physical-Device Release Gate**: Prioritize Android emulator and physical Android device verification (camera, image processing, uploads, push notifications, auth, navigation) during development. Because no physical iPhone is currently available, physical iOS runtime, camera, push, and TestFlight acceptance remain explicitly marked `PENDING / BLOCKED`; EAS cloud builds alone do not count as physical-device verification, and real iPhone testing is mandatory before public release.
+3. **Existing Expo Account for EAS**: Use the Product Owner's existing Expo account for EAS configuration and cloud builds without assuming paid EAS tiers or preconfigured signing/push credentials.
+4. **Native-Only UI (Reaffirming ADR 006) & Single Shared Backend**: Mobile must be a genuine native application (React Native / Expo / TypeScript / Expo Router direction) with zero WebViews and zero second backend or direct DB/storage access.
+5. **Hosting & Initial Distribution**: **Vercel** is approved as the intended CRELUNE Web/API hosting platform while **Neon** remains the database and private object storage provider (deployment settings, body-size constraints, and cron triggers must be validated on development/preview before any production changes). **Google Play Internal Testing** and **Apple TestFlight Internal Testing** are the planned initial distribution channels.
+
+### Empirically Verified Workstation & Repository Capabilities (`2026-11-23`)
+
+1. **Monorepo React Parity**: Installed workspace React is `19.3.1` (`next@15.5.29`, `zod@4.6.7`, Node `v24.21.0`). Published Expo **SDK 58** (`expo@58.0.26`, `expo-router@58.0.32`, `react-native@0.88.1`) requires `react@^19.3.0` and `@types/react@^19.1.1` (New Architecture mandatory), aligning cleanly with the existing monorepo without a React version split.
+2. **Shared Package Boundaries**: `@crelune/shared` contains zero Node built-in imports (`zod` + `date-fns` only) and is directly reusable by mobile (excluding server-only `validateEnv()`). `@crelune/ui` root exports HTML/DOM web components and CSS-unit tokens; mobile will require a pure hex-color subpath export (`@crelune/ui/colors`) rather than importing web DOM components.
+3. **Photo Format & Auth Constraints**: Backend member photo uploads (`POST /api/members/[id]/photo`) enforce `image/jpeg`, `image/png`, and `image/webp` (`<= 10 MB`, `sharp` EXIF stripping), so iOS HEIC/HEIF captures require client-side JPEG transcoding before upload. Existing owner APIs enforce cookie-only sessions + browser CSRF Origin checks, requiring dedicated mobile token auth before mobile implementation (see proposed Decision D).
+4. **Workstation Build Capabilities**: Windows 11 host has JDK `21.0.13.9`, Android SDK (`adb`, `build-tools 36/37`, `android-37.0`, `emulator.exe`, AVDs `Medium_Phone_API_37.0` and `Small_Phone`) for local Android testing, and no Xcode (`xcodebuild` absent), making EAS cloud macOS builders necessary for iOS builds.
+5. **Roadmap Boundary Fact**: `Event` (Milestone 7) and general `Asset` (Milestone 8) models and APIs are not yet implemented in `schema.prisma` or `apps/web/src/app/api/*`.
+
+### Proposed Implementation Details & Open Blockers (Not Yet Approved / Confirmed)
+
+- **Proposed Implementation Details Awaiting Approval**: Mobile rotating-token auth ([Decision D](#decision-d-native-mobile-authentication--token-lifecycle)), Expo Push + `PushDelivery` outbox ([Decision B](#decision-b-mobile-push-notification-infrastructure)), Milestone 7/8 placeholder scope in Milestone 6, and app reverse-DNS identifiers (`com.crelune.*`).
+- **Unconfirmed External Dependencies & Release Blockers**: Apple Developer Program (\$99/yr), Google Play Console (\$25 one-time), Firebase project (FCM v1), physical Android device confirmation, Vercel preview/cron validation, and unavailable physical iPhone (see [Decision E](#decision-e-unconfirmed-external-accounts-device-availability--release-blockers)).

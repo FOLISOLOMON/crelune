@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { isValidCallbackUrl } from '@crelune/shared';
-import { verifySessionTokenEdge, SESSION_COOKIE_NAME } from './lib/auth/edge-session';
+import {
+  extractBearerTokenEdge,
+  SESSION_COOKIE_NAME,
+  verifyMobileAccessTokenEdge,
+  verifySessionTokenEdge,
+} from './lib/auth/edge-session';
 
 const CONFIGURATION_ERROR_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -65,9 +70,13 @@ export async function middleware(request: NextRequest) {
     });
   }
 
-  // 4. Verify session token cryptographically using Web Crypto `crypto.subtle.verify()`
+  // 4. Verify web cookie session and mobile Bearer access token strictly at Edge
   const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
-  const session = await verifySessionTokenEdge(sessionCookie, secretKey);
+  const cookiePresent = Boolean(sessionCookie && sessionCookie.length > 0);
+  const bearer = extractBearerTokenEdge(request.headers.get('authorization'));
+  const session = cookiePresent
+    ? await verifySessionTokenEdge(sessionCookie, secretKey)
+    : null;
 
   // 5. Exact public & machine-authenticated route matching with strict method validation
   const isAgentMachineRoute =
@@ -90,14 +99,19 @@ export async function middleware(request: NextRequest) {
     (request.method === 'POST' &&
       /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/exports$/.test(pathname));
 
+  const isMobilePublicAuthRoute =
+    (pathname === '/api/mobile/auth/login' && request.method === 'POST') ||
+    (pathname === '/api/mobile/auth/refresh' && request.method === 'POST');
+
   const isPublicRoute =
     pathname === '/login' ||
     (pathname === '/api/auth/login' && request.method === 'POST') ||
     (pathname === '/api/auth/logout' && request.method === 'POST') ||
     (pathname === '/api/cron/birthday-reminders' && request.method === 'POST') ||
-    isAgentMachineRoute;
+    isAgentMachineRoute ||
+    isMobilePublicAuthRoute;
 
-  // 6. If already authenticated with valid token signature and accessing login, redirect to dashboard
+  // 6. If already authenticated with valid web cookie and accessing login, redirect to dashboard
   if (pathname === '/login') {
     if (session) {
       return NextResponse.redirect(new URL('/', request.url));
@@ -105,20 +119,62 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 7. Whitelisted public endpoints
+  // 7. Whitelisted public / machine-authenticated endpoints
   if (isPublicRoute) {
     return NextResponse.next();
   }
 
-  // 8. Protect all other routes (including dotted private API endpoints like /api/export.json)
-  if (!session) {
-    if (pathname.startsWith('/api/')) {
+  // 8. Protect all other routes:
+  //    - Web HTML routes accept ONLY verified web session cookies (never Mobile Bearer tokens).
+  //    - Protected owner API routes accept EITHER a verified web cookie OR a verified Mobile
+  //      Bearer access token (never both simultaneously, and never via query parameters).
+  if (pathname.startsWith('/api/')) {
+    if (cookiePresent && bearer.present) {
+      return NextResponse.json(
+        {
+          error:
+            'Bad Request: Ambiguous authentication credentials; send either a session cookie or a Bearer token, not both.',
+          code: 'AMBIGUOUS_AUTH_CREDENTIALS',
+        },
+        { status: 400, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
+
+    const isMobileLogoutRoute =
+      pathname === '/api/mobile/auth/logout' && request.method === 'POST';
+
+    if (bearer.present) {
+      const mobileSession =
+        !bearer.malformed && bearer.token
+          ? await verifyMobileAccessTokenEdge(bearer.token, secretKey)
+          : null;
+      if (!mobileSession) {
+        return NextResponse.json(
+          { error: 'Unauthorized: Invalid or expired mobile access token' },
+          { status: 401, headers: { 'Cache-Control': 'no-store' } }
+        );
+      }
+      return NextResponse.next();
+    }
+
+    if (isMobileLogoutRoute) {
+      return NextResponse.json(
+        { error: 'Unauthorized: Mobile Bearer authentication required' },
+        { status: 401, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
+
+    if (!session) {
       return NextResponse.json(
         { error: 'Unauthorized: Owner authentication required' },
         { status: 401 }
       );
     }
 
+    return NextResponse.next();
+  }
+
+  if (!session) {
     const loginUrl = new URL('/login', request.url);
     if (isValidCallbackUrl(pathname)) {
       loginUrl.searchParams.set('callbackUrl', pathname);
