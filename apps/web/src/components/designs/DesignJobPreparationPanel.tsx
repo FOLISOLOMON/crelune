@@ -41,6 +41,7 @@ import {
   createExportUploadIntentRequest,
   DesignApiError,
   fetchDesignJobPreparationRequest,
+  recoverCreativeDispatchRequest,
   setExportPublishApprovalRequest,
 } from '@/lib/designs/design-api-client';
 import { uploadBytesToPresignedUrl } from '@/lib/templates/template-api-client';
@@ -115,6 +116,9 @@ export function DesignJobPreparationPanel({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDispatching, setIsDispatching] = useState(false);
   const [cancellingDispatchId, setCancellingDispatchId] = useState<
+    string | null
+  >(null);
+  const [recoveringDispatchId, setRecoveringDispatchId] = useState<
     string | null
   >(null);
   const [isUploadingExport, setIsUploadingExport] = useState(false);
@@ -207,6 +211,32 @@ export function DesignJobPreparationPanel({
       );
     } finally {
       setCancellingDispatchId(null);
+    }
+  };
+
+  const handleRecoverDispatch = async (dispatchId: string) => {
+    if (recoveringDispatchId) return;
+    setRecoveringDispatchId(dispatchId);
+    setPanelError(null);
+    setPanelSuccess(null);
+    try {
+      await recoverCreativeDispatchRequest(
+        jobId,
+        dispatchId,
+        'Owner explicitly released READY_FOR_ARTIST dispatch for recovery while preserving local working copies.'
+      );
+      setPanelSuccess(
+        `Dispatch ${dispatchId} released and requeued. Existing local working copies will be preserved without overwrite.`
+      );
+      await refreshPreparation();
+    } catch (err) {
+      setPanelError(
+        err instanceof DesignApiError
+          ? err.message
+          : 'Unable to release dispatch for recovery.'
+      );
+    } finally {
+      setRecoveringDispatchId(null);
     }
   };
 
@@ -675,18 +705,36 @@ export function DesignJobPreparationPanel({
                         Created {formatDateTimeDisplay(disp.createdAt)}
                         {disp.errorMessage ? ` · ${disp.errorMessage}` : ''}
                       </p>
+                      {disp.requiresOwnerIntervention && (
+                        <p className="mt-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-900">
+                          Owner Action Required: {disp.interventionReason}
+                        </p>
+                      )}
                     </div>
                     {isActive && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        isLoading={cancellingDispatchId === disp.id}
-                        onClick={() => handleCancelDispatch(disp.id)}
-                      >
-                        <XCircle className="h-3.5 w-3.5 mr-1 text-rose-600" />
-                        Cancel Dispatch
-                      </Button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {disp.requiresOwnerIntervention && (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            isLoading={recoveringDispatchId === disp.id}
+                            onClick={() => handleRecoverDispatch(disp.id)}
+                          >
+                            Release &amp; Requeue
+                          </Button>
+                        )}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          isLoading={cancellingDispatchId === disp.id}
+                          onClick={() => handleCancelDispatch(disp.id)}
+                        >
+                          <XCircle className="h-3.5 w-3.5 mr-1 text-rose-600" />
+                          Cancel Dispatch
+                        </Button>
+                      </div>
                     )}
                   </li>
                 );

@@ -4,13 +4,19 @@
  * Materializes isolated job workspaces strictly inside:
  *   `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/`
  *
- * Safety invariants:
+ * Stage 5.5.1 Preservation-First Safety Invariants:
  * - Original template master is saved into `source/`, verified by SHA-256, marked
  *   read-only, and NEVER overwritten.
- * - Working edits happen exclusively on a byte-for-byte copy inside `working/`.
- * - `verifyMasterUnchanged()` checks SHA-256 before and after every creative action.
+ * - Working copy creation is idempotent and preservation-first: if a working copy
+ *   already exists on disk, it is NEVER overwritten during retry or recovery — even
+ *   if its SHA-256 differs from the source master (legitimate artist edits!).
+ * - Any destructive replacement of a working copy requires an explicit caller opt-in
+ *   (`explicitOverwriteWorkingCopy: true`) backed by visible user confirmation.
+ * - Existing files inside `exports/` are NEVER overwritten or deleted during
+ *   preparation, recovery, or temporary cleanup.
  * - Temporary scratch cleanup ONLY deletes `working/tmp/` and NEVER touches
- *   `source/` masters or `exports/` deliverables.
+ *   `source/` masters, `working/` documents, or `exports/` deliverables.
+ * - Symlink and junction containment is enforced on every resolved path.
  */
 
 import crypto from 'node:crypto';
@@ -23,12 +29,19 @@ import {
   type JobPrepManifest,
 } from '@crelune/shared';
 import {
+  assertNotSymlinkIfExists,
   assertSafeAgentIdentifier,
   assertSafeBasename,
   assertSafeRelativeManifestPath,
   resolveStrictlyWithinRoot,
 } from '../security/path-safety.js';
 import { sanitizeLogMeta } from '../security/logger.js';
+
+export type WorkingCopyPreparationStatus =
+  | 'CREATED'
+  | 'PRESERVED_UNCHANGED'
+  | 'PRESERVED_WITH_ARTIST_EDITS'
+  | 'REPLACED_BY_EXPLICIT_USER_ACTION';
 
 export interface MaterializedJobWorkspace {
   jobId: string;
@@ -46,6 +59,11 @@ export interface MaterializedJobWorkspace {
   masterSourcePath: string;
   workingCopyPath: string;
   masterSha256: string;
+  masterVerified: boolean;
+  workingCopySha256: string;
+  workingCopyStatus: WorkingCopyPreparationStatus;
+  preservedExistingWorkingCopy: boolean;
+  preservedExistingExports: string[];
   downloadedAssets: Array<{
     assetId: string;
     relativeFilename: string;
@@ -67,13 +85,30 @@ export function computeSha256Hex(bytes: Uint8Array): string {
 }
 
 export async function computeFileSha256Hex(filePath: string): Promise<string> {
+  assertNotSymlinkIfExists(filePath);
   const bytes = await fs.readFile(filePath);
   return computeSha256Hex(bytes);
 }
 
+async function listRegularFilesSafe(dirPath: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return [];
+    }
+    throw err;
+  }
+}
+
 function buildHumanPreparationGuide(
   manifest: JobPrepManifest,
-  workingCopyRelative: string
+  workingCopyRelative: string,
+  workingCopyStatus: WorkingCopyPreparationStatus
 ): string {
   const lines: string[] = [
     'CRELUNE — Creative Job Preparation Guide',
@@ -84,7 +119,7 @@ function buildHumanPreparationGuide(
     `Template:          ${manifest.templateName ?? manifest.templateId} (v${manifest.templateVersionNumber ?? '?'})`,
     `Format / Studio:   ${manifest.templateFormat} / ${manifest.templateStudioType}`,
     `Master SHA-256:    ${manifest.templateSha256}`,
-    `Working Copy:      ${workingCopyRelative}`,
+    `Working Copy:      ${workingCopyRelative} (${workingCopyStatus})`,
     `Output Formats:    ${manifest.outputSpec.formats.join(', ')}`,
     `Dimensions:        ${manifest.outputSpec.dimensions ?? 'Per template canvas'}`,
     `Target Platform:   ${manifest.outputSpec.targetPlatform ?? 'General'}`,
@@ -101,7 +136,7 @@ function buildHumanPreparationGuide(
       const pathStr =
         f.layerPath && f.layerPath.length > 0 ? ` [${f.layerPath.join(' / ')}]` : '';
       const val = f.assetReference
-        ? `ASSET -> ${f.assetReference.suggestedRelativeFilename}`
+        ? `ASSET (${f.assetReference.assetKind}) -> ${f.assetReference.suggestedRelativeFilename}`
         : f.textValue ?? '(Unresolved)';
       lines.push(`  - ${f.fieldKey} -> Layer "${f.targetLayerName}"${pathStr}: ${val}`);
     }
@@ -112,9 +147,10 @@ function buildHumanPreparationGuide(
     'Instructions:',
     '-------------',
     '1. NEVER modify files inside source/. Always edit ONLY the copy in working/.',
-    '2. Export final PNG, JPEG, or PDF deliverables into exports/.',
-    '3. Run `crelune-agent submit-export` or upload from CRELUNE Web to verify and attach deliverables.',
-    '4. Publication remains an explicit owner confirmation in CRELUNE Web.'
+    '2. Existing working copies are preserved automatically on recovery and never overwritten without explicit confirmation.',
+    '3. Export final PNG, JPEG, or PDF deliverables into exports/.',
+    '4. Run `crelune-agent submit-export` or upload from CRELUNE Web to verify and attach deliverables.',
+    '5. Publication remains an explicit owner confirmation in CRELUNE Web.'
   );
 
   return lines.join('\n') + '\n';
@@ -124,6 +160,7 @@ export async function appendWorkspaceEvent(
   eventLogPath: string,
   record: Omit<WorkspaceEventRecord, 'timestamp'>
 ): Promise<void> {
+  assertNotSymlinkIfExists(eventLogPath);
   const line = JSON.stringify({
     timestamp: new Date().toISOString(),
     event: record.event,
@@ -145,6 +182,11 @@ export async function prepareIsolatedJobWorkspace(params: {
     bytes: Uint8Array;
     expectedSha256?: string | null;
   }>;
+  /**
+   * Destructive replacement of an existing working copy is strictly disabled by default
+   * and must only be enabled after an explicit, visible user confirmation.
+   */
+  explicitOverwriteWorkingCopy?: boolean;
 }): Promise<MaterializedJobWorkspace> {
   const manifest = jobPrepManifestSchema.parse(params.rawManifest);
   const safeJobId = assertSafeAgentIdentifier(manifest.designJobId, 'designJobId');
@@ -194,7 +236,11 @@ export async function prepareIsolatedJobWorkspace(params: {
     logsDir,
   ]) {
     await fs.mkdir(dir, { recursive: true });
+    assertNotSymlinkIfExists(dir);
   }
+
+  // Record existing exports BEFORE touching anything — NEVER overwrite or delete exports
+  const preservedExistingExports = await listRegularFilesSafe(exportsDir);
 
   const templateRelSegments = assertSafeRelativeManifestPath(
     manifest.templateRelativeFilename
@@ -205,6 +251,8 @@ export async function prepareIsolatedJobWorkspace(params: {
   );
 
   const masterSourcePath = resolveStrictlyWithinRoot(sourceDir, templateLeafName);
+  assertNotSymlinkIfExists(masterSourcePath);
+
   const dotIdx = templateLeafName.lastIndexOf('.');
   const workingBase =
     dotIdx > 0 ? templateLeafName.slice(0, dotIdx) : templateLeafName;
@@ -214,8 +262,9 @@ export async function prepareIsolatedJobWorkspace(params: {
     'working filename'
   );
   const workingCopyPath = resolveStrictlyWithinRoot(workingDir, workingLeafName);
+  assertNotSymlinkIfExists(workingCopyPath);
 
-  // If original master already exists in source/, verify it matches rather than overwriting!
+  // 1. Source master is verified independently and NEVER overwritten
   let sourceAlreadyExists = false;
   try {
     await fs.access(masterSourcePath);
@@ -237,14 +286,50 @@ export async function prepareIsolatedJobWorkspace(params: {
     await fs.chmod(masterSourcePath, 0o444).catch(() => {});
   }
 
-  // Create fresh disposable working copy in working/
-  await fs.writeFile(workingCopyPath, params.templateBytes);
-  const workingSha = await computeFileSha256Hex(workingCopyPath);
-  if (workingSha !== manifest.templateSha256) {
-    throw new Error('Working copy SHA-256 verification failed immediately after copy.');
+  // Independent source master verification
+  const masterIntegrity = await verifyMasterTemplateIntegrity({
+    masterSourcePath,
+    expectedSha256: manifest.templateSha256,
+  });
+  if (!masterIntegrity.ok) {
+    throw new Error('Source master SHA-256 verification failed.');
   }
 
-  // Write only manifest-authorised assets into assets/
+  // 2. Working copy is preservation-first: check existence before writing!
+  let workingAlreadyExists = false;
+  try {
+    await fs.access(workingCopyPath);
+    workingAlreadyExists = true;
+  } catch {
+    workingAlreadyExists = false;
+  }
+
+  let workingCopyStatus: WorkingCopyPreparationStatus;
+  let preservedExistingWorkingCopy = false;
+  let workingCopySha256: string;
+
+  if (workingAlreadyExists && !params.explicitOverwriteWorkingCopy) {
+    // Preserve existing working copy even if its hash differs from the master (artist edits!)
+    workingCopySha256 = await computeFileSha256Hex(workingCopyPath);
+    preservedExistingWorkingCopy = true;
+    workingCopyStatus =
+      workingCopySha256 === manifest.templateSha256
+        ? 'PRESERVED_UNCHANGED'
+        : 'PRESERVED_WITH_ARTIST_EDITS';
+  } else {
+    await fs.writeFile(workingCopyPath, params.templateBytes);
+    workingCopySha256 = await computeFileSha256Hex(workingCopyPath);
+    if (workingCopySha256 !== manifest.templateSha256) {
+      throw new Error(
+        'Working copy SHA-256 verification failed immediately after copy.'
+      );
+    }
+    workingCopyStatus = workingAlreadyExists
+      ? 'REPLACED_BY_EXPLICIT_USER_ACTION'
+      : 'CREATED';
+  }
+
+  // 3. Write only manifest-authorised assets into assets/ (idempotent when identical)
   const downloadedAssets: MaterializedJobWorkspace['downloadedAssets'] = [];
   for (const asset of params.assets) {
     if (
@@ -268,7 +353,18 @@ export async function prepareIsolatedJobWorkspace(params: {
       'asset filename'
     );
     const localAssetPath = resolveStrictlyWithinRoot(assetsDir, assetLeaf);
-    await fs.writeFile(localAssetPath, asset.bytes);
+    assertNotSymlinkIfExists(localAssetPath);
+
+    let assetMatchesDisk = false;
+    try {
+      const existingAssetSha = await computeFileSha256Hex(localAssetPath);
+      assetMatchesDisk = existingAssetSha === assetSha;
+    } catch {
+      assetMatchesDisk = false;
+    }
+    if (!assetMatchesDisk) {
+      await fs.writeFile(localAssetPath, asset.bytes);
+    }
 
     downloadedAssets.push({
       assetId: asset.assetId,
@@ -282,13 +378,34 @@ export async function prepareIsolatedJobWorkspace(params: {
   const manifestPath = resolveStrictlyWithinRoot(jobDir, 'manifest.json');
   const guidePath = resolveStrictlyWithinRoot(jobDir, 'PREPARATION_GUIDE.txt');
   const eventLogPath = resolveStrictlyWithinRoot(logsDir, 'events.jsonl');
+  assertNotSymlinkIfExists(manifestPath);
+  assertNotSymlinkIfExists(guidePath);
+  assertNotSymlinkIfExists(eventLogPath);
 
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
   await fs.writeFile(
     guidePath,
-    buildHumanPreparationGuide(manifest, `working/${workingLeafName}`),
+    buildHumanPreparationGuide(
+      manifest,
+      `working/${workingLeafName}`,
+      workingCopyStatus
+    ),
     'utf8'
   );
+
+  if (preservedExistingWorkingCopy) {
+    await appendWorkspaceEvent(eventLogPath, {
+      event: 'EXISTING_WORKING_COPY_PRESERVED',
+      details: {
+        designJobId: safeJobId,
+        dispatchId: safeDispatchId,
+        workingCopyStatus,
+        masterSha256Unchanged: true,
+        artistEditsDetected: workingCopyStatus === 'PRESERVED_WITH_ARTIST_EDITS',
+        preservedExportCount: preservedExistingExports.length,
+      },
+    });
+  }
 
   await appendWorkspaceEvent(eventLogPath, {
     event: 'WORKSPACE_PREPARED',
@@ -296,6 +413,9 @@ export async function prepareIsolatedJobWorkspace(params: {
       designJobId: safeJobId,
       dispatchId: safeDispatchId,
       masterSha256: actualMasterSha,
+      workingCopyStatus,
+      preservedExistingWorkingCopy,
+      preservedExportCount: preservedExistingExports.length,
       assetCount: downloadedAssets.length,
     },
   });
@@ -316,6 +436,11 @@ export async function prepareIsolatedJobWorkspace(params: {
     masterSourcePath,
     workingCopyPath,
     masterSha256: actualMasterSha,
+    masterVerified: true,
+    workingCopySha256,
+    workingCopyStatus,
+    preservedExistingWorkingCopy,
+    preservedExistingExports,
     downloadedAssets,
   };
 }
@@ -323,7 +448,9 @@ export async function prepareIsolatedJobWorkspace(params: {
 export async function verifyMasterTemplateIntegrity(params: {
   masterSourcePath: string;
   expectedSha256: string;
-}): Promise<{ ok: true; actualSha256: string } | { ok: false; actualSha256: string | null }> {
+}): Promise<
+  { ok: true; actualSha256: string } | { ok: false; actualSha256: string | null }
+> {
   try {
     const actualSha256 = await computeFileSha256Hex(params.masterSourcePath);
     if (actualSha256 === params.expectedSha256.toLowerCase()) {
@@ -337,7 +464,7 @@ export async function verifyMasterTemplateIntegrity(params: {
 
 /**
  * Cleans ONLY disposable temporary files inside `working/tmp/`.
- * NEVER deletes `source/` originals or `exports/` deliverables.
+ * NEVER deletes `source/` originals, `working/` documents, or `exports/` deliverables.
  */
 export async function cleanupWorkspaceTempFiles(
   workspaceRoot: string,
@@ -372,11 +499,15 @@ export interface RecoverableWorkspaceSummary {
   dispatchId: string;
   manifestPath: string;
   masterIntegrityOk: boolean;
+  workingCopyFiles: string[];
+  workingCopyHasArtistEdits: boolean;
+  existingExportFiles: string[];
 }
 
 /**
- * Inspects local `workspaces/jobs/*` directories on startup so interrupted jobs
- * can be safely recovered and verified without losing artist work.
+ * Read-only inspection of local `workspaces/jobs/*` directories on startup so
+ * interrupted jobs can be safely recovered and verified without ever overwriting
+ * artist working copies or existing exports.
  */
 export async function inspectExistingWorkspaces(
   workspaceRoot: string
@@ -398,6 +529,7 @@ export async function inspectExistingWorkspaces(
       assertSafeAgentIdentifier(jobId, 'jobId');
       const jobDir = resolveStrictlyWithinRoot(jobsRoot, jobId);
       const manifestPath = resolveStrictlyWithinRoot(jobDir, 'manifest.json');
+      assertNotSymlinkIfExists(manifestPath);
       const raw = await fs.readFile(manifestPath, 'utf8');
       const manifest = jobPrepManifestSchema.parse(JSON.parse(raw));
       const segments = assertSafeRelativeManifestPath(
@@ -410,11 +542,31 @@ export async function inspectExistingWorkspaces(
         expectedSha256: manifest.templateSha256,
       });
 
+      const workingDir = resolveStrictlyWithinRoot(jobDir, 'working');
+      const exportsDir = resolveStrictlyWithinRoot(jobDir, 'exports');
+      const workingCopyFiles = await listRegularFilesSafe(workingDir);
+      const existingExportFiles = await listRegularFilesSafe(exportsDir);
+
+      // A working copy hash differing from master represents legitimate artist edits,
+      // NOT a corrupted master.
+      let workingCopyHasArtistEdits = false;
+      for (const wf of workingCopyFiles) {
+        const wfPath = resolveStrictlyWithinRoot(workingDir, wf);
+        const wfSha = await computeFileSha256Hex(wfPath);
+        if (wfSha !== manifest.templateSha256.toLowerCase()) {
+          workingCopyHasArtistEdits = true;
+          break;
+        }
+      }
+
       summaries.push({
         jobId,
         dispatchId: manifest.dispatchId,
         manifestPath,
         masterIntegrityOk: integrity.ok,
+        workingCopyFiles,
+        workingCopyHasArtistEdits,
+        existingExportFiles,
       });
     } catch {
       // Ignore non-workspace directories safely

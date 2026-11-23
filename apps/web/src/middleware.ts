@@ -75,6 +75,8 @@ export async function middleware(request: NextRequest) {
     (pathname === '/api/agent/jobs/claim' && request.method === 'POST') ||
     (request.method === 'POST' &&
       /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/status$/.test(pathname)) ||
+    (request.method === 'POST' &&
+      /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/lease$/.test(pathname)) ||
     (request.method === 'GET' &&
       /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/template$/.test(pathname)) ||
     (request.method === 'GET' &&

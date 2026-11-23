@@ -115,9 +115,42 @@ export function resolveStrictlyWithinRoot(
     );
   }
 
-  // Verify existing ancestor realpath does not escape via Windows junctions/symlinks
+  // Verify every existing ancestor (and leaf symlink/junction) stays strictly inside rootDir
   if (fs.existsSync(normalizedRoot)) {
     const realRoot = fs.realpathSync(normalizedRoot);
+
+    // Check every existing path component from root down to target for symlinks/junctions
+    const relParts = rel.split(path.sep).filter(Boolean);
+    let walkPath = normalizedRoot;
+    for (const part of relParts) {
+      walkPath = path.join(walkPath, part);
+      let lstat: fs.Stats | null = null;
+      try {
+        lstat = fs.lstatSync(walkPath);
+      } catch {
+        // Component does not exist yet — stop walking
+        break;
+      }
+
+      if (lstat.isSymbolicLink()) {
+        let resolvedLink: string;
+        try {
+          resolvedLink = fs.realpathSync(walkPath);
+        } catch {
+          // Dangling symlink inside workspace is always rejected fail-closed
+          throw new AgentPathSecurityError(
+            'Dangling or unresolvable symlink inside agent workspace rejected.'
+          );
+        }
+        const linkRel = path.relative(realRoot, resolvedLink);
+        if (linkRel.startsWith('..') || path.isAbsolute(linkRel)) {
+          throw new AgentPathSecurityError(
+            'Symlink or junction escape outside approved agent workspace root rejected.'
+          );
+        }
+      }
+    }
+
     let checkPath = target;
     while (!fs.existsSync(checkPath) && checkPath !== path.dirname(checkPath)) {
       checkPath = path.dirname(checkPath);
@@ -134,4 +167,20 @@ export function resolveStrictlyWithinRoot(
   }
 
   return target;
+}
+
+export function assertNotSymlinkIfExists(targetPath: string): void {
+  try {
+    const stat = fs.lstatSync(targetPath);
+    if (stat.isSymbolicLink()) {
+      throw new AgentPathSecurityError(
+        'Refusing to read or write through a symbolic link inside the job workspace.'
+      );
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return;
+    }
+    throw err;
+  }
 }

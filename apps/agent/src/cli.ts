@@ -54,6 +54,7 @@ Commands:
   doctor                                                Inspect Affinity 3.3, DPAPI store, and backend heartbeat
   process-once [--approve-open]                         Claim and prepare a single queued creative dispatch
   run [--approve-open]                                  Run outbound heartbeat and job polling loop
+  renew-lease --dispatch <id>                           Extend the active lease for an in-progress artist session
   submit-export --dispatch <id> --job <id> --file <f>   Validate and upload export from workspaces/jobs/<id>/exports/
   unpair                                                Clear encrypted local agent credentials
 `);
@@ -161,6 +162,9 @@ Commands:
           dispatchId: outcome.dispatchId ?? null,
           designJobId: outcome.designJobId ?? null,
           executionMode: outcome.affinityResult?.executionMode ?? null,
+          workingCopyStatus: outcome.workspace?.workingCopyStatus ?? null,
+          preservedExistingWorkingCopy:
+            outcome.preservedExistingWorkingCopy ?? false,
           workingCopyPath: outcome.workspace?.workingCopyPath ?? null,
           exportsDir: outcome.workspace?.exportsDir ?? null,
         },
@@ -168,6 +172,18 @@ Commands:
         2
       )
     );
+    return;
+  }
+
+  if (command === 'renew-lease') {
+    const dispatchId = getFlagValue(args, '--dispatch');
+    if (!dispatchId) {
+      console.error('Usage: crelune-agent renew-lease --dispatch <dispatchId>');
+      process.exitCode = 1;
+      return;
+    }
+    const res = await runtime.renewActiveLease({ dispatchId });
+    console.log(JSON.stringify(res, null, 2));
     return;
   }
 

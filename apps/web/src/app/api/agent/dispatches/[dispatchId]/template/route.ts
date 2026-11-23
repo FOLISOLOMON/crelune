@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
-import { verifyAgentBearerRequest } from '@/lib/agents/agent-auth';
+import {
+  extractDispatchClaimToken,
+  verifyAgentBearerRequest,
+} from '@/lib/agents/agent-auth';
 import {
   handleAgentRouteError,
   parseAgentScopedIdOrError,
@@ -15,6 +18,11 @@ export async function GET(
     return auth.response;
   }
 
+  const claim = extractDispatchClaimToken(request);
+  if (!claim.ok) {
+    return claim.response;
+  }
+
   const { dispatchId: rawDispatchId } = await context.params;
   const idResult = parseAgentScopedIdOrError(rawDispatchId);
   if (!idResult.ok) {
@@ -24,7 +32,8 @@ export async function GET(
   try {
     const master = await streamAgentDispatchTemplateMaster(
       auth.agent,
-      idResult.id
+      idResult.id,
+      claim.claimToken
     );
     return new NextResponse(Buffer.from(master.body), {
       status: 200,

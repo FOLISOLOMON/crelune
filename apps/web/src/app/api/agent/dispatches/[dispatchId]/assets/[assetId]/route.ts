@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
-import { verifyAgentBearerRequest } from '@/lib/agents/agent-auth';
+import {
+  extractDispatchClaimToken,
+  verifyAgentBearerRequest,
+} from '@/lib/agents/agent-auth';
 import {
   handleAgentRouteError,
   parseAgentScopedIdOrError,
@@ -13,6 +16,11 @@ export async function GET(
   const auth = await verifyAgentBearerRequest(request);
   if (!auth.ok) {
     return auth.response;
+  }
+
+  const claim = extractDispatchClaimToken(request);
+  if (!claim.ok) {
+    return claim.response;
   }
 
   const { dispatchId: rawDispatchId, assetId: rawAssetId } =
@@ -30,7 +38,8 @@ export async function GET(
     const asset = await streamAgentDispatchAsset(
       auth.agent,
       dispatchResult.id,
-      assetResult.id
+      assetResult.id,
+      claim.claimToken
     );
     return new NextResponse(Buffer.from(asset.body), {
       status: 200,

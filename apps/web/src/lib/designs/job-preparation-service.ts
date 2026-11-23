@@ -42,6 +42,7 @@ import {
   type JobPrepManifest,
   type PreparationValidationIssue,
   type PresignedUploadTarget,
+  type RecoverCreativeJobDispatchInput,
   type TemplateFileFormat,
   type TemplateInspectionStatus,
   type TemplateStudioType,
@@ -196,30 +197,56 @@ function parseDefaultExportFormats(rawDefault?: string | null): ExportFileFormat
   return ['PNG'];
 }
 
-function mapDispatchSummary(row: {
-  id: string;
-  designJobId: string;
-  templateVersionId: string;
-  assignedAgentId: string | null;
-  manifestVersion: number;
-  status: string;
-  claimedAt: Date | null;
-  readyForArtistAt: Date | null;
-  completedAt: Date | null;
-  failedAt: Date | null;
-  errorCode: string | null;
-  errorMessage: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): CreativeJobDispatchSummary {
+function mapDispatchSummary(
+  row: {
+    id: string;
+    designJobId: string;
+    templateVersionId: string;
+    assignedAgentId: string | null;
+    manifestVersion: number;
+    status: string;
+    claimedAt: Date | null;
+    leaseExpiresAt?: Date | null;
+    readyForArtistAt: Date | null;
+    completedAt: Date | null;
+    failedAt: Date | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    assignedAgent?: { status: string } | null;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  now: Date = new Date()
+): CreativeJobDispatchSummary {
+  const status = row.status as CreativeDispatchStatus;
+  let requiresOwnerIntervention = false;
+  let interventionReason: string | null = null;
+
+  if (status === 'READY_FOR_ARTIST') {
+    if (
+      row.errorCode === 'AGENT_REVOKED_INTERVENTION_REQUIRED' ||
+      row.assignedAgent?.status === 'REVOKED'
+    ) {
+      requiresOwnerIntervention = true;
+      interventionReason =
+        row.errorMessage ??
+        'Assigned agent was revoked while artist edits may be in progress. Review local work and either upload export manually, cancel, or explicitly release for recovery.';
+    } else if (!row.leaseExpiresAt || row.leaseExpiresAt <= now) {
+      requiresOwnerIntervention = true;
+      interventionReason =
+        'Artist workspace lease expired. Existing local edits are preserved and will not be overwritten automatically; upload export manually, cancel, or explicitly release for recovery.';
+    }
+  }
+
   return {
     id: row.id,
     designJobId: row.designJobId,
     templateVersionId: row.templateVersionId,
     assignedAgentId: row.assignedAgentId,
     manifestVersion: row.manifestVersion,
-    status: row.status as CreativeDispatchStatus,
+    status,
     claimedAt: row.claimedAt ? row.claimedAt.toISOString() : null,
+    leaseExpiresAt: row.leaseExpiresAt ? row.leaseExpiresAt.toISOString() : null,
     readyForArtistAt: row.readyForArtistAt
       ? row.readyForArtistAt.toISOString()
       : null,
@@ -227,6 +254,8 @@ function mapDispatchSummary(row: {
     failedAt: row.failedAt ? row.failedAt.toISOString() : null,
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
+    requiresOwnerIntervention,
+    interventionReason,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -436,11 +465,17 @@ const PREPARATION_JOB_SELECT = {
       manifestVersion: true,
       status: true,
       claimedAt: true,
+      leaseExpiresAt: true,
       readyForArtistAt: true,
       completedAt: true,
       failedAt: true,
       errorCode: true,
       errorMessage: true,
+      assignedAgent: {
+        select: {
+          status: true,
+        },
+      },
       createdAt: true,
       updatedAt: true,
     },
@@ -634,6 +669,34 @@ function resolveFieldsAndManifest(params: {
           assetReference: null,
         });
       }
+      continue;
+    }
+
+    if (mapping.fieldType === 'IMAGE' && mapping.fieldKey !== 'member.photo') {
+      const message = `Image field "${mapping.fieldKey}" requires general working-asset delivery, which is not supported in Milestone 5 (deferred to Milestone 8 Asset Library). Only member.photo (MEMBER_PHOTO) is supported for automated agent delivery; place other images manually in Affinity.`;
+      if (mapping.isRequired) {
+        issues.push({
+          code: 'UNSUPPORTED_ASSET_KIND',
+          severity: 'ERROR',
+          fieldKey: mapping.fieldKey,
+          message,
+        });
+      } else {
+        warnings.push({
+          code: 'UNSUPPORTED_ASSET_KIND',
+          severity: 'WARNING',
+          fieldKey: mapping.fieldKey,
+          message,
+        });
+      }
+      resolvedFields.push({
+        fieldKey: mapping.fieldKey,
+        fieldType: 'IMAGE',
+        targetLayerName: mapping.targetLayerName,
+        layerPath,
+        textValue: null,
+        assetReference: null,
+      });
       continue;
     }
 
@@ -838,7 +901,9 @@ export async function getDesignJobPreparationSnapshot(
     now,
   });
 
-  const dispatches = job.creativeDispatches.map(mapDispatchSummary);
+  const dispatches = job.creativeDispatches.map((row) =>
+    mapDispatchSummary(row, now)
+  );
   const exports = job.exportRecords.map(mapExportRecordSummary);
   const hasActiveDispatch = dispatches.some((d) =>
     ACTIVE_CREATIVE_DISPATCH_STATUSES.includes(d.status)
@@ -1183,7 +1248,88 @@ export async function cancelCreativeJobDispatch(
     });
 
     return mapDispatchSummary(updated);
-  });
+  }, { maxWait: 10000, timeout: 15000 });
+}
+
+/**
+ * Explicit owner recovery action for dispatches held in `READY_FOR_ARTIST`
+ * (e.g., after lease expiry or assigned-agent revocation).
+ * Preserves local artist working copies (enforced by Windows Creative Agent) and
+ * returns the dispatch to `QUEUED` with cleared ownership/claim/lease state.
+ */
+export async function recoverCreativeJobDispatch(
+  actor: DesignActorContext,
+  jobId: string,
+  dispatchId: string,
+  input: RecoverCreativeJobDispatchInput,
+  deps: JobPreparationServiceDependencies = {}
+): Promise<CreativeJobDispatchSummary> {
+  const now = (deps.now ?? (() => new Date()))();
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT id FROM design_jobs WHERE id = ${jobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+
+    const dispatch = await tx.creativeJobDispatch.findFirst({
+      where: {
+        id: dispatchId,
+        designJobId: jobId,
+        organisationId: actor.organisationId,
+      },
+      include: {
+        assignedAgent: {
+          select: { status: true },
+        },
+      },
+    });
+    if (!dispatch) {
+      throw new DispatchNotFoundError();
+    }
+
+    const current = dispatch.status as CreativeDispatchStatus;
+    if (current === 'EXPORTED' || current === 'FAILED' || current === 'CANCELLED') {
+      throw new JobPreparationConflictError(
+        `Cannot recover a terminal creative dispatch (${current}). Queue a new dispatch instead.`,
+        'INVALID_DISPATCH_TRANSITION'
+      );
+    }
+
+    if (current === 'QUEUED') {
+      return mapDispatchSummary(dispatch, now);
+    }
+
+    const previousAgentId = dispatch.assignedAgentId;
+    const updated = await tx.creativeJobDispatch.update({
+      where: { id: dispatch.id },
+      data: {
+        status: 'QUEUED',
+        assignedAgentId: null,
+        claimTokenHash: null,
+        leaseExpiresAt: null,
+        readyForArtistAt: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+
+    await auditService.recordAuditEvent(tx, {
+      organisationId: actor.organisationId,
+      actorUserId: actor.userId,
+      action: auditService.AUDIT_ACTIONS.CREATIVE_DISPATCH_RECOVERED,
+      entityType: 'CreativeJobDispatch',
+      entityId: dispatch.id,
+      metadata: {
+        designJobId: jobId,
+        previousStatus: current,
+        previousAgentId,
+        recoveryType: 'OWNER_EXPLICIT_REQUEUE',
+        confirmPreserveLocalWork: input.confirmPreserveLocalWork,
+      },
+    });
+
+    return mapDispatchSummary(updated, now);
+  }, { maxWait: 10000, timeout: 15000 });
 }
 
 export async function getPinnedTemplateMasterForDesignJob(
@@ -1660,7 +1806,9 @@ export async function completeExportDeliverableUpload(
           data: {
             status: 'EXPORTED',
             completedAt: now,
-            claimTokenHash: null,
+            // Retain claimTokenHash strictly so idempotent export-completion retries
+            // from the exact same winning claim remain verifiable while terminal
+            // status + cleared leaseExpiresAt block all further active operations.
             leaseExpiresAt: null,
           },
         });

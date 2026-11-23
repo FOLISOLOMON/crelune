@@ -225,6 +225,32 @@ export async function cancelCreativeDispatchRequest(
   return body.dispatch as CreativeJobDispatchSummary;
 }
 
+export async function recoverCreativeDispatchRequest(
+  jobId: string,
+  dispatchId: string,
+  reason: string
+): Promise<CreativeJobDispatchSummary> {
+  const res = await fetch(
+    `/api/designs/${encodeURIComponent(jobId)}/dispatches/${encodeURIComponent(
+      dispatchId
+    )}/recover`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason,
+        confirmPreserveLocalWork: true,
+      }),
+    }
+  );
+  const body = await readJsonSafely(res);
+  if (!res.ok) {
+    throw buildError(res, body, 'Unable to release and requeue creative dispatch.');
+  }
+  return body.dispatch as CreativeJobDispatchSummary;
+}
+
 export async function createExportUploadIntentRequest(
   jobId: string,
   payload: CreateExportUploadIntentInput

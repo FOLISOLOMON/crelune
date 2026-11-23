@@ -1,28 +1,36 @@
 /**
  * CRELUNE Windows Creative Agent — Outbound Authenticated HTTPS API Client
  *
- * Communicates strictly outbound with CRELUNE backend endpoints using per-machine
- * Bearer credentials. Handles transient retries with exponential backoff and
- * stops cleanly on `401` / `403` authentication revocation without leaking tokens.
+ * Communicates strictly outbound with CRELUNE backend endpoints using:
+ * - Per-machine Bearer credentials (`Authorization: Bearer cln_agent_...`)
+ * - Mandatory per-claim fencing header (`X-Crelune-Dispatch-Claim: clm_...`)
+ *   on EVERY dispatch-scoped machine operation.
+ *
+ * Never places credentials or claim tokens in URLs, query strings, logs, or errors.
  */
 
-import type {
-  CreateExportRecordInput,
-  CreateExportUploadIntentInput,
-  CreativeAgentHeartbeatInput,
-  CreativeAgentSummary,
-  CreativeJobDispatchSummary,
-  CreativeUploadIntentSummary,
-  ExportRecordSummary,
-  JobPrepManifest,
-  PresignedUploadTarget,
-  UpdateCreativeDispatchStatusInput,
+import {
+  DISPATCH_CLAIM_HEADER,
+  DISPATCH_CLAIM_TOKEN_REGEX,
+  type CreateExportRecordInput,
+  type CreateExportUploadIntentInput,
+  type CreativeAgentHeartbeatInput,
+  type CreativeAgentSummary,
+  type CreativeDispatchStatus,
+  type CreativeJobDispatchSummary,
+  type CreativeUploadIntentSummary,
+  type ExportRecordSummary,
+  type JobPrepManifest,
+  type PresignedUploadTarget,
+  type UpdateCreativeDispatchStatusInput,
 } from '@crelune/shared';
 import { validateBackendApiBaseUrl } from '../config/agent-config.js';
 import { redactSensitiveString } from '../security/logger.js';
 
 export class AgentAuthenticationRevokedError extends Error {
-  constructor(message = 'Creative agent credentials are invalid, expired, or revoked.') {
+  constructor(
+    message = 'Creative agent credentials are invalid, expired, or revoked.'
+  ) {
     super(message);
     this.name = 'AgentAuthenticationRevokedError';
   }
@@ -45,8 +53,21 @@ export type ClaimDispatchResponse =
       manifest: JobPrepManifest;
       claimToken: string;
       leaseExpiresAt: string;
+      recoveredFromStatus?: CreativeDispatchStatus | null;
     }
   | { dispatch: null };
+
+function requireClaimTokenHeader(claimToken: string): Record<string, string> {
+  const trimmed = claimToken?.trim() ?? '';
+  if (!DISPATCH_CLAIM_TOKEN_REGEX.test(trimmed)) {
+    throw new AgentApiError(
+      `Missing or invalid dispatch claim token for ${DISPATCH_CLAIM_HEADER}.`,
+      403,
+      'DISPATCH_CLAIM_INVALID'
+    );
+  }
+  return { [DISPATCH_CLAIM_HEADER]: trimmed };
+}
 
 export class CreluneAgentApiClient {
   private readonly baseUrl: string;
@@ -91,13 +112,17 @@ export class CreluneAgentApiClient {
         clearTimeout(timer);
 
         if (includeAuth && (res.status === 401 || res.status === 403)) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            code?: string;
+          };
           if (res.status === 401) {
             throw new AgentAuthenticationRevokedError(body.error);
           }
           throw new AgentApiError(
             body.error ?? 'Forbidden by CRELUNE backend.',
-            403
+            403,
+            typeof body.code === 'string' ? body.code : undefined
           );
         }
 
@@ -131,10 +156,14 @@ export class CreluneAgentApiClient {
   }
 
   private async requestJson<T>(
-    path: string,
+    endpointPath: string,
     init: RequestInit
   ): Promise<T> {
-    const res = await this.fetchWithRetry(`${this.baseUrl}${path}`, init, true);
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}${endpointPath}`,
+      init,
+      true
+    );
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) {
       throw new AgentApiError(
@@ -164,34 +193,65 @@ export class CreluneAgentApiClient {
     });
   }
 
+  async renewDispatchLease(
+    dispatchId: string,
+    claimToken: string
+  ): Promise<{ dispatch: CreativeJobDispatchSummary; leaseExpiresAt: string }> {
+    return this.requestJson(
+      `/api/agent/dispatches/${encodeURIComponent(dispatchId)}/lease`,
+      {
+        method: 'POST',
+        headers: {
+          ...requireClaimTokenHeader(claimToken),
+        },
+      }
+    );
+  }
+
   async reportDispatchStatus(
     dispatchId: string,
-    payload: UpdateCreativeDispatchStatusInput
+    claimToken: string,
+    payload: Omit<UpdateCreativeDispatchStatusInput, 'claimToken'>
   ): Promise<{ dispatch: CreativeJobDispatchSummary; idempotentReplay: boolean }> {
     return this.requestJson(
       `/api/agent/dispatches/${encodeURIComponent(dispatchId)}/status`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...requireClaimTokenHeader(claimToken),
+        },
         body: JSON.stringify(payload),
       }
     );
   }
 
-  async downloadDispatchTemplateMaster(dispatchId: string): Promise<{
+  async downloadDispatchTemplateMaster(
+    dispatchId: string,
+    claimToken: string
+  ): Promise<{
     bytes: Uint8Array;
     headerSha256: string | null;
   }> {
     const res = await this.fetchWithRetry(
       `${this.baseUrl}/api/agent/dispatches/${encodeURIComponent(dispatchId)}/template`,
-      { method: 'GET' },
+      {
+        method: 'GET',
+        headers: {
+          ...requireClaimTokenHeader(claimToken),
+        },
+      },
       true
     );
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        code?: string;
+      };
       throw new AgentApiError(
         body.error ?? `Template download failed (HTTP ${res.status})`,
-        res.status
+        res.status,
+        typeof body.code === 'string' ? body.code : undefined
       );
     }
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -203,7 +263,8 @@ export class CreluneAgentApiClient {
 
   async downloadDispatchAsset(
     dispatchId: string,
-    assetId: string
+    assetId: string,
+    claimToken: string
   ): Promise<{
     bytes: Uint8Array;
     headerSha256: string | null;
@@ -212,14 +273,23 @@ export class CreluneAgentApiClient {
       `${this.baseUrl}/api/agent/dispatches/${encodeURIComponent(
         dispatchId
       )}/assets/${encodeURIComponent(assetId)}`,
-      { method: 'GET' },
+      {
+        method: 'GET',
+        headers: {
+          ...requireClaimTokenHeader(claimToken),
+        },
+      },
       true
     );
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        code?: string;
+      };
       throw new AgentApiError(
         body.error ?? `Asset download failed (HTTP ${res.status})`,
-        res.status
+        res.status,
+        typeof body.code === 'string' ? body.code : undefined
       );
     }
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -231,6 +301,7 @@ export class CreluneAgentApiClient {
 
   async createExportUploadIntent(
     dispatchId: string,
+    claimToken: string,
     payload: CreateExportUploadIntentInput
   ): Promise<{
     intent: CreativeUploadIntentSummary;
@@ -242,7 +313,10 @@ export class CreluneAgentApiClient {
       )}/exports/upload-intents`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...requireClaimTokenHeader(claimToken),
+        },
         body: JSON.stringify(payload),
       }
     );
@@ -274,13 +348,17 @@ export class CreluneAgentApiClient {
 
   async completeExportUpload(
     dispatchId: string,
+    claimToken: string,
     payload: CreateExportRecordInput
   ): Promise<{ exportRecord: ExportRecordSummary; idempotentReplay: boolean }> {
     return this.requestJson(
       `/api/agent/dispatches/${encodeURIComponent(dispatchId)}/exports`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...requireClaimTokenHeader(claimToken),
+        },
         body: JSON.stringify(payload),
       }
     );

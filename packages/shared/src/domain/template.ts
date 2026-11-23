@@ -92,6 +92,37 @@ export const ACTIVE_CREATIVE_DISPATCH_STATUSES: readonly CreativeDispatchStatus[
   'EXPORTING',
 ] as const;
 
+/**
+ * Dispatch states safe for automatic lease-expiry recovery via FOR UPDATE SKIP LOCKED
+ * and automatic requeueing on agent revocation.
+ * READY_FOR_ARTIST is deliberately excluded so active artist edits are never silently replaced.
+ */
+export const AUTO_RECOVERABLE_DISPATCH_STATUSES: readonly CreativeDispatchStatus[] = [
+  'CLAIMED',
+  'DOWNLOADING_ASSETS',
+  'OPENING_TEMPLATE',
+  'EXPORTING',
+] as const;
+
+export const OWNER_INTERVENTION_DISPATCH_STATUSES: readonly CreativeDispatchStatus[] = [
+  'READY_FOR_ARTIST',
+] as const;
+
+/**
+ * Only MEMBER_PHOTO asset streaming is supported in Milestone 5.
+ * General creative WORKING_ASSET delivery is explicitly deferred to Milestone 8 (Asset Library).
+ */
+export const SUPPORTED_MANIFEST_ASSET_KINDS = ['MEMBER_PHOTO'] as const;
+
+export type SupportedManifestAssetKind =
+  (typeof SUPPORTED_MANIFEST_ASSET_KINDS)[number];
+
+/**
+ * Mandatory HTTP header carrying the dispatch's current claim fencing token
+ * for every dispatch-scoped Windows Creative Agent request.
+ */
+export const DISPATCH_CLAIM_HEADER = 'X-Crelune-Dispatch-Claim' as const;
+
 export const EXPORT_FILE_FORMATS = ['PNG', 'JPEG', 'PDF'] as const;
 
 export type ExportFileFormat = (typeof EXPORT_FILE_FORMATS)[number];

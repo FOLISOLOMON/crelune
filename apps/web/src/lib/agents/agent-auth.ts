@@ -10,12 +10,17 @@
 import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { prisma } from '@crelune/database';
+import {
+  DISPATCH_CLAIM_HEADER,
+  DISPATCH_CLAIM_TOKEN_REGEX,
+} from '@crelune/shared';
 
 const PRIVATE_NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store',
 };
 
 export const AGENT_TOKEN_PREFIX = 'cln_agent_';
+export { DISPATCH_CLAIM_HEADER };
 
 export interface AuthenticatedCreativeAgent {
   id: string;
@@ -54,6 +59,62 @@ export function constantTimeEqualHex(aHex: string, bHex: string): boolean {
     return false;
   }
   return crypto.timingSafeEqual(bufA, bufB);
+}
+
+export function generateDispatchClaimToken(): {
+  claimToken: string;
+  claimTokenHash: string;
+} {
+  const claimToken = `clm_${crypto.randomBytes(24).toString('hex')}`;
+  const claimTokenHash = hashAgentSecret(claimToken);
+  return { claimToken, claimTokenHash };
+}
+
+export function isValidDispatchClaimToken(rawToken: string): boolean {
+  return DISPATCH_CLAIM_TOKEN_REGEX.test(rawToken);
+}
+
+export type DispatchClaimHeaderResult =
+  | { ok: true; claimToken: string }
+  | { ok: false; response: NextResponse };
+
+/**
+ * Extracts and validates the mandatory dispatch claim fencing token from the
+ * `X-Crelune-Dispatch-Claim` HTTP header. Never accepts query parameters and
+ * never echoes raw token values in errors.
+ */
+export function extractDispatchClaimToken(
+  request: Request
+): DispatchClaimHeaderResult {
+  const rawHeader = request.headers.get(DISPATCH_CLAIM_HEADER);
+  if (!rawHeader || rawHeader.trim().length === 0) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: `Forbidden: Missing required ${DISPATCH_CLAIM_HEADER} header.`,
+          code: 'DISPATCH_CLAIM_REQUIRED',
+        },
+        { status: 403, headers: PRIVATE_NO_STORE_HEADERS }
+      ),
+    };
+  }
+
+  const trimmed = rawHeader.trim();
+  if (!isValidDispatchClaimToken(trimmed)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: `Forbidden: Malformed ${DISPATCH_CLAIM_HEADER} token.`,
+          code: 'DISPATCH_CLAIM_INVALID',
+        },
+        { status: 403, headers: PRIVATE_NO_STORE_HEADERS }
+      ),
+    };
+  }
+
+  return { ok: true, claimToken: trimmed };
 }
 
 export async function verifyAgentBearerRequest(

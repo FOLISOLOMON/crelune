@@ -6,7 +6,9 @@ import {
   containsForbiddenManifestSecret,
   creativeAgentHeartbeatSchema,
   creativeJobManifestSchema,
+  dispatchClaimTokenSchema,
   jobPrepManifestSchema,
+  recoverCreativeJobDispatchSchema,
   registerCreativeAgentSchema,
   revokeCreativeAgentSchema,
   updateCreativeDispatchStatusSchema,
@@ -322,6 +324,68 @@ describe('Stage 5.1 Template, Upload Intent, Manifest & Dispatch Schemas', () =>
         nested: { note: 'Bearer cln_agent_abcdef1234567890' },
       })
     ).toBe(true);
+
+    // Reject unsupported WORKING_ASSET in executable manifests (deferred to Milestone 8)
+    expect(
+      jobPrepManifestSchema.safeParse({
+        ...manifest,
+        fields: [
+          {
+            fieldKey: 'custom.logo',
+            fieldType: 'IMAGE',
+            targetLayerName: 'Logo',
+            layerPath: null,
+            textValue: null,
+            assetReference: {
+              assetKind: 'WORKING_ASSET',
+              assetId: 'asset_1',
+              expectedSha256: null,
+              suggestedRelativeFilename: 'assets/logo.png',
+            },
+          },
+        ],
+      }).success
+    ).toBe(false);
+
+    // Accept MEMBER_PHOTO in manifests
+    expect(
+      jobPrepManifestSchema.safeParse({
+        ...manifest,
+        fields: [
+          {
+            fieldKey: 'member.photo',
+            fieldType: 'IMAGE',
+            targetLayerName: 'Portrait',
+            layerPath: null,
+            textValue: null,
+            assetReference: {
+              assetKind: 'MEMBER_PHOTO',
+              assetId: 'mem_1',
+              expectedSha256: null,
+              suggestedRelativeFilename: 'assets/mem_1.jpg',
+            },
+          },
+        ],
+      }).success
+    ).toBe(true);
+
+    // Validate dispatch claim token format & explicit recovery confirmation
+    expect(dispatchClaimTokenSchema.safeParse(`clm_${'a'.repeat(48)}`).success).toBe(
+      true
+    );
+    expect(dispatchClaimTokenSchema.safeParse('clm_short').success).toBe(false);
+    expect(
+      recoverCreativeJobDispatchSchema.safeParse({
+        reason: 'Releasing stranded artist dispatch',
+        confirmPreserveLocalWork: true,
+      }).success
+    ).toBe(true);
+    expect(
+      recoverCreativeJobDispatchSchema.safeParse({
+        reason: 'Releasing stranded artist dispatch',
+        confirmPreserveLocalWork: false,
+      }).success
+    ).toBe(false);
 
     // Export upload intent validates extension/MIME match and 50 MB cap
     expect(

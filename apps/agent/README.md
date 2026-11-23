@@ -5,8 +5,8 @@ Local authenticated Windows desktop bridge connecting CRELUNE Web/Backend with S
 ## Security & Safety Principles
 
 - **Outbound HTTPS Only:** Never listens on external inbound network ports. Remote URLs require `https://` (`http://127.0.0.1` / `http://localhost` permitted only for local development).
-- **Windows DPAPI Credential Storage:** Machine bearer tokens are encrypted with `System.Security.Cryptography.ProtectedData` (`CurrentUser` scope) into `%LOCALAPPDATA%\CRELUNE\Agent\config\agent-credentials.dpapi`. Plaintext tokens are never written to disk.
-- **Strict Workspace Isolation:** Job files live strictly under `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/`. Path traversal, absolute paths, UNC shares, and symlink escapes are rejected.
+- **Windows DPAPI Credential & Claim Storage:** Machine bearer tokens and active per-dispatch claim fencing tokens (`X-Crelune-Dispatch-Claim`) are encrypted with `System.Security.Cryptography.ProtectedData` (`CurrentUser` scope) under `%LOCALAPPDATA%\CRELUNE\Agent\config\`. Plaintext tokens are never written to disk, workspace manifests, or logs.
+- **Strict Workspace Isolation & Working-Copy Preservation:** Job files live strictly under `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/`. Path traversal, absolute paths, UNC shares, and symlink/junction escapes are rejected. Existing artist working copies and exports are NEVER overwritten during retry or recovery.
 - **Master Template Immutability:** Original templates in `source/` are marked read-only and verified by SHA-256 before and after Affinity handoff.
 - **Truthful Affinity 3.3 Integration:** Never enables Affinity scripting or MCP globally, never invents unsupported SDK APIs, requires explicit user approval before opening working copies via `%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe`, and falls back cleanly to manual preparation when automation is unavailable.
 - **Export != Publish:** Validated PNG, JPEG, and PDF exports register as `ExportRecord` proofs (`isApprovedForPublish: false`, `publishedAt: null`). Publishing remains an explicit owner confirmation in CRELUNE Web.
@@ -30,6 +30,9 @@ node apps/agent/dist/cli.js process-once
 # 5. Or run the background polling & heartbeat loop
 node apps/agent/dist/cli.js run
 
-# 6. Validate and upload an exported deliverable from workspaces/jobs/<jobId>/exports/
+# 6. Extend lease during a long interactive Affinity editing session
+node apps/agent/dist/cli.js renew-lease --dispatch <dispatchId>
+
+# 7. Validate and upload an exported deliverable from workspaces/jobs/<jobId>/exports/
 node apps/agent/dist/cli.js submit-export --dispatch <dispatchId> --job <jobId> --file final.png
 ```

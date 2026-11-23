@@ -304,4 +304,109 @@ describe('Stage 5.4 Creative Job Preparation UI Panel', () => {
       ).toBeGreaterThanOrEqual(1);
     });
   });
+
+  it('surfaces owner intervention notice for stranded READY_FOR_ARTIST dispatches and triggers explicit Release & Requeue recovery', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        createJsonResponse({
+          dispatch: {
+            id: 'disp_artist_1',
+            designJobId: 'job-s54-001',
+            templateVersionId: 'ver-s54-001',
+            assignedAgentId: null,
+            manifestVersion: 1,
+            status: 'QUEUED',
+            claimedAt: null,
+            leaseExpiresAt: null,
+            readyForArtistAt: null,
+            completedAt: null,
+            failedAt: null,
+            errorCode: null,
+            errorMessage: null,
+            requiresOwnerIntervention: false,
+            interventionReason: null,
+            createdAt: '2026-11-23T12:10:00.000Z',
+            updatedAt: '2026-11-23T12:25:00.000Z',
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        createJsonResponse({
+          preparation: {
+            ...READY_PREPARATION_SNAPSHOT,
+            hasActiveDispatch: true,
+            dispatches: [
+              {
+                id: 'disp_artist_1',
+                designJobId: 'job-s54-001',
+                templateVersionId: 'ver-s54-001',
+                assignedAgentId: null,
+                manifestVersion: 1,
+                status: 'QUEUED',
+                claimedAt: null,
+                leaseExpiresAt: null,
+                readyForArtistAt: null,
+                completedAt: null,
+                failedAt: null,
+                errorCode: null,
+                errorMessage: null,
+                requiresOwnerIntervention: false,
+                interventionReason: null,
+                createdAt: '2026-11-23T12:10:00.000Z',
+                updatedAt: '2026-11-23T12:25:00.000Z',
+              },
+            ],
+          },
+        })
+      );
+
+    render(
+      <DesignJobPreparationPanel
+        jobId="job-s54-001"
+        initialPreparation={{
+          ...READY_PREPARATION_SNAPSHOT,
+          hasActiveDispatch: true,
+          dispatches: [
+            {
+              id: 'disp_artist_1',
+              designJobId: 'job-s54-001',
+              templateVersionId: 'ver-s54-001',
+              assignedAgentId: 'agt_revoked_1',
+              manifestVersion: 1,
+              status: 'READY_FOR_ARTIST',
+              claimedAt: '2026-11-23T12:10:00.000Z',
+              leaseExpiresAt: null,
+              readyForArtistAt: '2026-11-23T12:11:00.000Z',
+              completedAt: null,
+              failedAt: null,
+              errorCode: 'AGENT_REVOKED_INTERVENTION_REQUIRED',
+              errorMessage: 'Assigned agent was revoked.',
+              requiresOwnerIntervention: true,
+              interventionReason:
+                'Assigned agent was revoked while artist edits may be in progress.',
+              createdAt: '2026-11-23T12:10:00.000Z',
+              updatedAt: '2026-11-23T12:15:00.000Z',
+            },
+          ],
+        }}
+      />
+    );
+
+    expect(screen.getByText(/Owner Action Required/i)).toBeTruthy();
+    const recoverBtn = screen.getByRole('button', {
+      name: /Release & Requeue/i,
+    });
+    fireEvent.click(recoverBtn);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/designs/job-s54-001/dispatches/disp_artist_1/recover',
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+    expect(
+      screen.getByText(/Existing local working copies will be preserved/i)
+    ).toBeTruthy();
+  });
 });

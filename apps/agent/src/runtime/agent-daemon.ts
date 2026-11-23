@@ -1,14 +1,17 @@
 /**
  * CRELUNE Windows Creative Agent — Orchestration Runtime & Daemon
  *
- * Coordinates outbound heartbeats, safe job claiming, isolated workspace
+ * Coordinates outbound heartbeats, safe job claiming with mandatory
+ * `X-Crelune-Dispatch-Claim` fencing, preservation-first isolated workspace
  * materialization, approval-gated Affinity handoff (with manual fallback),
- * verified export submission, graceful shutdown, and restart recovery.
+ * explicit lease renewal, verified export submission, graceful shutdown,
+ * and restart recovery.
  */
 
 import {
   jobPrepManifestSchema,
   type CreativeAgentHeartbeatInput,
+  type CreativeDispatchStatus,
   type ExportRecordSummary,
 } from '@crelune/shared';
 import {
@@ -31,6 +34,11 @@ import {
 } from '../api/crelune-api-client.js';
 import { validateLocalExportDeliverable } from '../exports/export-validator.js';
 import {
+  MemoryDispatchClaimStore,
+  WindowsDpapiDispatchClaimStore,
+  type DispatchClaimStore,
+} from '../security/dpapi-store.js';
+import {
   createConsoleAgentLogger,
   type AgentLogger,
 } from '../security/logger.js';
@@ -46,6 +54,9 @@ export interface ProcessedJobOutcome {
   claimed: boolean;
   dispatchId?: string;
   designJobId?: string;
+  claimToken?: string;
+  recoveredFromStatus?: CreativeDispatchStatus | null;
+  preservedExistingWorkingCopy?: boolean;
   workspace?: MaterializedJobWorkspace;
   affinityResult?: AffinityExecutionResult;
 }
@@ -53,6 +64,7 @@ export interface ProcessedJobOutcome {
 export class WindowsCreativeAgentRuntime {
   private readonly config: AgentRuntimeConfig;
   private readonly client: CreluneAgentApiClient;
+  private readonly claimStore: DispatchClaimStore;
   private readonly logger: AgentLogger;
   private readonly requestUserApproval: UserApprovalProvider;
   private readonly launcher?: AffinityProcessLauncher;
@@ -62,6 +74,7 @@ export class WindowsCreativeAgentRuntime {
   constructor(options: {
     config: AgentRuntimeConfig;
     client: CreluneAgentApiClient;
+    claimStore?: DispatchClaimStore;
     logger?: AgentLogger;
     requestUserApproval?: UserApprovalProvider;
     launcher?: AffinityProcessLauncher;
@@ -69,6 +82,11 @@ export class WindowsCreativeAgentRuntime {
   }) {
     this.config = options.config;
     this.client = options.client;
+    this.claimStore =
+      options.claimStore ??
+      (process.platform === 'win32'
+        ? new WindowsDpapiDispatchClaimStore(options.config.configDir)
+        : new MemoryDispatchClaimStore());
     this.logger = options.logger ?? createConsoleAgentLogger();
     // Safe default: never open/modify documents silently without explicit approval
     this.requestUserApproval =
@@ -80,7 +98,9 @@ export class WindowsCreativeAgentRuntime {
 
   public stop(): void {
     this.stopped = true;
-    this.logger.info('Shutdown requested; stopping Windows Creative Agent loop cleanly.');
+    this.logger.info(
+      'Shutdown requested; stopping Windows Creative Agent loop cleanly.'
+    );
   }
 
   async sendHealthHeartbeat(): Promise<AffinityEnvironmentReport> {
@@ -114,9 +134,34 @@ export class WindowsCreativeAgentRuntime {
       this.logger.info('Inspected existing local job workspaces on startup.', {
         workspaceCount: existing.length,
         corruptedMasters: existing.filter((w) => !w.masterIntegrityOk).length,
+        workspacesWithArtistEdits: existing.filter(
+          (w) => w.workingCopyHasArtistEdits
+        ).length,
       });
     }
     return existing.length;
+  }
+
+  async renewActiveLease(params: {
+    dispatchId: string;
+    claimToken?: string;
+  }): Promise<{ leaseExpiresAt: string }> {
+    const claimToken =
+      params.claimToken ?? (await this.claimStore.loadClaim(params.dispatchId));
+    if (!claimToken) {
+      throw new Error(
+        `No active encrypted dispatch claim token found for dispatch "${params.dispatchId}".`
+      );
+    }
+    const res = await this.client.renewDispatchLease(
+      params.dispatchId,
+      claimToken
+    );
+    this.logger.info('Extended active creative job dispatch lease.', {
+      dispatchId: params.dispatchId,
+      leaseExpiresAt: res.leaseExpiresAt,
+    });
+    return { leaseExpiresAt: res.leaseExpiresAt };
   }
 
   async processSingleClaimedJob(): Promise<ProcessedJobOutcome> {
@@ -129,23 +174,28 @@ export class WindowsCreativeAgentRuntime {
     const claimToken = claim.claimToken;
     const manifest = jobPrepManifestSchema.parse(claim.manifest);
 
+    // Store active claim token encrypted (DPAPI on Windows) so follow-up CLI
+    // commands (`renew-lease`, `submit-export`) can present the mandatory header
+    // without ever storing plaintext tokens on disk or inside manifest.json.
+    await this.claimStore.saveClaim(dispatchId, claimToken);
+
     this.logger.info('Claimed authorised creative job dispatch.', {
       dispatchId,
       designJobId: manifest.designJobId,
       templateId: manifest.templateId,
       templateVersionId: manifest.templateVersionId,
+      recoveredFromStatus: claim.recoveredFromStatus ?? null,
     });
 
     try {
-      await this.client.reportDispatchStatus(dispatchId, {
+      await this.client.reportDispatchStatus(dispatchId, claimToken, {
         status: 'DOWNLOADING_ASSETS',
-        claimToken,
       });
 
       const masterDownload =
-        await this.client.downloadDispatchTemplateMaster(dispatchId);
+        await this.client.downloadDispatchTemplateMaster(dispatchId, claimToken);
 
-      // Download ONLY assets explicitly authorised by the validated manifest
+      // Download ONLY manifest-authorised MEMBER_PHOTO assets using mandatory claim fencing
       const assetDownloads: Array<{
         assetId: string;
         relativeFilename: string;
@@ -157,7 +207,8 @@ export class WindowsCreativeAgentRuntime {
         if (!field.assetReference) continue;
         const downloaded = await this.client.downloadDispatchAsset(
           dispatchId,
-          field.assetReference.assetId
+          field.assetReference.assetId,
+          claimToken
         );
         assetDownloads.push({
           assetId: field.assetReference.assetId,
@@ -175,9 +226,8 @@ export class WindowsCreativeAgentRuntime {
         assets: assetDownloads,
       });
 
-      await this.client.reportDispatchStatus(dispatchId, {
+      await this.client.reportDispatchStatus(dispatchId, claimToken, {
         status: 'OPENING_TEMPLATE',
-        claimToken,
       });
 
       const envReport = await this.detectAffinityFn();
@@ -192,19 +242,20 @@ export class WindowsCreativeAgentRuntime {
         launcher: this.launcher,
       });
 
-      await this.client.reportDispatchStatus(dispatchId, {
+      await this.client.reportDispatchStatus(dispatchId, claimToken, {
         status: 'READY_FOR_ARTIST',
-        claimToken,
         executionMode: affinityResult.executionMode,
       });
 
-      // Safe cleanup of temporary scratch only (preserves source/ and exports/)
+      // Safe cleanup of temporary scratch only (preserves source/, working/, and exports/)
       await cleanupWorkspaceTempFiles(this.config.workspaceRoot, workspace.jobId);
 
       this.logger.info('Job workspace ready for artist creative review/export.', {
         dispatchId,
         designJobId: workspace.jobId,
         executionMode: affinityResult.executionMode,
+        workingCopyStatus: workspace.workingCopyStatus,
+        preservedExistingWorkingCopy: workspace.preservedExistingWorkingCopy,
         launchedAffinity: affinityResult.launchedAffinity,
       });
 
@@ -212,6 +263,9 @@ export class WindowsCreativeAgentRuntime {
         claimed: true,
         dispatchId,
         designJobId: workspace.jobId,
+        claimToken,
+        recoveredFromStatus: claim.recoveredFromStatus ?? null,
+        preservedExistingWorkingCopy: workspace.preservedExistingWorkingCopy,
         workspace,
         affinityResult,
       };
@@ -226,14 +280,14 @@ export class WindowsCreativeAgentRuntime {
       });
 
       await this.client
-        .reportDispatchStatus(dispatchId, {
+        .reportDispatchStatus(dispatchId, claimToken, {
           status: 'FAILED',
-          claimToken,
           errorCode: 'WORKSPACE_PREP_FAILED',
           errorMessage,
         })
         .catch(() => {});
 
+      await this.claimStore.clearClaim(dispatchId).catch(() => {});
       throw err;
     }
   }
@@ -242,11 +296,20 @@ export class WindowsCreativeAgentRuntime {
     dispatchId: string;
     designJobId: string;
     exportFilename: string;
+    claimToken?: string;
     masterSourcePath?: string;
     expectedMasterSha256?: string;
     eventLogPath?: string;
     idempotencyKey?: string;
   }): Promise<{ exportRecord: ExportRecordSummary; idempotentReplay: boolean }> {
+    const claimToken =
+      params.claimToken ?? (await this.claimStore.loadClaim(params.dispatchId));
+    if (!claimToken) {
+      throw new Error(
+        `No active dispatch claim token found for dispatch "${params.dispatchId}". Cannot submit export without valid claim fencing.`
+      );
+    }
+
     const validated = await validateLocalExportDeliverable({
       workspaceRoot: this.config.workspaceRoot,
       jobId: params.designJobId,
@@ -260,13 +323,14 @@ export class WindowsCreativeAgentRuntime {
       `agent_exp_${params.dispatchId}_${validated.sha256.slice(0, 16)}`;
 
     await this.client
-      .reportDispatchStatus(params.dispatchId, {
+      .reportDispatchStatus(params.dispatchId, claimToken, {
         status: 'EXPORTING',
       })
       .catch(() => {});
 
     const intentRes = await this.client.createExportUploadIntent(
       params.dispatchId,
+      claimToken,
       {
         designJobId: params.designJobId,
         dispatchId: params.dispatchId,
@@ -286,6 +350,7 @@ export class WindowsCreativeAgentRuntime {
 
     const registered = await this.client.completeExportUpload(
       params.dispatchId,
+      claimToken,
       {
         designJobId: params.designJobId,
         dispatchId: params.dispatchId,
@@ -296,6 +361,8 @@ export class WindowsCreativeAgentRuntime {
         heightPx: validated.heightPx,
       }
     );
+
+    await this.claimStore.clearClaim(params.dispatchId).catch(() => {});
 
     if (params.eventLogPath) {
       await appendWorkspaceEvent(params.eventLogPath, {

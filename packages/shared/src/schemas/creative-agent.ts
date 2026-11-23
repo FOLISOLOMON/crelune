@@ -4,7 +4,9 @@ import {
   CREATIVE_AGENT_STATUSES,
   CREATIVE_DISPATCH_PUBLICATION_RULE,
   CREATIVE_DISPATCH_STATUSES,
+  DISPATCH_CLAIM_HEADER,
   EXPORT_FILE_FORMATS,
+  SUPPORTED_MANIFEST_ASSET_KINDS,
   TEMPLATE_FIELD_TYPES,
   TEMPLATE_FILE_FORMATS,
   TEMPLATE_STUDIO_TYPES,
@@ -22,6 +24,25 @@ import {
 } from './template.js';
 
 export const CREATIVE_AGENT_MANIFEST_VERSION = 1 as const;
+
+export const DISPATCH_CLAIM_TOKEN_REGEX = /^clm_[a-f0-9]{48}$/;
+
+export const dispatchClaimTokenSchema = z
+  .string()
+  .trim()
+  .regex(
+    DISPATCH_CLAIM_TOKEN_REGEX,
+    'Invalid dispatch claim token format.'
+  );
+
+export const recoverCreativeJobDispatchSchema = z.object({
+  reason: nonFilesystemTextSchema(300).pipe(z.string().min(4)),
+  confirmPreserveLocalWork: z.literal(true),
+});
+
+export type RecoverCreativeJobDispatchInput = z.infer<
+  typeof recoverCreativeJobDispatchSchema
+>;
 
 export const agentSafeRelativeFilenameSchema = z
   .string()
@@ -104,7 +125,8 @@ export const creativeManifestFieldValueSchema = z.object({
   textValue: nonFilesystemTextSchema(4000).nullable(),
   assetReference: z
     .object({
-      assetKind: z.enum(['MEMBER_PHOTO', 'WORKING_ASSET']),
+      // Only MEMBER_PHOTO is supported in Milestone 5; WORKING_ASSET is rejected until Milestone 8.
+      assetKind: z.enum(SUPPORTED_MANIFEST_ASSET_KINDS),
       assetId: z.string().trim().min(1).max(80),
       expectedSha256: sha256HexSchema.nullable(),
       suggestedRelativeFilename: agentSafeRelativeFilenameSchema,
@@ -266,11 +288,14 @@ export interface CreativeJobDispatchSummary {
   manifestVersion: number;
   status: CreativeDispatchStatus;
   claimedAt: string | null;
+  leaseExpiresAt?: string | null;
   readyForArtistAt: string | null;
   completedAt: string | null;
   failedAt: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  requiresOwnerIntervention?: boolean;
+  interventionReason?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -322,4 +347,4 @@ export interface DesignJobPreparationSnapshot {
   };
 }
 
-export { CREATIVE_AGENT_STATUSES };
+export { CREATIVE_AGENT_STATUSES, DISPATCH_CLAIM_HEADER };

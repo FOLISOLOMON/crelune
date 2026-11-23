@@ -250,11 +250,14 @@ sequenceDiagram
 1. **Outbound-Only Machine Communication (`apps/agent` -> `apps/web`)**:
    - The standalone Windows Creative Agent (`@crelune/agent`) opens zero inbound listening ports and never requires inbound firewall access.
    - All backend traffic flows strictly outbound over HTTPS (loopback HTTP allowed exclusively for local development) using per-machine revocable Bearer tokens (`cln_agent_<64-hex>`) registered and revoked by the owner in Settings (`/settings` -> `/api/agents`).
-   - [`middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts) explicitly allowlists ONLY the 7 exact `/api/agent/*` path+method pairs for Bearer auth while keeping `/api/agents/**` behind standard owner session + CSRF enforcement.
-2. **Atomic Dispatch Claiming & Lease Recovery**:
-   - `POST /api/agent/jobs/claim` claims queued or lease-expired dispatches atomically via PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED`, issuing a short-lived hashed `claimToken` and 15-minute lease.
-   - Revoking an agent immediately invalidates its Bearer token (`401`) and releases any `CLAIMED`/`DOWNLOADING_ASSETS` dispatches back to `QUEUED`.
-3. **Isolated Local Workspaces & Truthful Affinity 3.3 Integration**:
-   - Each job is materialized strictly within `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/` with path-traversal/junction rejection and SHA-256 verification.
-   - Original template masters in `source/` are marked read-only and verified before and after every creative action; artists edit only disposable working copies in `working/`.
+   - [`middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts) explicitly allowlists ONLY the 8 exact `/api/agent/*` path+method pairs (including `POST /api/agent/dispatches/[dispatchId]/lease`) for Bearer auth while keeping `/api/agents/**` behind standard owner session + CSRF enforcement.
+2. **Mandatory Claim Fencing, Explicit Per-State Lease Recovery & Lease Renewal (`Stage 5.5.1`)**:
+   - Every dispatch-scoped machine operation requires the `X-Crelune-Dispatch-Claim` header validated in constant time against `claimTokenHash` and unexpired `leaseExpiresAt`.
+   - `POST /api/agent/jobs/claim` atomically claims `QUEUED` dispatches or recovers expired leases in auto-recoverable states (`CLAIMED`, `DOWNLOADING_ASSETS`, `OPENING_TEMPLATE`, `EXPORTING`) via PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED`, rotating `claimTokenHash` on every claim/recovery to fence stale workers.
+   - `READY_FOR_ARTIST` dispatches are NEVER automatically reclaimed on lease expiry or agent revocation; they surface `requiresOwnerIntervention: true` in `DesignJobPreparationSnapshot` with explicit owner recovery (`POST /api/designs/[id]/dispatches/[dispatchId]/recover`), cancellation, or manual export fallback.
+   - Active artist sessions extend leases explicitly via `POST /api/agent/dispatches/[dispatchId]/lease` (`crelune-agent renew-lease`).
+   - Only `MEMBER_PHOTO` asset delivery is supported in Milestone 5; `WORKING_ASSET` is explicitly rejected at manifest schema, preparation, and streaming layers until Milestone 8 (Asset Library).
+3. **Preservation-First Isolated Local Workspaces & Truthful Affinity 3.3 Integration**:
+   - Each job is materialized strictly within `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/` with path-traversal/symlink/junction rejection and SHA-256 verification.
+   - Original template masters in `source/` are marked read-only and verified before and after every creative action; existing working copies in `working/` and deliverables in `exports/` are preserved automatically across retries and recovery without silent overwrite (even when artist edits change the working copy hash).
    - Verified against installed Affinity `3.3.3.5004` (`Canva.Affinity_3.3.3.5004_x64__8a0j1tnjnt4a4`): Scripting and MCP remain disabled by default and untouched. Interactive launch of allowlisted `%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe` requires explicit user approval (`ASSISTED` mode), falling back cleanly to `MANUAL` mode without breaking job completion or verified export submission.

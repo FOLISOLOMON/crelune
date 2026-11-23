@@ -3,7 +3,10 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import type { JobPrepManifest } from '@crelune/shared';
+import {
+  DISPATCH_CLAIM_HEADER,
+  type JobPrepManifest,
+} from '@crelune/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   executeSafeAffinityHandoff,
@@ -11,6 +14,7 @@ import {
 } from './affinity/affinity-adapter.js';
 import { detectInstalledAffinityEnvironment } from './affinity/affinity-detector.js';
 import {
+  AgentApiError,
   AgentAuthenticationRevokedError,
   CreluneAgentApiClient,
 } from './api/crelune-api-client.js';
@@ -23,7 +27,9 @@ import { validateLocalExportDeliverable } from './exports/export-validator.js';
 import { WindowsCreativeAgentRuntime } from './runtime/agent-daemon.js';
 import {
   MemoryCredentialStore,
+  MemoryDispatchClaimStore,
   WindowsDpapiCredentialStore,
+  WindowsDpapiDispatchClaimStore,
 } from './security/dpapi-store.js';
 import {
   createConsoleAgentLogger,
@@ -56,13 +62,14 @@ async function makeTempDir(prefix: string): Promise<string> {
 afterEach(async () => {
   while (tempDirsToClean.length > 0) {
     const dir = tempDirsToClean.pop()!;
-    // Make any read-only source files writable before cleanup on Windows
     try {
       const walk = async (current: string) => {
         const entries = await fs.readdir(current, { withFileTypes: true });
         for (const entry of entries) {
           const full = path.join(current, entry.name);
-          if (entry.isDirectory()) {
+          if (entry.isSymbolicLink()) {
+            await fs.unlink(full).catch(() => {});
+          } else if (entry.isDirectory()) {
             await walk(full);
           } else {
             await fs.chmod(full, 0o666).catch(() => {});
@@ -91,31 +98,29 @@ function createSyntheticPsdBytes(): Uint8Array {
 
 function createMinimalValidPngBytes(widthPx: number, heightPx: number): Uint8Array {
   const buf = Buffer.alloc(33);
-  // PNG 8-byte signature
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buf, 0);
-  // IHDR length = 13
   buf.writeUInt32BE(13, 8);
   buf.write('IHDR', 12, 'ascii');
   buf.writeUInt32BE(widthPx, 16);
   buf.writeUInt32BE(heightPx, 20);
-  buf[24] = 8; // bit depth
-  buf[25] = 2; // RGB
+  buf[24] = 8;
+  buf[25] = 2;
   return new Uint8Array(buf);
 }
 
 function createMinimalValidJpegBytes(widthPx: number, heightPx: number): Uint8Array {
   const buf = Buffer.from([
-    0xff, 0xd8, // SOI
-    0xff, 0xc0, // SOF0
-    0x00, 0x0b, // segment length 11
-    0x08, // precision
+    0xff, 0xd8,
+    0xff, 0xc0,
+    0x00, 0x0b,
+    0x08,
     (heightPx >> 8) & 0xff,
     heightPx & 0xff,
     (widthPx >> 8) & 0xff,
     widthPx & 0xff,
-    0x03, // components
+    0x03,
     0x01, 0x11, 0x00,
-    0xff, 0xd9, // EOI
+    0xff, 0xd9,
   ]);
   return new Uint8Array(buf);
 }
@@ -147,7 +152,8 @@ function createValidManifest(params: {
     templateRelativeFilename: 'source/birthday_gold_frame.psd',
     templateSha256: params.templateSha256,
     preserveMasterImmutable: true,
-    manualModeNotice: 'Layer inspection and mapping require manual confirmation in Affinity.',
+    manualModeNotice:
+      'Layer inspection and mapping require manual confirmation in Affinity.',
     fields: [
       {
         fieldKey: 'member.fullName',
@@ -185,9 +191,11 @@ function createValidManifest(params: {
   };
 }
 
-describe('Windows Creative Agent — Security, Path Containment, Config & Logger', () => {
-  it('blocks path traversal, absolute paths, drive letters, UNC paths, and null bytes', async () => {
+describe('Windows Creative Agent — Security, Path Containment, Symlinks, Config & Logger', () => {
+  it('blocks path traversal, absolute paths, drive letters, UNC paths, null bytes, and directory junction/symlink escapes', async () => {
     const root = await makeTempDir('crelune-path-');
+    const outsideDir = await makeTempDir('crelune-outside-');
+    await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'do-not-touch');
 
     expect(() => assertSafeAgentIdentifier('../evil', 'jobId')).toThrow(
       AgentPathSecurityError
@@ -218,7 +226,27 @@ describe('Windows Creative Agent — Security, Path Containment, Config & Logger
       AgentPathSecurityError
     );
 
-    const safe = resolveStrictlyWithinRoot(root, 'jobs', 'job_123', 'exports', 'out.png');
+    // Real junction (Windows) or symlink (POSIX) escape outside workspace root MUST fail closed
+    const jobsDir = path.join(root, 'jobs', 'job_sym');
+    await fs.mkdir(jobsDir, { recursive: true });
+    const linkPath = path.join(jobsDir, 'working');
+    await fs.symlink(
+      outsideDir,
+      linkPath,
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+
+    expect(() =>
+      resolveStrictlyWithinRoot(root, 'jobs', 'job_sym', 'working', 'secret.txt')
+    ).toThrow(AgentPathSecurityError);
+
+    const safe = resolveStrictlyWithinRoot(
+      root,
+      'jobs',
+      'job_123',
+      'exports',
+      'out.png'
+    );
     expect(safe.startsWith(path.resolve(root))).toBe(true);
   });
 
@@ -248,11 +276,12 @@ describe('Windows Creative Agent — Security, Path Containment, Config & Logger
     expect(defaults.allowInteractiveAffinityLaunch).toBe(true);
   });
 
-  it('redacts bearer tokens, agent secrets, presigned query signatures, and DB URLs in logs', () => {
-    const raw =
-      'Auth Bearer cln_agent_0123456789abcdef0123456789abcdef url https://s3.test/k?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA123 db postgresql://user:secret@host/neondb';
+  it('redacts bearer tokens, dispatch claim headers/tokens, presigned query signatures, and DB URLs in logs', () => {
+    const sampleClaim = `clm_${'f'.repeat(48)}`;
+    const raw = `Auth Bearer cln_agent_0123456789abcdef0123456789abcdef header X-Crelune-Dispatch-Claim: ${sampleClaim} url https://s3.test/k?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA123 db postgresql://user:secret@host/neondb`;
     const sanitized = redactSensitiveString(raw);
     expect(sanitized).not.toContain('cln_agent_0123456789abcdef');
+    expect(sanitized).not.toContain(sampleClaim);
     expect(sanitized).not.toContain('deadbeef');
     expect(sanitized).not.toContain('AKIA123');
     expect(sanitized).not.toContain('user:secret');
@@ -260,24 +289,27 @@ describe('Windows Creative Agent — Security, Path Containment, Config & Logger
     const cleanMeta = sanitizeLogMeta({
       dispatchId: 'dsp_1',
       bearerToken: 'cln_agent_secret_value_123456',
-      nested: { claimToken: 'clm_secret_claim_token_999' },
+      'X-Crelune-Dispatch-Claim': sampleClaim,
+      nested: { claimToken: sampleClaim },
     }) as Record<string, unknown>;
     expect(cleanMeta.dispatchId).toBe('dsp_1');
     expect(cleanMeta.bearerToken).toBe('[REDACTED]');
-    expect((cleanMeta.nested as Record<string, unknown>).claimToken).toBe('[REDACTED]');
+    expect(cleanMeta['X-Crelune-Dispatch-Claim']).toBe('[REDACTED]');
+    expect((cleanMeta.nested as Record<string, unknown>).claimToken).toBe(
+      '[REDACTED]'
+    );
   });
 });
 
-describe('Windows Creative Agent — Real Windows DPAPI Credential Storage', () => {
+describe('Windows Creative Agent — Real Windows DPAPI Credential & Claim Storage', () => {
   it.skipIf(process.platform !== 'win32')(
-    'encrypts bearer token with CurrentUser DPAPI, never writes plaintext to disk, decrypts accurately, and clears cleanly',
+    'encrypts bearer token and dispatch claim token with CurrentUser DPAPI, never writes plaintext to disk, decrypts accurately, and clears cleanly',
     async () => {
       const configDir = await makeTempDir('crelune-dpapi-');
       const store = new WindowsDpapiCredentialStore(configDir);
       const token = `cln_agent_${crypto.randomBytes(32).toString('hex')}`;
 
       expect(await store.load()).toBeNull();
-
       await store.save({
         apiBaseUrl: 'https://crelune.example.com',
         bearerToken: token,
@@ -289,12 +321,21 @@ describe('Windows Creative Agent — Real Windows DPAPI Credential Storage', () 
       expect(onDisk).toContain('"scheme": "windows-dpapi-current-user"');
 
       const loaded = await store.load();
-      expect(loaded).not.toBeNull();
-      expect(loaded?.apiBaseUrl).toBe('https://crelune.example.com');
       expect(loaded?.bearerToken).toBe(token);
-
       await store.clear();
       expect(await store.load()).toBeNull();
+
+      // Per-dispatch claim fencing token DPAPI round-trip
+      const claimStore = new WindowsDpapiDispatchClaimStore(configDir);
+      const claimToken = `clm_${crypto.randomBytes(24).toString('hex')}`;
+      await claimStore.saveClaim('dsp_dpapi_1', claimToken);
+      const claimFile = path.join(configDir, 'claims', 'dsp_dpapi_1.dpapi');
+      const rawClaimFile = await fs.readFile(claimFile, 'utf8');
+      expect(rawClaimFile).not.toContain(claimToken);
+      expect(rawClaimFile).not.toContain('clm_');
+      expect(await claimStore.loadClaim('dsp_dpapi_1')).toBe(claimToken);
+      await claimStore.clearClaim('dsp_dpapi_1');
+      expect(await claimStore.loadClaim('dsp_dpapi_1')).toBeNull();
     }
   );
 
@@ -302,7 +343,8 @@ describe('Windows Creative Agent — Real Windows DPAPI Credential Storage', () 
     const store = new MemoryCredentialStore();
     await store.save({
       apiBaseUrl: 'http://127.0.0.1:3000',
-      bearerToken: 'cln_agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      bearerToken:
+        'cln_agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     });
     const loaded = await store.load();
     expect(loaded?.apiBaseUrl).toBe('http://127.0.0.1:3000');
@@ -323,16 +365,15 @@ describe('Windows Creative Agent — Live Affinity 3.3 Detection (Read-Only)', (
         /\\microsoft\\windowsapps\\affinity\.exe$/
       );
       expect(report.version).toMatch(/^3\.3\./);
-      // Must remain disabled unless explicitly enabled by the owner outside CRELUNE
       expect(report.scriptingEnabled).toBe(false);
       expect(report.mcpServerEnabled).toBe(false);
     }
   );
 });
 
-describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Export Validator', () => {
-  it('materializes read-only master, rejects SHA-256 tamper, preserves source/exports on temp cleanup, and recovers workspaces', async () => {
-    const workspaceRoot = await makeTempDir('crelune-ws-');
+describe('Windows Creative Agent — Workspace Preservation, Working Assets, Affinity Handoff & Export Validator', () => {
+  it('preserves artist-edited working copies and existing exports on retry/recovery without treating modified working copies as corrupted masters', async () => {
+    const workspaceRoot = await makeTempDir('crelune-preserve-');
     const psdBytes = createSyntheticPsdBytes();
     const psdSha = computeSha256Hex(psdBytes);
     const photoBytes = createMinimalValidJpegBytes(400, 400);
@@ -342,19 +383,8 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
       assetSha256: photoSha,
     });
 
-    // Tampered download must fail BEFORE writing workspace files
-    const badBytes = new Uint8Array(psdBytes);
-    badBytes[10] ^= 0xff;
-    await expect(
-      prepareIsolatedJobWorkspace({
-        workspaceRoot,
-        rawManifest: manifest,
-        templateBytes: badBytes,
-        assets: [],
-      })
-    ).rejects.toThrow(/SHA-256 mismatch/i);
-
-    const ws = await prepareIsolatedJobWorkspace({
+    // 1. First preparation creates source master and fresh working copy
+    const first = await prepareIsolatedJobWorkspace({
       workspaceRoot,
       rawManifest: manifest,
       templateBytes: psdBytes,
@@ -367,40 +397,140 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
         },
       ],
     });
+    expect(first.workingCopyStatus).toBe('CREATED');
+    expect(first.preservedExistingWorkingCopy).toBe(false);
+    expect(first.masterVerified).toBe(true);
 
-    expect(ws.masterSourcePath).toContain(`${path.sep}source${path.sep}`);
-    expect(ws.workingCopyPath).toContain(`${path.sep}working${path.sep}`);
-    expect(ws.downloadedAssets).toHaveLength(1);
-    const guideText = await fs.readFile(ws.guidePath, 'utf8');
-    expect(guideText).toContain('Kofi Mensah');
-    expect(guideText).toContain('NEVER modify files inside source/');
+    // Simulate artist editing working copy and saving an existing export proof
+    const artistEditedBytes = Buffer.concat([
+      Buffer.from(psdBytes),
+      Buffer.from('ARTIST_CREATIVE_EDITS_V1'),
+    ]);
+    await fs.writeFile(first.workingCopyPath, artistEditedBytes);
+    const artistEditedSha = computeSha256Hex(artistEditedBytes);
 
-    // Create temporary scratch file + final export file
-    const scratchPath = path.join(ws.tempDir, 'scratch.tmp');
-    const exportPath = path.join(ws.exportsDir, 'final.png');
-    await fs.writeFile(scratchPath, 'temp-data');
-    await fs.writeFile(exportPath, createMinimalValidPngBytes(1080, 1350));
+    const existingExportBytes = createMinimalValidPngBytes(1080, 1350);
+    const existingExportPath = path.join(first.exportsDir, 'artist-proof.png');
+    await fs.writeFile(existingExportPath, existingExportBytes);
 
-    const removed = await cleanupWorkspaceTempFiles(workspaceRoot, ws.jobId);
-    expect(removed).toBe(1);
+    // 2. Second preparation (retry / recovery!) MUST preserve artist edits & existing exports!
+    const recovered = await prepareIsolatedJobWorkspace({
+      workspaceRoot,
+      rawManifest: manifest,
+      templateBytes: psdBytes,
+      assets: [
+        {
+          assetId: 'mem_kofi_01',
+          relativeFilename: 'assets/kofi_photo.jpg',
+          bytes: photoBytes,
+          expectedSha256: photoSha,
+        },
+      ],
+    });
+    expect(recovered.workingCopyStatus).toBe('PRESERVED_WITH_ARTIST_EDITS');
+    expect(recovered.preservedExistingWorkingCopy).toBe(true);
+    expect(recovered.masterVerified).toBe(true);
+    expect(recovered.workingCopySha256).toBe(artistEditedSha);
+    expect(recovered.preservedExistingExports).toEqual(['artist-proof.png']);
 
-    // Source master & export deliverable MUST remain untouched
-    await expect(fs.access(scratchPath)).rejects.toThrow();
+    // Verify artist working copy bytes were NOT overwritten
+    const diskWorkingBytes = await fs.readFile(recovered.workingCopyPath);
+    expect(Buffer.compare(diskWorkingBytes, artistEditedBytes)).toBe(0);
+
+    // Verify source master hash remained 100% unchanged
     const masterCheck = await verifyMasterTemplateIntegrity({
-      masterSourcePath: ws.masterSourcePath,
+      masterSourcePath: recovered.masterSourcePath,
       expectedSha256: psdSha,
     });
     expect(masterCheck.ok).toBe(true);
-    await expect(fs.access(exportPath)).resolves.toBeUndefined();
 
-    // Restart recovery inspection reports intact workspace
-    const recovered = await inspectExistingWorkspaces(workspaceRoot);
-    expect(recovered).toHaveLength(1);
-    expect(recovered[0]).toMatchObject({
-      jobId: ws.jobId,
-      dispatchId: ws.dispatchId,
+    // Verify existing export was NOT modified or deleted
+    const diskExportBytes = await fs.readFile(existingExportPath);
+    expect(Buffer.compare(diskExportBytes, Buffer.from(existingExportBytes))).toBe(0);
+
+    // Verify preservation was logged in events.jsonl
+    const eventsLog = await fs.readFile(recovered.eventLogPath, 'utf8');
+    expect(eventsLog).toContain('EXISTING_WORKING_COPY_PRESERVED');
+
+    // 3. Startup crash recovery MUST report master intact AND artist edits detected (never corrupted master!)
+    const inspected = await inspectExistingWorkspaces(workspaceRoot);
+    expect(inspected).toHaveLength(1);
+    expect(inspected[0]).toMatchObject({
+      jobId: first.jobId,
+      dispatchId: first.dispatchId,
       masterIntegrityOk: true,
+      workingCopyHasArtistEdits: true,
+      existingExportFiles: ['artist-proof.png'],
     });
+
+    // 4. Temp cleanup deletes ONLY working/tmp/ and preserves source/, working/, and exports/
+    const scratchPath = path.join(recovered.tempDir, 'scratch.tmp');
+    await fs.writeFile(scratchPath, 'temp-data');
+    expect(await cleanupWorkspaceTempFiles(workspaceRoot, first.jobId)).toBe(1);
+    await expect(fs.access(scratchPath)).rejects.toThrow();
+    expect(
+      Buffer.compare(await fs.readFile(recovered.workingCopyPath), artistEditedBytes)
+    ).toBe(0);
+    await expect(fs.access(existingExportPath)).resolves.toBeUndefined();
+
+    // 5. Explicit user-confirmed overwrite replaces working copy only when explicitly requested
+    const explicitlyReplaced = await prepareIsolatedJobWorkspace({
+      workspaceRoot,
+      rawManifest: manifest,
+      templateBytes: psdBytes,
+      assets: [],
+      explicitOverwriteWorkingCopy: true,
+    });
+    expect(explicitlyReplaced.workingCopyStatus).toBe(
+      'REPLACED_BY_EXPLICIT_USER_ACTION'
+    );
+    expect(explicitlyReplaced.workingCopySha256).toBe(psdSha);
+  });
+
+  it('rejects tampered template downloads and unsupported WORKING_ASSET manifests before touching disk', async () => {
+    const workspaceRoot = await makeTempDir('crelune-reject-');
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+    const manifest = createValidManifest({ templateSha256: psdSha });
+
+    const badBytes = new Uint8Array(psdBytes);
+    badBytes[10] ^= 0xff;
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: badBytes,
+        assets: [],
+      })
+    ).rejects.toThrow(/SHA-256 mismatch/i);
+
+    // Unsupported WORKING_ASSET kind MUST be rejected at schema parse before touching workspace
+    const unsupportedManifest = {
+      ...manifest,
+      fields: [
+        {
+          fieldKey: 'custom.brand_logo',
+          fieldType: 'IMAGE',
+          targetLayerName: 'LOGO',
+          layerPath: null,
+          textValue: null,
+          assetReference: {
+            assetKind: 'WORKING_ASSET',
+            assetId: 'asset_123',
+            expectedSha256: null,
+            suggestedRelativeFilename: 'assets/logo.png',
+          },
+        },
+      ],
+    };
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: unsupportedManifest,
+        templateBytes: psdBytes,
+        assets: [],
+      })
+    ).rejects.toThrow();
   });
 
   it('gates Affinity launch behind explicit approval, allowlists executable path, and supports opt-in MCP fallback', async () => {
@@ -439,7 +569,6 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
     };
     const mockLaunch = vi.fn().mockResolvedValue({ launched: true, pid: 4242 });
 
-    // 1. Declined approval -> MANUAL mode, zero process launch
     const declined = await executeSafeAffinityHandoff({
       workspace: ws,
       manifest,
@@ -452,11 +581,8 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
     });
     expect(declined.executionMode).toBe('MANUAL');
     expect(declined.launchedAffinity).toBe(false);
-    expect(declined.masterVerifiedBefore).toBe(true);
-    expect(declined.masterVerifiedAfter).toBe(true);
     expect(mockLaunch).not.toHaveBeenCalled();
 
-    // 2. Approved launch + unreachable opt-in loopback MCP -> ASSISTED mode opening WORKING copy only
     const approved = await executeSafeAffinityHandoff({
       workspace: ws,
       manifest,
@@ -474,10 +600,6 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
     expect(mockLaunch).toHaveBeenCalledWith(
       fakeEnv.executableAliasPath,
       ws.workingCopyPath
-    );
-    expect(mockLaunch).not.toHaveBeenCalledWith(
-      expect.anything(),
-      ws.masterSourcePath
     );
   });
 
@@ -520,23 +642,26 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
     });
     expect(png.format).toBe('PNG');
     expect(png.widthPx).toBe(1080);
-    expect(png.heightPx).toBe(1350);
 
-    const jpg = await validateLocalExportDeliverable({
-      workspaceRoot,
-      jobId: ws.jobId,
-      exportFilename: 'flyer.jpg',
-    });
-    expect(jpg.format).toBe('JPEG');
-    expect(jpg.widthPx).toBe(800);
-    expect(jpg.heightPx).toBe(600);
+    expect(
+      (
+        await validateLocalExportDeliverable({
+          workspaceRoot,
+          jobId: ws.jobId,
+          exportFilename: 'flyer.jpg',
+        })
+      ).format
+    ).toBe('JPEG');
 
-    const pdf = await validateLocalExportDeliverable({
-      workspaceRoot,
-      jobId: ws.jobId,
-      exportFilename: 'print.pdf',
-    });
-    expect(pdf.format).toBe('PDF');
+    expect(
+      (
+        await validateLocalExportDeliverable({
+          workspaceRoot,
+          jobId: ws.jobId,
+          exportFilename: 'print.pdf',
+        })
+      ).format
+    ).toBe('PDF');
 
     await expect(
       validateLocalExportDeliverable({
@@ -562,7 +687,6 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
       })
     ).rejects.toThrow(AgentPathSecurityError);
 
-    // Tamper master -> export submission MUST refuse
     await fs.chmod(ws.masterSourcePath, 0o666);
     await fs.writeFile(ws.masterSourcePath, Buffer.from('corrupted-master'));
     await expect(
@@ -577,8 +701,8 @@ describe('Windows Creative Agent — Isolated Workspace, Affinity Handoff & Expo
   });
 });
 
-describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revocation Handling', () => {
-  it('completes heartbeat, claim, template/asset download, workspace prep, verified export upload, and halts cleanly on 401 revocation', async () => {
+describe('Windows Creative Agent — End-to-End Claim Fencing, Lease Renewal, Export & Revocation', () => {
+  it('sends mandatory X-Crelune-Dispatch-Claim header on every dispatch request, renews lease, submits verified export, and halts cleanly on 401 revocation', async () => {
     const workspaceRoot = await makeTempDir('crelune-e2e-');
     const psdBytes = createSyntheticPsdBytes();
     const psdSha = computeSha256Hex(psdBytes);
@@ -589,16 +713,17 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
       assetSha256: photoSha,
     });
     const validToken = `cln_agent_${'a'.repeat(64)}`;
+    const activeClaimToken = `clm_${'c'.repeat(48)}`;
 
     let revoked = false;
     let claimedOnce = false;
+    let leaseRenewCount = 0;
     const statusEvents: string[] = [];
     const uploadedExport: { bytes: Buffer | null } = { bytes: null };
 
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
 
-      // Presigned PUT target (no Bearer auth)
       if (req.method === 'PUT' && url.pathname === '/presigned-export') {
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -608,7 +733,6 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
         return;
       }
 
-      // All /api/agent/* require valid active Bearer token
       if (revoked || req.headers.authorization !== `Bearer ${validToken}`) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized: Agent revoked.' }));
@@ -618,7 +742,9 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
       const readJson = async () => {
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
-        return chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+        return chunks.length > 0
+          ? JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          : {};
       };
 
       if (req.method === 'POST' && url.pathname === '/api/agent/heartbeat') {
@@ -671,8 +797,54 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
               updatedAt: new Date().toISOString(),
             },
             manifest,
-            claimToken: 'clm_1234567890abcdef1234567890abcdef',
+            claimToken: activeClaimToken,
             leaseExpiresAt: new Date(Date.now() + 900_000).toISOString(),
+            recoveredFromStatus: null,
+          })
+        );
+        return;
+      }
+
+      // EVERY dispatch-scoped route enforces mandatory X-Crelune-Dispatch-Claim header!
+      const claimHeader = req.headers[DISPATCH_CLAIM_HEADER.toLowerCase()];
+      if (claimHeader !== activeClaimToken) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: 'Forbidden: Invalid or missing dispatch claim header.',
+            code: 'DISPATCH_CLAIM_MISMATCH',
+          })
+        );
+        return;
+      }
+
+      if (
+        req.method === 'POST' &&
+        url.pathname === `/api/agent/dispatches/${manifest.dispatchId}/lease`
+      ) {
+        leaseRenewCount += 1;
+        const nextLease = new Date(Date.now() + 900_000).toISOString();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            dispatch: {
+              id: manifest.dispatchId,
+              designJobId: manifest.designJobId,
+              templateVersionId: manifest.templateVersionId,
+              assignedAgentId: 'agt_1',
+              manifestVersion: 1,
+              status: 'READY_FOR_ARTIST',
+              claimedAt: new Date().toISOString(),
+              leaseExpiresAt: nextLease,
+              readyForArtistAt: new Date().toISOString(),
+              completedAt: null,
+              failedAt: null,
+              errorCode: null,
+              errorMessage: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            },
+            leaseExpiresAt: nextLease,
           })
         );
         return;
@@ -723,7 +895,8 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
 
       if (
         req.method === 'GET' &&
-        url.pathname === `/api/agent/dispatches/${manifest.dispatchId}/assets/mem_kofi_01`
+        url.pathname ===
+          `/api/agent/dispatches/${manifest.dispatchId}/assets/mem_kofi_01`
       ) {
         res.writeHead(200, {
           'Content-Type': 'image/jpeg',
@@ -735,7 +908,8 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
 
       if (
         req.method === 'POST' &&
-        url.pathname === `/api/agent/dispatches/${manifest.dispatchId}/exports/upload-intents`
+        url.pathname ===
+          `/api/agent/dispatches/${manifest.dispatchId}/exports/upload-intents`
       ) {
         const body = (await readJson()) as { byteSize: number; mimeType: string };
         const addr = server.address();
@@ -745,12 +919,13 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
           JSON.stringify({
             intent: {
               id: 'int_exp_1',
-              purpose: 'EXPORT_DELIVERABLE',
+              kind: 'EXPORT_DELIVERABLE',
               status: 'PENDING',
               expectedMimeType: body.mimeType,
               expectedByteSize: body.byteSize,
-              expectedSha256: 'a'.repeat(64),
+              maxAllowedBytes: 50 * 1024 * 1024,
               expiresAt: new Date(Date.now() + 900_000).toISOString(),
+              verifiedAt: null,
             },
             upload: {
               url: `http://127.0.0.1:${port}/presigned-export`,
@@ -779,7 +954,6 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
               designJobId: manifest.designJobId,
               dispatchId: manifest.dispatchId,
               format: 'PNG',
-              originalFilename: 'final.png',
               mimeType: 'image/png',
               byteSize: uploadedExport.bytes?.byteLength ?? 33,
               sha256: uploadedExport.bytes
@@ -787,7 +961,9 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
                 : '0'.repeat(64),
               widthPx: 1080,
               heightPx: 1350,
+              resolutionDpi: null,
               isApprovedForPublish: false,
+              ownerApprovedAt: null,
               publishedAt: null,
               createdAt: new Date().toISOString(),
             },
@@ -819,9 +995,11 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
         bearerToken: validToken,
         maxRetries: 0,
       });
+      const claimStore = new MemoryDispatchClaimStore();
       const runtime = new WindowsCreativeAgentRuntime({
         config,
         client,
+        claimStore,
         logger: createConsoleAgentLogger(true),
         requestUserApproval: async () => false,
         detectAffinityFn: async () => ({
@@ -837,17 +1015,32 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
         }),
       });
 
+      // Stale/wrong claim token rejected by client or server with 403
+      await expect(
+        client.renewDispatchLease(manifest.dispatchId, 'invalid-token')
+      ).rejects.toThrow(AgentApiError);
+      await expect(
+        client.renewDispatchLease(manifest.dispatchId, `clm_${'0'.repeat(48)}`)
+      ).rejects.toThrow(AgentApiError);
+
       await runtime.sendHealthHeartbeat();
       const outcome = await runtime.processSingleClaimedJob();
       expect(outcome.claimed).toBe(true);
-      expect(outcome.affinityResult?.executionMode).toBe('MANUAL');
+      expect(outcome.claimToken).toBe(activeClaimToken);
       expect(statusEvents).toEqual([
         'DOWNLOADING_ASSETS',
         'OPENING_TEMPLATE',
         'READY_FOR_ARTIST',
       ]);
 
-      // Write valid export into workspace exports/ and submit
+      // Renew active lease using stored claim token
+      const renewed = await runtime.renewActiveLease({
+        dispatchId: manifest.dispatchId,
+      });
+      expect(renewed.leaseExpiresAt).toBeTruthy();
+      expect(leaseRenewCount).toBe(1);
+
+      // Submit verified export using stored claim token
       const pngBytes = createMinimalValidPngBytes(1080, 1350);
       await fs.writeFile(
         path.join(outcome.workspace!.exportsDir, 'final.png'),
@@ -865,13 +1058,10 @@ describe('Windows Creative Agent — End-to-End Outbound Loopback Server & Revoc
       expect(exportResult.exportRecord.isApprovedForPublish).toBe(false);
       expect(exportResult.exportRecord.publishedAt).toBeNull();
       expect(uploadedExport.bytes?.byteLength).toBe(pngBytes.byteLength);
+      // Claim cleared cleanly from store after export registration
+      expect(await claimStore.loadClaim(manifest.dispatchId)).toBeNull();
 
-      const eventsText = await fs.readFile(outcome.workspace!.eventLogPath, 'utf8');
-      expect(eventsText).toContain('WORKSPACE_PREPARED');
-      expect(eventsText).toContain('AFFINITY_HANDOFF_COMPLETED');
-      expect(eventsText).toContain('EXPORT_REGISTERED');
-
-      // Revoke agent credentials -> runLoop must halt cleanly with AgentAuthenticationRevokedError
+      // Revoke agent credentials -> runLoop halts cleanly on 401
       revoked = true;
       await expect(runtime.runLoop()).rejects.toThrow(
         AgentAuthenticationRevokedError

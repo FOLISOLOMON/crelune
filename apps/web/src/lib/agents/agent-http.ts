@@ -7,8 +7,10 @@ import { ZodError } from 'zod';
 import { memberIdParamSchema } from '@crelune/shared';
 import {
   CreativeAgentAssetNotFoundError,
+  CreativeAgentClaimError,
   CreativeAgentForbiddenError,
   CreativeAgentNotFoundError,
+  CreativeAgentUnsupportedAssetError,
 } from '@/lib/agents/agent-service';
 import { DesignJobValidationError } from '@/lib/designs/design-job-service';
 import {
@@ -69,8 +71,17 @@ export function handleAgentRouteError(
   if (err instanceof CreativeAgentAssetNotFoundError) {
     return agentJsonResponse({ error: err.message }, 404);
   }
+  if (err instanceof CreativeAgentClaimError) {
+    return agentJsonResponse({ error: err.message, code: err.code }, 403);
+  }
   if (err instanceof CreativeAgentForbiddenError) {
     return agentJsonResponse({ error: err.message, code: 'FORBIDDEN' }, 403);
+  }
+  if (err instanceof CreativeAgentUnsupportedAssetError) {
+    return agentJsonResponse(
+      { error: err.message, code: 'UNSUPPORTED_ASSET_KIND' },
+      400
+    );
   }
   if (
     err instanceof DesignJobValidationError ||

@@ -1,6 +1,9 @@
 import { createExportRecordSchema } from '@crelune/shared';
 import { parseJsonBodyWithLimit } from '@/lib/auth/api-owner-guard';
-import { verifyAgentBearerRequest } from '@/lib/agents/agent-auth';
+import {
+  extractDispatchClaimToken,
+  verifyAgentBearerRequest,
+} from '@/lib/agents/agent-auth';
 import {
   agentJsonResponse,
   agentValidationErrorResponse,
@@ -16,6 +19,11 @@ export async function POST(
   const auth = await verifyAgentBearerRequest(request);
   if (!auth.ok) {
     return auth.response;
+  }
+
+  const claim = extractDispatchClaimToken(request);
+  if (!claim.ok) {
+    return claim.response;
   }
 
   const { dispatchId: rawDispatchId } = await context.params;
@@ -53,6 +61,7 @@ export async function POST(
     const result = await completeAgentExportUpload(
       auth.agent,
       idResult.id,
+      claim.claimToken,
       parsed.data
     );
     return agentJsonResponse(result, result.idempotentReplay ? 200 : 201);
