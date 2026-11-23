@@ -50,7 +50,7 @@ Hardened [`recoverCreativeJobDispatch()`](file:///d:/Projects/Crelune/apps/web/s
 Hardened [`prepareIsolatedJobWorkspace()`](file:///d:/Projects/Crelune/apps/agent/src/workspace/job-workspace.ts):
 - Replaced check-then-write patterns for both `source/` masters and `working/` copies with `createFileExclusivelyAtomic()`:
   1. Stages 100% of bytes into a unique per-operation temp file inside `working/tmp/` via `fs.open(..., 'wx')`.
-  2. Publishes atomically via `fs.link(stagedTemp, targetPath)` (atomic NTFS/POSIX kernel creation failing with `EEXIST` without ever exposing partial writes; `EXDEV`/`ENOTSUP` falls back strictly to `fs.open(targetPath, 'wx')`, NEVER unconditional `writeFile()`).
+  2. Publishes atomically via `fs.link(stagedTemp, targetPath)` (atomic NTFS/POSIX kernel creation failing with `EEXIST` without ever exposing partial writes; hardened further in Stage 5.5.3 to fail closed with `AgentWorkspaceError(code: 'ATOMIC_PUBLICATION_UNSUPPORTED')` on `EXDEV`/`ENOTSUP`/`ENOSYS`/`EOPNOTSUPP` with zero direct-write fallback).
   3. On `EEXIST`, preserves the existing working copy untouched even when its hash differs from the master (`PRESERVED_WITH_ARTIST_EDITS`), while verifying the `source/` master independently.
 - Upgraded `manifest.json`, `PREPARATION_GUIDE.txt`, and updated assets to `writeFileAtomicReplace()` (unique `'wx'` temp file + `fs.rename()`), preventing concurrent truncation or interleaving.
 - Restricted destructive working-copy replacement to the designated explicit approval payload (`explicitWorkingCopyReplacementApproval: { approvedByUser: true, confirmationToken: 'CONFIRM_REPLACE_WORKING_COPY', reason }`), logging `WORKING_COPY_EXPLICITLY_REPLACED`.

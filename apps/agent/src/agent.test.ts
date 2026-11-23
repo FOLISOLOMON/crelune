@@ -44,6 +44,7 @@ import {
   resolveStrictlyWithinRoot,
 } from './security/path-safety.js';
 import {
+  AgentWorkspaceError,
   cleanupWorkspaceTempFiles,
   computeSha256Hex,
   inspectExistingWorkspaces,
@@ -69,11 +70,11 @@ afterEach(async () => {
         for (const entry of entries) {
           const full = path.join(current, entry.name);
           if (entry.isSymbolicLink()) {
-            await fs.unlink(full).catch(() => {});
+            await fs.unlink(full).catch(() => { });
           } else if (entry.isDirectory()) {
             await walk(full);
           } else {
-            await fs.chmod(full, 0o666).catch(() => {});
+            await fs.chmod(full, 0o666).catch(() => { });
           }
         }
       };
@@ -81,7 +82,7 @@ afterEach(async () => {
     } catch {
       // Ignore walk errors during teardown
     }
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => { });
   }
 });
 
@@ -166,20 +167,20 @@ function createValidManifest(params: {
       },
       ...(params.assetSha256
         ? [
-            {
-              fieldKey: 'member.photo',
-              fieldType: 'IMAGE' as const,
-              targetLayerName: 'MEMBER_PHOTO',
-              layerPath: ['Portrait', 'MEMBER_PHOTO'],
-              textValue: null,
-              assetReference: {
-                assetId: 'mem_kofi_01',
-                assetKind: 'MEMBER_PHOTO' as const,
-                suggestedRelativeFilename: 'assets/kofi_photo.jpg',
-                expectedSha256: params.assetSha256,
-              },
+          {
+            fieldKey: 'member.photo',
+            fieldType: 'IMAGE' as const,
+            targetLayerName: 'MEMBER_PHOTO',
+            layerPath: ['Portrait', 'MEMBER_PHOTO'],
+            textValue: null,
+            assetReference: {
+              assetId: 'mem_kofi_01',
+              assetKind: 'MEMBER_PHOTO' as const,
+              suggestedRelativeFilename: 'assets/kofi_photo.jpg',
+              expectedSha256: params.assetSha256,
             },
-          ]
+          },
+        ]
         : []),
     ],
     outputSpec: {
@@ -337,8 +338,7 @@ describe('Windows Creative Agent — Real Windows DPAPI Credential & Claim Stora
       expect(await claimStore.loadClaim('dsp_dpapi_1')).toBe(claimToken);
       await claimStore.clearClaim('dsp_dpapi_1');
       expect(await claimStore.loadClaim('dsp_dpapi_1')).toBeNull();
-    },
-    15_000
+    }
   );
 
   it('supports MemoryCredentialStore for isolated non-disk tests', async () => {
@@ -369,8 +369,7 @@ describe('Windows Creative Agent — Live Affinity 3.3 Detection (Read-Only)', (
       expect(report.version).toMatch(/^3\.3\./);
       expect(report.scriptingEnabled).toBe(false);
       expect(report.mcpServerEnabled).toBe(false);
-    },
-    15_000
+    }
   );
 });
 
@@ -611,6 +610,456 @@ describe('Windows Creative Agent — Workspace Preservation, Working Assets, Aff
         Buffer.from(exportBytes)
       )
     ).toBe(0);
+  });
+
+  it('fails closed with AgentWorkspaceError when hard links are unsupported, never publishes partial target files, and cleans up staged temp files', async () => {
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+    const photoBytes = createMinimalValidJpegBytes(400, 400);
+    const photoSha = computeSha256Hex(photoBytes);
+
+    for (const errnoCode of ['EXDEV', 'ENOTSUP', 'ENOSYS', 'EOPNOTSUPP'] as const) {
+      const workspaceRoot = await makeTempDir(`crelune-nolink-${errnoCode.toLowerCase()}-`);
+      const manifest = createValidManifest({
+        designJobId: `job_nolink_${errnoCode.toLowerCase()}`,
+        dispatchId: `dsp_nolink_${errnoCode.toLowerCase()}`,
+        templateSha256: psdSha,
+        assetSha256: photoSha,
+      });
+
+      const openSpy = vi.spyOn(fs, 'open');
+      const writeFileSpy = vi.spyOn(fs, 'writeFile');
+
+      try {
+        let caught: unknown;
+        try {
+          await prepareIsolatedJobWorkspace({
+            workspaceRoot,
+            rawManifest: manifest,
+            templateBytes: psdBytes,
+            assets: [
+              {
+                assetId: 'mem_kofi_01',
+                relativeFilename: 'assets/kofi_photo.jpg',
+                bytes: photoBytes,
+                expectedSha256: photoSha,
+              },
+            ],
+            atomicPublicationOps: {
+              linkFile: async () => {
+                const err = new Error(
+                  `Simulated unsupported hard link (${errnoCode})`
+                ) as NodeJS.ErrnoException;
+                err.code = errnoCode;
+                throw err;
+              },
+            },
+          });
+        } catch (err) {
+          caught = err;
+        }
+
+        expect(caught).toBeInstanceOf(AgentWorkspaceError);
+        const wsErr = caught as AgentWorkspaceError;
+        expect(wsErr.code).toBe('ATOMIC_PUBLICATION_UNSUPPORTED');
+        expect(wsErr.errnoCode).toBe(errnoCode);
+        expect(wsErr.message).toContain(errnoCode);
+        // Must never leak local absolute filesystem paths into diagnostic message
+        expect(wsErr.message).not.toContain(workspaceRoot);
+
+        // Verify ZERO direct open/writeFile fallback at target paths (only staging in working/tmp/)
+        for (const call of openSpy.mock.calls) {
+          const openedPath = String(call[0]);
+          expect(openedPath).toContain(`${path.sep}working${path.sep}tmp${path.sep}`);
+        }
+        expect(writeFileSpy).not.toHaveBeenCalled();
+
+        // Verify NO partially written target became visible and working/tmp/ is clean
+        const jobDir = path.join(workspaceRoot, 'jobs', manifest.designJobId);
+        expect(await fs.readdir(path.join(jobDir, 'source'))).toEqual([]);
+        expect(await fs.readdir(path.join(jobDir, 'working'))).toEqual(['tmp']);
+        expect(await fs.readdir(path.join(jobDir, 'working', 'tmp'))).toEqual([]);
+        expect(await fs.readdir(path.join(jobDir, 'assets'))).toEqual([]);
+      } finally {
+        openSpy.mockRestore();
+        writeFileSpy.mockRestore();
+      }
+    }
+
+    // Also verify failing ONLY on working copy publication (after master links on real NTFS)
+    const partialRoot = await makeTempDir('crelune-nolink-working-');
+    const partialManifest = createValidManifest({
+      designJobId: 'job_nolink_working',
+      dispatchId: 'dsp_nolink_working',
+      templateSha256: psdSha,
+    });
+    const partialJobDir = path.join(partialRoot, 'jobs', partialManifest.designJobId);
+    const expectedWorkingDir = path.join(partialJobDir, 'working');
+
+    let workingErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: partialRoot,
+        rawManifest: partialManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          linkFile: async (existingPath, newPath) => {
+            if (newPath.startsWith(expectedWorkingDir)) {
+              const err = new Error('Simulated ENOTSUP on working dir') as NodeJS.ErrnoException;
+              err.code = 'ENOTSUP';
+              throw err;
+            }
+            await fs.link(existingPath, newPath);
+          },
+        },
+      });
+    } catch (err) {
+      workingErr = err;
+    }
+
+    expect(workingErr).toBeInstanceOf(AgentWorkspaceError);
+    expect((workingErr as AgentWorkspaceError).code).toBe(
+      'ATOMIC_PUBLICATION_UNSUPPORTED'
+    );
+    expect(await fs.readdir(path.join(partialJobDir, 'source'))).toEqual([
+      'birthday_gold_frame.psd',
+    ]);
+    expect(await fs.readdir(expectedWorkingDir)).toEqual(['tmp']);
+    expect(await fs.readdir(path.join(expectedWorkingDir, 'tmp'))).toEqual([]);
+
+    // Unexpected link error (e.g. EACCES) also fails closed without fallback and cleans staging
+    const eaccesRoot = await makeTempDir('crelune-link-eacces-');
+    const eaccesManifest = createValidManifest({
+      designJobId: 'job_link_eacces',
+      dispatchId: 'dsp_link_eacces',
+      templateSha256: psdSha,
+    });
+    let eaccesErr: unknown;
+    try {
+      await prepareIsolatedJobWorkspace({
+        workspaceRoot: eaccesRoot,
+        rawManifest: eaccesManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          linkFile: async () => {
+            const err = new Error('Simulated EACCES') as NodeJS.ErrnoException;
+            err.code = 'EACCES';
+            throw err;
+          },
+        },
+      });
+    } catch (err) {
+      eaccesErr = err;
+    }
+    expect(eaccesErr).toBeInstanceOf(AgentWorkspaceError);
+    expect((eaccesErr as AgentWorkspaceError).code).toBe(
+      'ATOMIC_PUBLICATION_FAILED'
+    );
+    expect(
+      await fs.readdir(
+        path.join(eaccesRoot, 'jobs', eaccesManifest.designJobId, 'source')
+      )
+    ).toEqual([]);
+    expect(
+      await fs.readdir(
+        path.join(eaccesRoot, 'jobs', eaccesManifest.designJobId, 'working', 'tmp')
+      )
+    ).toEqual([]);
+  });
+
+  it('preserves existing working copies, source masters, exports, and symlink protections on hard-link failure while keeping NTFS hard links and explicit replacement working', async () => {
+    const workspaceRoot = await makeTempDir('crelune-preserve-nolink-');
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+    const manifest = createValidManifest({
+      designJobId: 'job_preserve_nolink',
+      dispatchId: 'dsp_preserve_nolink',
+      templateSha256: psdSha,
+    });
+
+    // 1. Normal Windows NTFS hard-link creation succeeds and leaves working/tmp clean
+    const created = await prepareIsolatedJobWorkspace({
+      workspaceRoot,
+      rawManifest: manifest,
+      templateBytes: psdBytes,
+      assets: [],
+    });
+    expect(created.workingCopyStatus).toBe('CREATED');
+    expect(created.masterVerified).toBe(true);
+    expect(await fs.readdir(created.tempDir)).toEqual([]);
+    const workingStat = await fs.stat(created.workingCopyPath);
+    expect(workingStat.nlink).toBe(1);
+
+    // 2. Artist edits working copy and creates an export
+    const artistBytes = Buffer.concat([
+      Buffer.from(psdBytes),
+      Buffer.from('ARTIST_WORK_MUST_SURVIVE_ENOTSUP'),
+    ]);
+    await fs.writeFile(created.workingCopyPath, artistBytes);
+    const artistSha = computeSha256Hex(artistBytes);
+
+    const exportBytes = createMinimalValidPngBytes(1080, 1350);
+    const existingExportPath = path.join(created.exportsDir, 'artist-final.png');
+    await fs.writeFile(existingExportPath, exportBytes);
+
+    // 3. Hard-link failure on master OR working copy fails closed while preserving all user files
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          linkFile: async () => {
+            const err = new Error('Simulated ENOTSUP') as NodeJS.ErrnoException;
+            err.code = 'ENOTSUP';
+            throw err;
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentWorkspaceError',
+      code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+      errnoCode: 'ENOTSUP',
+    });
+
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          linkFile: async (existingPath, newPath) => {
+            if (newPath === created.workingCopyPath) {
+              const err = new Error('Simulated EXDEV') as NodeJS.ErrnoException;
+              err.code = 'EXDEV';
+              throw err;
+            }
+            await fs.link(existingPath, newPath);
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentWorkspaceError',
+      code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+      errnoCode: 'EXDEV',
+    });
+
+    // Existing working copy, source master, and export are 100% untouched; tmp is clean
+    expect(
+      Buffer.compare(await fs.readFile(created.workingCopyPath), artistBytes)
+    ).toBe(0);
+    expect(
+      (
+        await verifyMasterTemplateIntegrity({
+          masterSourcePath: created.masterSourcePath,
+          expectedSha256: psdSha,
+        })
+      ).ok
+    ).toBe(true);
+    expect(
+      Buffer.compare(
+        await fs.readFile(existingExportPath),
+        Buffer.from(exportBytes)
+      )
+    ).toBe(0);
+    expect(await fs.readdir(created.tempDir)).toEqual([]);
+
+    // 4. Even with explicit replacement approval, unsupported hard links fail closed without modifying disk
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+        explicitWorkingCopyReplacementApproval: {
+          approvedByUser: true,
+          confirmationToken: WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
+          reason: 'Artist requested clean reset from master.',
+        },
+        atomicPublicationOps: {
+          linkFile: async () => {
+            const err = new Error('Simulated ENOSYS') as NodeJS.ErrnoException;
+            err.code = 'ENOSYS';
+            throw err;
+          },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentWorkspaceError',
+      code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+      errnoCode: 'ENOSYS',
+    });
+    expect(
+      Buffer.compare(await fs.readFile(created.workingCopyPath), artistBytes)
+    ).toBe(0);
+    expect(await fs.readdir(created.tempDir)).toEqual([]);
+
+    // 5. Explicit replacement approval on normal NTFS continues to work cleanly
+    const replaced = await prepareIsolatedJobWorkspace({
+      workspaceRoot,
+      rawManifest: manifest,
+      templateBytes: psdBytes,
+      assets: [],
+      explicitWorkingCopyReplacementApproval: {
+        approvedByUser: true,
+        confirmationToken: WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
+        reason: 'Artist requested clean reset from master.',
+      },
+    });
+    expect(replaced.workingCopyStatus).toBe('REPLACED_BY_EXPLICIT_USER_ACTION');
+    expect(replaced.workingCopySha256).toBe(psdSha);
+    expect(replaced.workingCopySha256).not.toBe(artistSha);
+    expect(await fs.readdir(created.tempDir)).toEqual([]);
+    expect(await fs.readFile(replaced.eventLogPath, 'utf8')).toContain(
+      'WORKING_COPY_EXPLICITLY_REPLACED'
+    );
+
+    // 6. Symlink/junction escapes remain rejected with AgentPathSecurityError
+    const symlinkRoot = await makeTempDir('crelune-symlink-guard-');
+    const outsideDir = await makeTempDir('crelune-symlink-outside-');
+    const symJobDir = path.join(symlinkRoot, 'jobs', 'job_sym_guard');
+    await fs.mkdir(symJobDir, { recursive: true });
+    await fs.symlink(
+      outsideDir,
+      path.join(symJobDir, 'working'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+    await expect(
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: symlinkRoot,
+        rawManifest: createValidManifest({
+          designJobId: 'job_sym_guard',
+          dispatchId: 'dsp_sym_guard',
+          templateSha256: psdSha,
+        }),
+        templateBytes: psdBytes,
+        assets: [],
+      })
+    ).rejects.toThrow(AgentPathSecurityError);
+  });
+
+  it('prevents concurrent preparations from ever seeing incomplete files or misclassifying them as artist edits', async () => {
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+
+    // Scenario A: Concurrent preparations on unsupported hard-link filesystem both fail closed
+    const failRoot = await makeTempDir('crelune-concurrent-nolink-');
+    const failManifest = createValidManifest({
+      designJobId: 'job_concurrent_nolink',
+      dispatchId: 'dsp_concurrent_nolink',
+      templateSha256: psdSha,
+    });
+    const failResults = await Promise.allSettled([
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: failRoot,
+        rawManifest: failManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          linkFile: async () => {
+            const err = new Error('Simulated ENOTSUP') as NodeJS.ErrnoException;
+            err.code = 'ENOTSUP';
+            throw err;
+          },
+        },
+      }),
+      prepareIsolatedJobWorkspace({
+        workspaceRoot: failRoot,
+        rawManifest: failManifest,
+        templateBytes: psdBytes,
+        assets: [],
+        atomicPublicationOps: {
+          linkFile: async () => {
+            const err = new Error('Simulated ENOTSUP') as NodeJS.ErrnoException;
+            err.code = 'ENOTSUP';
+            throw err;
+          },
+        },
+      }),
+    ]);
+
+    for (const outcome of failResults) {
+      expect(outcome.status).toBe('rejected');
+      if (outcome.status === 'rejected') {
+        expect(outcome.reason).toBeInstanceOf(AgentWorkspaceError);
+        expect((outcome.reason as AgentWorkspaceError).code).toBe(
+          'ATOMIC_PUBLICATION_UNSUPPORTED'
+        );
+      }
+    }
+    const failJobDir = path.join(failRoot, 'jobs', failManifest.designJobId);
+    expect(await fs.readdir(path.join(failJobDir, 'source'))).toEqual([]);
+    expect(await fs.readdir(path.join(failJobDir, 'working'))).toEqual(['tmp']);
+    expect(await fs.readdir(path.join(failJobDir, 'working', 'tmp'))).toEqual([]);
+
+    // Scenario B: Deterministic staging barrier on real NTFS — Worker A stages working copy
+    // and pauses BEFORE atomic hard-link while Worker B races concurrently.
+    const barrierRoot = await makeTempDir('crelune-concurrent-barrier-');
+    const barrierManifest = createValidManifest({
+      designJobId: 'job_concurrent_barrier',
+      dispatchId: 'dsp_concurrent_barrier',
+      templateSha256: psdSha,
+    });
+    const expectedWorkingPath = path.join(
+      barrierRoot,
+      'jobs',
+      barrierManifest.designJobId,
+      'working',
+      'birthday_gold_frame_dsp_concurrent_barrier_working.psd'
+    );
+
+    let markWorkerAStaged!: () => void;
+    const workerAStaged = new Promise<void>((resolve) => {
+      markWorkerAStaged = resolve;
+    });
+    let releaseWorkerA!: () => void;
+    const workerAReleased = new Promise<void>((resolve) => {
+      releaseWorkerA = resolve;
+    });
+
+    const workerAPromise = prepareIsolatedJobWorkspace({
+      workspaceRoot: barrierRoot,
+      rawManifest: barrierManifest,
+      templateBytes: psdBytes,
+      assets: [],
+      atomicPublicationOps: {
+        beforeAtomicLink: async ({ targetPath }) => {
+          if (targetPath === expectedWorkingPath) {
+            markWorkerAStaged();
+            await workerAReleased;
+          }
+        },
+      },
+    });
+
+    // Wait until Worker A has staged 100% of bytes in working/tmp/ but NOT linked yet
+    await workerAStaged;
+    // Target working copy MUST NOT be visible while Worker A is still staged
+    await expect(fs.access(expectedWorkingPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    // Worker B runs concurrently and atomically publishes via real NTFS hard link
+    const workerBResult = await prepareIsolatedJobWorkspace({
+      workspaceRoot: barrierRoot,
+      rawManifest: barrierManifest,
+      templateBytes: psdBytes,
+      assets: [],
+    });
+    expect(workerBResult.workingCopyStatus).toBe('CREATED');
+    expect(workerBResult.workingCopySha256).toBe(psdSha);
+
+    // Release Worker A -> encounters EEXIST on atomic hard link, sees complete published file,
+    // and classifies strictly as PRESERVED_UNCHANGED (NEVER PRESERVED_WITH_ARTIST_EDITS!)
+    releaseWorkerA();
+    const workerAResult = await workerAPromise;
+    expect(workerAResult.workingCopyStatus).toBe('PRESERVED_UNCHANGED');
+    expect(workerAResult.workingCopySha256).toBe(psdSha);
+    expect(await fs.readdir(workerBResult.tempDir)).toEqual([]);
   });
 
   it('rejects tampered template downloads and unsupported WORKING_ASSET manifests before touching disk', async () => {
@@ -1022,7 +1471,7 @@ describe('Windows Creative Agent — End-to-End Claim Fencing, Lease Renewal, Ex
       if (
         req.method === 'GET' &&
         url.pathname ===
-          `/api/agent/dispatches/${manifest.dispatchId}/assets/mem_kofi_01`
+        `/api/agent/dispatches/${manifest.dispatchId}/assets/mem_kofi_01`
       ) {
         res.writeHead(200, {
           'Content-Type': 'image/jpeg',
@@ -1035,7 +1484,7 @@ describe('Windows Creative Agent — End-to-End Claim Fencing, Lease Renewal, Ex
       if (
         req.method === 'POST' &&
         url.pathname ===
-          `/api/agent/dispatches/${manifest.dispatchId}/exports/upload-intents`
+        `/api/agent/dispatches/${manifest.dispatchId}/exports/upload-intents`
       ) {
         const body = (await readJson()) as { byteSize: number; mimeType: string };
         const addr = server.address();

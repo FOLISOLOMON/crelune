@@ -4,11 +4,16 @@
  * Materializes isolated job workspaces strictly inside:
  *   `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/`
  *
- * Stage 5.5.2 Atomic & Preservation-First Safety Invariants:
+ * Stage 5.5.2–5.5.3 Fail-Closed Atomic & Preservation-First Safety Invariants:
  * - New source masters (`source/`) and new working copies (`working/`) are created
- *   atomically via exclusive file creation (`open(..., 'wx')` + atomic `link()`).
+ *   atomically via exclusive staged file creation (`open(..., 'wx')` inside
+ *   `working/tmp/`) followed by atomic hard-link publication (`fs.link()`).
  *   If another process creates the file first (`EEXIST`), the existing file is
- *   preserved untouched and NEVER overwritten by a fallback `writeFile()`.
+ *   preserved untouched. If the filesystem does not support atomic hard-link
+ *   publication (`EXDEV`, `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`), creation FAILS
+ *   CLOSED with a typed `AgentWorkspaceError` — NEVER falling back to direct
+ *   creation (`open(targetPath, 'wx')` + write) or unconditional `writeFile()`,
+ *   and always cleaning up staged temp files on every failure path.
  * - Existing working copies are preserved even when their SHA-256 differs from the
  *   source master (legitimate artist edits are never treated as corrupted masters).
  * - Destructive replacement of an existing working copy is impossible through
@@ -32,6 +37,7 @@ import {
   type JobPrepManifest,
 } from '@crelune/shared';
 import {
+  AgentPathSecurityError,
   assertNotSymlinkIfExists,
   assertSafeAgentIdentifier,
   assertSafeBasename,
@@ -39,6 +45,56 @@ import {
   resolveStrictlyWithinRoot,
 } from '../security/path-safety.js';
 import { sanitizeLogMeta } from '../security/logger.js';
+
+export type AgentWorkspaceErrorCode =
+  | 'ATOMIC_PUBLICATION_UNSUPPORTED'
+  | 'ATOMIC_PUBLICATION_FAILED';
+
+const UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES = new Set([
+  'EXDEV',
+  'ENOTSUP',
+  'ENOSYS',
+  'EOPNOTSUPP',
+]);
+
+export class AgentWorkspaceError extends Error {
+  public readonly code: AgentWorkspaceErrorCode;
+  public readonly targetPath: string;
+  public readonly errnoCode?: string;
+
+  constructor(params: {
+    code: AgentWorkspaceErrorCode;
+    message: string;
+    targetPath: string;
+    errnoCode?: string;
+    cause?: unknown;
+  }) {
+    super(
+      params.message,
+      params.cause !== undefined ? { cause: params.cause } : undefined
+    );
+    this.name = 'AgentWorkspaceError';
+    this.code = params.code;
+    this.targetPath = params.targetPath;
+    this.errnoCode = params.errnoCode;
+  }
+}
+
+export interface WorkspaceAtomicPublicationOps {
+  /**
+   * Optional override for `fs.link` used in tests to deterministically simulate
+   * filesystems without hard-link support (`EXDEV`, `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`).
+   */
+  linkFile?: (existingPath: string, newPath: string) => Promise<void>;
+  /**
+   * Optional hook invoked after staging 100% of bytes in `working/tmp/` and
+   * immediately before atomic hard-link publication at `targetPath`.
+   */
+  beforeAtomicLink?: (params: {
+    stagedPath: string;
+    targetPath: string;
+  }) => Promise<void>;
+}
 
 export type WorkingCopyPreparationStatus =
   | 'CREATED'
@@ -117,79 +173,120 @@ async function listRegularFilesSafe(dirPath: string): Promise<string[]> {
   }
 }
 
+async function safeUnlinkTempFile(tempPath: string): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await fs.unlink(tempPath);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT') {
+        return;
+      }
+      if (
+        (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') &&
+        attempt < 3
+      ) {
+        await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+        continue;
+      }
+      return;
+    }
+  }
+}
+
 /**
  * Writes full content into a unique temporary file inside `tempDir` using
- * OS-atomic exclusive creation (`open(..., 'wx')`).
+ * OS-atomic exclusive creation (`open(..., 'wx')`). Always cleans up the
+ * temporary file on any write, sync, or close failure.
  */
 async function stageUniqueTempFile(
   tempDir: string,
   bytes: Uint8Array | string
 ): Promise<string> {
+  assertNotSymlinkIfExists(tempDir);
   const uniqueName = `.stage_${process.pid}_${crypto.randomUUID()}.tmp`;
   const tempPath = resolveStrictlyWithinRoot(tempDir, uniqueName);
   const handle = await fs.open(tempPath, 'wx', 0o600);
+  let closed = false;
   try {
     await handle.writeFile(bytes);
     await handle.sync().catch(() => {});
+    await handle.close();
+    closed = true;
+    return tempPath;
   } catch (err) {
-    await handle.close().catch(() => {});
-    await fs.unlink(tempPath).catch(() => {});
+    if (!closed) {
+      await handle.close().catch(() => {});
+    }
+    await safeUnlinkTempFile(tempPath);
     throw err;
   }
-  await handle.close();
-  return tempPath;
 }
 
 /**
  * Atomically creates `targetPath` ONLY if it does not already exist.
  *
- * Strategy:
- * 1. Stages 100% of `bytes` to a unique temp file via `open(..., 'wx')` so no
- *    concurrent reader can observe a partially written target file.
- * 2. Publishes via `fs.link(stagedTemp, targetPath)`, which fails atomically with
- *    `EEXIST` on NTFS and POSIX when another process won or the file already exists.
- * 3. Only if the underlying filesystem rejects hard links (`EXDEV`/`ENOTSUP`),
- *    uses direct `fs.open(targetPath, 'wx')` — NEVER falling back to unconditional
- *    `writeFile()`.
+ * Fail-closed publication strategy (Stage 5.5.3):
+ * 1. Stages 100% of `bytes` to a unique temp file inside `tempDir` via
+ *    `open(..., 'wx', 0o600)`, syncs, and closes it so no concurrent reader can
+ *    ever observe a partially written file at `targetPath`.
+ * 2. Publishes via atomic hard link `fs.link(stagedTemp, targetPath)`, which
+ *    fails atomically with `EEXIST` on NTFS and POSIX when another process won
+ *    or the file already exists.
+ * 3. NEVER falls back to direct `fs.open(targetPath, 'wx')` + write or
+ *    `writeFile(targetPath, ...)`. If the filesystem rejects hard links
+ *    (`EXDEV`, `ENOTSUP`, `ENOSYS`, `EOPNOTSUPP`), fails closed with a typed
+ *    `AgentWorkspaceError` (`code: 'ATOMIC_PUBLICATION_UNSUPPORTED'`).
+ * 4. Always unlinks `stagedTemp` in `finally` on every success or failure path.
  */
 async function createFileExclusivelyAtomic(
   tempDir: string,
   targetPath: string,
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  ops?: WorkspaceAtomicPublicationOps
 ): Promise<{ created: boolean }> {
   assertNotSymlinkIfExists(targetPath);
   const stagedPath = await stageUniqueTempFile(tempDir, bytes);
   try {
+    if (ops?.beforeAtomicLink) {
+      await ops.beforeAtomicLink({ stagedPath, targetPath });
+    }
+    assertNotSymlinkIfExists(targetPath);
+    const linkFn = ops?.linkFile ?? fs.link;
     try {
-      await fs.link(stagedPath, targetPath);
+      await linkFn(stagedPath, targetPath);
       return { created: true };
     } catch (linkErr) {
+      if (
+        linkErr instanceof AgentWorkspaceError ||
+        linkErr instanceof AgentPathSecurityError
+      ) {
+        throw linkErr;
+      }
       const code = (linkErr as NodeJS.ErrnoException)?.code;
       if (code === 'EEXIST') {
         return { created: false };
       }
-      if (code === 'EXDEV' || code === 'ENOTSUP' || code === 'ENOSYS') {
-        // Fallback strictly to exclusive 'wx' create (NEVER unconditional writeFile!)
-        try {
-          const handle = await fs.open(targetPath, 'wx');
-          try {
-            await handle.writeFile(bytes);
-            await handle.sync().catch(() => {});
-          } finally {
-            await handle.close();
-          }
-          return { created: true };
-        } catch (wxErr) {
-          if ((wxErr as NodeJS.ErrnoException)?.code === 'EEXIST') {
-            return { created: false };
-          }
-          throw wxErr;
-        }
+      if (code && UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES.has(code)) {
+        throw new AgentWorkspaceError({
+          code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+          targetPath,
+          errnoCode: code,
+          cause: linkErr,
+          message: `Workspace filesystem does not support atomic hard-link publication (${code}). Refusing unsafe direct-write fallback to prevent publishing partially written creative files; move the CRELUNE workspace onto a local filesystem that supports hard links (such as NTFS).`,
+        });
       }
-      throw linkErr;
+      throw new AgentWorkspaceError({
+        code: 'ATOMIC_PUBLICATION_FAILED',
+        targetPath,
+        errnoCode: code,
+        cause: linkErr,
+        message: `Atomic hard-link publication failed${code ? ` (${code})` : ''}. Refusing unsafe direct-write fallback to prevent publishing partially written creative files.`,
+      });
     }
   } finally {
-    await fs.unlink(stagedPath).catch(() => {});
+    await safeUnlinkTempFile(stagedPath);
   }
 }
 
@@ -208,12 +305,25 @@ async function writeFileAtomicReplace(
   const stagedPath = await stageUniqueTempFile(tempDir, content);
   try {
     for (let attempt = 0; attempt < 4; attempt++) {
+      assertNotSymlinkIfExists(targetPath);
       try {
         await fs.rename(stagedPath, targetPath);
         return;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
-        if ((code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') && attempt < 3) {
+        if (code && UNSUPPORTED_ATOMIC_PUBLICATION_ERRNO_CODES.has(code)) {
+          throw new AgentWorkspaceError({
+            code: 'ATOMIC_PUBLICATION_UNSUPPORTED',
+            targetPath,
+            errnoCode: code,
+            cause: err,
+            message: `Workspace filesystem does not support atomic rename publication (${code}). Refusing unsafe direct-write replacement to protect creative workspace files.`,
+          });
+        }
+        if (
+          (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') &&
+          attempt < 3
+        ) {
           await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
           continue;
         }
@@ -221,7 +331,7 @@ async function writeFileAtomicReplace(
       }
     }
   } catch (err) {
-    await fs.unlink(stagedPath).catch(() => {});
+    await safeUnlinkTempFile(stagedPath);
     throw err;
   }
 }
@@ -320,6 +430,10 @@ export async function prepareIsolatedJobWorkspace(params: {
    * replacement of an existing working copy. Omitted in all normal & recovery flows.
    */
   explicitWorkingCopyReplacementApproval?: ExplicitWorkingCopyReplacementApproval;
+  /**
+   * Optional atomic publication overrides/hooks for deterministic testing.
+   */
+  atomicPublicationOps?: WorkspaceAtomicPublicationOps;
 }): Promise<MaterializedJobWorkspace> {
   const manifest = jobPrepManifestSchema.parse(params.rawManifest);
   const safeJobId = assertSafeAgentIdentifier(manifest.designJobId, 'designJobId');
@@ -401,7 +515,8 @@ export async function prepareIsolatedJobWorkspace(params: {
   const masterCreate = await createFileExclusivelyAtomic(
     tempDir,
     masterSourcePath,
-    params.templateBytes
+    params.templateBytes,
+    params.atomicPublicationOps
   );
   if (masterCreate.created) {
     // Mark newly created source master read-only on disk to prevent accidental overwrite
@@ -419,7 +534,7 @@ export async function prepareIsolatedJobWorkspace(params: {
     );
   }
 
-  // 2. Atomic exclusive creation for working copy (no check-then-write race!)
+  // 2. Atomic exclusive creation for working copy (fail-closed if atomic link unsupported)
   const hasExplicitApproval = isValidWorkingCopyReplacementApproval(
     params.explicitWorkingCopyReplacementApproval
   );
@@ -431,7 +546,8 @@ export async function prepareIsolatedJobWorkspace(params: {
   const workingCreate = await createFileExclusivelyAtomic(
     tempDir,
     workingCopyPath,
-    params.templateBytes
+    params.templateBytes,
+    params.atomicPublicationOps
   );
 
   if (workingCreate.created) {
@@ -495,7 +611,8 @@ export async function prepareIsolatedJobWorkspace(params: {
     const assetCreate = await createFileExclusivelyAtomic(
       tempDir,
       localAssetPath,
-      asset.bytes
+      asset.bytes,
+      params.atomicPublicationOps
     );
     if (!assetCreate.created) {
       const existingAssetSha = await computeFileSha256Hex(localAssetPath);
