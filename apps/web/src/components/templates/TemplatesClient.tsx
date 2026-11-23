@@ -69,6 +69,7 @@ export function TemplatesClient({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [brokenPreviewIds, setBrokenPreviewIds] = useState<Record<string, boolean>>({});
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -233,8 +234,20 @@ export function TemplatesClient({
 
       {/* Error Notice */}
       {errorMessage && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
-          {errorMessage}
+        <div
+          role="alert"
+          className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800"
+        >
+          <span>{errorMessage}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => loadTemplates()}
+            disabled={isLoading}
+          >
+            Retry
+          </Button>
         </div>
       )}
 
@@ -270,6 +283,13 @@ export function TemplatesClient({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {templates.map((tmpl) => {
             const activeVer = tmpl.activeVersion;
+            const showPreview =
+              Boolean(activeVer?.hasPreview) &&
+              !brokenPreviewIds[activeVer?.id ?? ''];
+            const previewUrl = activeVer
+              ? `/api/templates/${encodeURIComponent(tmpl.id)}/versions/${encodeURIComponent(activeVer.id)}/preview`
+              : null;
+
             return (
               <Link
                 key={tmpl.id}
@@ -277,6 +297,36 @@ export function TemplatesClient({
                 className="group flex flex-col justify-between rounded-2xl border border-[#E8E5ED] bg-white p-5 shadow-xs transition-all hover:border-[#6541A5]/40 hover:shadow-md"
               >
                 <div className="space-y-3">
+                  {/* Private Preview Thumbnail */}
+                  <div className="relative aspect-[16/10] w-full overflow-hidden rounded-xl border border-[#E8E5ED] bg-[#F8F7FA] flex items-center justify-center">
+                    {showPreview && previewUrl && activeVer ? (
+                      <>
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={previewUrl}
+                          alt={`Preview for ${tmpl.name}`}
+                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                          loading="lazy"
+                          onError={() =>
+                            setBrokenPreviewIds((prev) => ({
+                              ...prev,
+                              [activeVer.id]: true,
+                            }))
+                          }
+                        />
+                      </>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center gap-1.5 px-4 text-center">
+                        <FileText className="h-7 w-7 text-[#A99AD1]" />
+                        <span className="text-[11px] font-medium text-[#77727F]">
+                          {activeVer
+                            ? `${activeVer.format} Master · No Preview Image`
+                            : 'No Version Uploaded Yet'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Top Tags */}
                   <div className="flex items-center justify-between gap-2">
                     <Badge variant="primary" size="sm">

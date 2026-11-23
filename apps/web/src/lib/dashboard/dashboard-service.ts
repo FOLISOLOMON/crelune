@@ -19,6 +19,7 @@ import { listOwnerNotifications } from '@/lib/notifications/notification-service
 
 export interface DashboardSnapshot {
   activeMembersCount: number;
+  activeTemplatesCount: number;
   birthdayCounts: BirthdayOverviewCounts;
   upcomingBirthdays: BirthdayCalendarMemberItem[];
   unreadNotificationsCount: number;
@@ -38,6 +39,7 @@ export async function getDashboardSnapshot(
 ): Promise<DashboardSnapshot> {
   const [
     activeMembersCount,
+    activeTemplatesCount,
     birthdayOverview,
     notificationData,
     designData,
@@ -46,6 +48,13 @@ export async function getDashboardSnapshot(
     prisma.member.count({
       where: {
         organisationId,
+        archivedAt: null,
+      },
+    }),
+    prisma.template.count({
+      where: {
+        organisationId,
+        isActive: true,
         archivedAt: null,
       },
     }),
@@ -68,6 +77,7 @@ export async function getDashboardSnapshot(
 
   return {
     activeMembersCount,
+    activeTemplatesCount,
     birthdayCounts: birthdayOverview.counts,
     upcomingBirthdays: birthdayOverview.upcoming.slice(0, 5),
     unreadNotificationsCount: notificationData.unreadCount,

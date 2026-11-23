@@ -79,6 +79,13 @@ export default async function DashboardPage() {
       icon: <Palette className="w-4 h-4 text-[#6541A5]" />,
     },
     {
+      title: 'Active Templates',
+      count: String(snapshot.activeTemplatesCount),
+      note: 'Affinity & PSD master catalog',
+      href: '/templates',
+      icon: <FileText className="w-4 h-4 text-[#6541A5]" />,
+    },
+    {
       title: 'Unread Notifications',
       count: String(snapshot.unreadNotificationsCount),
       note: 'Birthday alerts & due reminders',
@@ -88,13 +95,6 @@ export default async function DashboardPage() {
   ];
 
   const futureModules = [
-    {
-      title: 'Template & Affinity Catalog',
-      desc: 'Validated Affinity & PSD templates with layer field mapping',
-      href: '/templates',
-      milestone: 'Milestone 5',
-      icon: <FileText className="w-5 h-5 text-[#6541A5]" />,
-    },
     {
       title: 'Events & Programmes',
       desc: 'Church event calendar, special dates, and linked flyers',
@@ -142,7 +142,7 @@ export default async function DashboardPage() {
       />
 
       {/* Live Operational KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {operationalCards.map((card) => (
           <Link key={card.title} href={card.href} className="group">
             <Card
@@ -298,7 +298,7 @@ export default async function DashboardPage() {
             </div>
             <div className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-[#EFEBF8] border border-[#D3CAEC] text-[#6541A5]">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Members, Birthdays &amp; Designs Active</span>
+              <span>Members, Birthdays, Designs &amp; Templates Active</span>
             </div>
           </div>
         </div>

@@ -235,10 +235,18 @@ export async function uploadBytesToPresignedUrl(
   fileBytes: Uint8Array,
   signal?: AbortSignal
 ): Promise<void> {
+  const contentType =
+    target.requiredHeaders['content-type'] || 'application/octet-stream';
+  const payload = new Blob([fileBytes as unknown as BlobPart], {
+    type: contentType,
+  });
+
   const res = await fetch(target.url, {
     method: target.method,
-    headers: target.requiredHeaders,
-    body: Buffer.from(fileBytes),
+    headers: {
+      'content-type': contentType,
+    },
+    body: payload,
     signal,
   });
   if (!res.ok) {

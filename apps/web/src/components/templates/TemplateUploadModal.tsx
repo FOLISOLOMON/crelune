@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   Info,
   Loader2,
+  RefreshCw,
   UploadCloud,
   X,
 } from 'lucide-react';
@@ -59,7 +60,12 @@ export function TemplateUploadModal({
   const [category, setCategory] = useState<DesignCategory>('GENERAL_GRAPHIC_DESIGN');
   const [studioType, setStudioType] = useState<TemplateStudioType>('AFFINITY_DESIGNER');
   const [description, setDescription] = useState('');
+  const [widthPxInput, setWidthPxInput] = useState('');
+  const [heightPxInput, setHeightPxInput] = useState('');
   const [activateImmediately, setActivateImmediately] = useState(true);
+
+  // Reusable created template ID on retry so failed uploads do not duplicate template rows
+  const [createdTemplateId, setCreatedTemplateId] = useState<string | null>(null);
 
   // File states
   const [masterFile, setMasterFile] = useState<File | null>(null);
@@ -69,6 +75,7 @@ export function TemplateUploadModal({
   const [step, setStep] = useState<UploadStep>('form');
   const [progressMessage, setProgressMessage] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -84,14 +91,16 @@ export function TemplateUploadModal({
       setStudioType('AFFINITY_DESIGNER');
       setDescription('');
     }
+    setWidthPxInput('');
+    setHeightPxInput('');
+    setCreatedTemplateId(null);
     setMasterFile(null);
     setPreviewFile(null);
     setStep('form');
     setProgressMessage('');
     setFormError(null);
+    setCanRetry(false);
     setFieldErrors({});
-    setStep('form');
-    setProgressMessage('');
   }, [isOpen, existingTemplate]);
 
   useEffect(() => {
@@ -115,6 +124,7 @@ export function TemplateUploadModal({
       return next;
     });
     setFormError(null);
+    setCanRetry(false);
 
     if (!file) {
       setMasterFile(null);
@@ -145,6 +155,7 @@ export function TemplateUploadModal({
       return next;
     });
     setFormError(null);
+    setCanRetry(false);
 
     if (!file) {
       setPreviewFile(null);
@@ -161,20 +172,40 @@ export function TemplateUploadModal({
     setPreviewFile(file);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeUpload = async () => {
     setFormError(null);
+    setCanRetry(false);
     setFieldErrors({});
 
     // Client validation
     const errors: Record<string, string> = {};
-    if (!isNewVersion) {
+    if (!isNewVersion && !createdTemplateId) {
       if (!name.trim() || name.trim().length < 2) {
         errors.name = 'Template name must be at least 2 characters.';
       }
     }
     if (!masterFile) {
-      errors.masterFile = 'Please select a template master file (.psd, .af, .afphoto, .afdesign, or .afpub).';
+      errors.masterFile =
+        'Please select a template master file (.psd, .af, .afphoto, .afdesign, or .afpub).';
+    }
+
+    let parsedWidthPx: number | null = null;
+    let parsedHeightPx: number | null = null;
+    if (widthPxInput.trim()) {
+      const w = Number(widthPxInput.trim());
+      if (!Number.isInteger(w) || w < 1 || w > 30000) {
+        errors.widthPx = 'Width must be a whole number between 1 and 30000 px.';
+      } else {
+        parsedWidthPx = w;
+      }
+    }
+    if (heightPxInput.trim()) {
+      const h = Number(heightPxInput.trim());
+      if (!Number.isInteger(h) || h < 1 || h > 30000) {
+        errors.heightPx = 'Height must be a whole number between 1 and 30000 px.';
+      } else {
+        parsedHeightPx = h;
+      }
     }
 
     if (Object.keys(errors).length > 0) {
@@ -183,11 +214,12 @@ export function TemplateUploadModal({
       return;
     }
 
-    let targetTemplateId = existingTemplate?.id;
+    let targetTemplateId = existingTemplate?.id ?? createdTemplateId ?? undefined;
     let createdMasterIntentId: string | null = null;
+    let createdPreviewIntentId: string | null = null;
 
     try {
-      // Step 1: Create template metadata record if new
+      // Step 1: Create template metadata record if new and not already created on prior attempt
       if (!targetTemplateId) {
         setStep('intent');
         setProgressMessage('Initializing template record...');
@@ -198,6 +230,7 @@ export function TemplateUploadModal({
           description: description.trim() || null,
         });
         targetTemplateId = newTemplate.id;
+        setCreatedTemplateId(newTemplate.id);
       }
 
       // Step 2: Read bytes and compute SHA-256 digests
@@ -235,7 +268,6 @@ export function TemplateUploadModal({
       );
       createdMasterIntentId = masterIntentRes.intent.id;
 
-      let previewIntentId: string | null = null;
       let previewUploadTarget: typeof masterIntentRes.upload | null = null;
       if (previewFile && previewBytes && previewSha256) {
         const previewValidation = validateTemplatePreviewFile(previewFile);
@@ -245,23 +277,28 @@ export function TemplateUploadModal({
             kind: 'TEMPLATE_PREVIEW',
             templateId: targetTemplateId,
             originalFilename: previewFile.name,
-            mimeType: previewValidation.mimeType as 'image/png' | 'image/jpeg' | 'image/webp',
+            mimeType: previewValidation.mimeType as
+              | 'image/png'
+              | 'image/jpeg'
+              | 'image/webp',
             byteSize: previewBytes.byteLength,
             sha256: previewSha256,
             idempotencyKey: `upload_preview_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
           }
         );
-        previewIntentId = previewIntentRes.intent.id;
+        createdPreviewIntentId = previewIntentRes.intent.id;
         previewUploadTarget = previewIntentRes.upload;
       }
 
       // Step 4: Direct binary PUT to presigned S3 URLs
       setStep('uploading');
-      setProgressMessage(`Uploading ${masterFile!.name} to private creative storage...`);
+      setProgressMessage(
+        `Uploading ${masterFile!.name} to private creative storage...`
+      );
       await uploadBytesToPresignedUrl(masterIntentRes.upload, masterBytes);
 
       if (previewUploadTarget && previewBytes) {
-        setProgressMessage(`Uploading companion preview image...`);
+        setProgressMessage('Uploading companion preview image...');
         await uploadBytesToPresignedUrl(previewUploadTarget, previewBytes);
       }
 
@@ -272,23 +309,36 @@ export function TemplateUploadModal({
         targetTemplateId,
         {
           uploadIntentId: masterIntentRes.intent.id,
-          previewUploadIntentId: previewIntentId,
+          previewUploadIntentId: createdPreviewIntentId,
+          ...(parsedWidthPx !== null ? { widthPx: parsedWidthPx } : {}),
+          ...(parsedHeightPx !== null ? { heightPx: parsedHeightPx } : {}),
           activateImmediately,
         }
       );
 
       setStep('success');
       setProgressMessage('Template version registered successfully!');
-      setTimeout(() => {
-        onSuccess(finalRes.version.template);
-        onClose();
-      }, 700);
+      onSuccess(finalRes.version.template);
+      onClose();
     } catch (err) {
+      // Attempt clean abandonment for ALL pending upload intents so backend schedules cleanup
+      const abandonTasks: Array<Promise<unknown>> = [];
       if (createdMasterIntentId) {
-        // Attempt clean abandonment so backend schedules cleanup
-        abandonUploadIntentRequest(createdMasterIntentId).catch(() => {});
+        abandonTasks.push(
+          abandonUploadIntentRequest(createdMasterIntentId).catch(() => {})
+        );
       }
+      if (createdPreviewIntentId) {
+        abandonTasks.push(
+          abandonUploadIntentRequest(createdPreviewIntentId).catch(() => {})
+        );
+      }
+      if (abandonTasks.length > 0) {
+        await Promise.all(abandonTasks);
+      }
+
       setStep('form');
+      setCanRetry(true);
       if (err instanceof TemplateApiError) {
         setFormError(err.message);
         if (err.fieldErrors) setFieldErrors(err.fieldErrors);
@@ -300,6 +350,11 @@ export function TemplateUploadModal({
         );
       }
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeUpload();
   };
 
   const isWorking = step !== 'form' && step !== 'success';
@@ -326,7 +381,7 @@ export function TemplateUploadModal({
               <p className="text-xs text-[#77727F]">
                 {isNewVersion
                   ? 'Add a revised Affinity or PSD master without breaking existing jobs.'
-                  : 'Register a reusable Affinity or Photoshop master file for automated creative workflows.'}
+                  : 'Register a reusable Affinity or Photoshop master file for creative operations.'}
               </p>
             </div>
           </div>
@@ -344,9 +399,33 @@ export function TemplateUploadModal({
 
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
           {formError && (
-            <div className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/80 p-3.5 text-xs text-rose-800">
-              <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-              <span>{formError}</span>
+            <div
+              role="alert"
+              className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl border border-rose-200 bg-rose-50/80 p-3.5 text-xs text-rose-800"
+            >
+              <div className="flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
+                <div>
+                  <p>{formError}</p>
+                  {createdTemplateId && !isNewVersion && (
+                    <p className="mt-1 text-[11px] text-rose-700">
+                      Template record was initialized; retrying will attach your file to the same template without creating a duplicate.
+                    </p>
+                  )}
+                </div>
+              </div>
+              {canRetry && masterFile && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={executeUpload}
+                  className="shrink-0"
+                >
+                  <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                  Retry Upload
+                </Button>
+              )}
             </div>
           )}
 
@@ -370,15 +449,19 @@ export function TemplateUploadModal({
                   </h3>
 
                   <div>
-                    <label className="block text-xs font-semibold text-[#24212B] mb-1">
+                    <label
+                      htmlFor="upload-template-name"
+                      className="block text-xs font-semibold text-[#24212B] mb-1"
+                    >
                       Template Name <span className="text-rose-500">*</span>
                     </label>
                     <Input
+                      id="upload-template-name"
                       type="text"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       placeholder="e.g. Sunday Birthday Celebration Square"
-                      disabled={isWorking}
+                      disabled={isWorking || Boolean(createdTemplateId)}
                     />
                     {fieldErrors.name && (
                       <p className="text-xs text-rose-600 mt-1">{fieldErrors.name}</p>
@@ -387,14 +470,18 @@ export function TemplateUploadModal({
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-semibold text-[#24212B] mb-1">
+                      <label
+                        htmlFor="upload-template-category"
+                        className="block text-xs font-semibold text-[#24212B] mb-1"
+                      >
                         Category
                       </label>
                       <select
+                        id="upload-template-category"
                         value={category}
                         onChange={(e) => setCategory(e.target.value as DesignCategory)}
                         className="w-full h-10 rounded-lg border border-[#E8E5ED] bg-white px-3 text-xs text-[#24212B] focus:border-[#6541A5] focus:outline-none"
-                        disabled={isWorking}
+                        disabled={isWorking || Boolean(createdTemplateId)}
                       >
                         {DESIGN_CATEGORIES.map((cat) => (
                           <option key={cat} value={cat}>
@@ -405,14 +492,20 @@ export function TemplateUploadModal({
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-[#24212B] mb-1">
+                      <label
+                        htmlFor="upload-template-studio"
+                        className="block text-xs font-semibold text-[#24212B] mb-1"
+                      >
                         Authoring Studio
                       </label>
                       <select
+                        id="upload-template-studio"
                         value={studioType}
-                        onChange={(e) => setStudioType(e.target.value as TemplateStudioType)}
+                        onChange={(e) =>
+                          setStudioType(e.target.value as TemplateStudioType)
+                        }
                         className="w-full h-10 rounded-lg border border-[#E8E5ED] bg-white px-3 text-xs text-[#24212B] focus:border-[#6541A5] focus:outline-none"
-                        disabled={isWorking}
+                        disabled={isWorking || Boolean(createdTemplateId)}
                       >
                         {TEMPLATE_STUDIO_TYPES.map((studio) => (
                           <option key={studio} value={studio}>
@@ -424,16 +517,21 @@ export function TemplateUploadModal({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-[#24212B] mb-1">
-                      Description <span className="text-[#77727F] font-normal">(Optional)</span>
+                    <label
+                      htmlFor="upload-template-description"
+                      className="block text-xs font-semibold text-[#24212B] mb-1"
+                    >
+                      Description{' '}
+                      <span className="text-[#77727F] font-normal">(Optional)</span>
                     </label>
                     <textarea
+                      id="upload-template-description"
                       rows={2}
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                       placeholder="Usage context, dimensions, or target platform details..."
                       className="w-full rounded-lg border border-[#E8E5ED] bg-white p-2.5 text-xs text-[#24212B] focus:border-[#6541A5] focus:outline-none"
-                      disabled={isWorking}
+                      disabled={isWorking || Boolean(createdTemplateId)}
                     />
                   </div>
                 </div>
@@ -463,7 +561,9 @@ export function TemplateUploadModal({
                   >
                     <FileText className="h-7 w-7 text-[#6541A5]" />
                     <span className="text-xs font-semibold text-[#6541A5] hover:underline">
-                      {masterFile ? 'Choose a different master file' : 'Browse master file'}
+                      {masterFile
+                        ? 'Choose a different master file'
+                        : 'Browse master file'}
                     </span>
                     <span className="text-[11px] text-[#77727F]">
                       Supported: Photoshop (.psd) or native Affinity (.af, .afphoto, .afdesign, .afpub)
@@ -485,11 +585,41 @@ export function TemplateUploadModal({
                   <p className="text-xs text-rose-600">{fieldErrors.masterFile}</p>
                 )}
 
+                {/* Optional Owner-Supplied Canvas Dimensions */}
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <Input
+                      label="Canvas Width px (Optional)"
+                      type="number"
+                      min={1}
+                      max={30000}
+                      placeholder="e.g. 1080"
+                      value={widthPxInput}
+                      onChange={(e) => setWidthPxInput(e.target.value)}
+                      error={fieldErrors.widthPx}
+                      disabled={isWorking}
+                    />
+                  </div>
+                  <div>
+                    <Input
+                      label="Canvas Height px (Optional)"
+                      type="number"
+                      min={1}
+                      max={30000}
+                      placeholder="e.g. 1350"
+                      value={heightPxInput}
+                      onChange={(e) => setHeightPxInput(e.target.value)}
+                      error={fieldErrors.heightPx}
+                      disabled={isWorking}
+                    />
+                  </div>
+                </div>
+
                 {/* Honest Inspection Limitation Notice */}
                 <div className="flex items-start gap-2 rounded-lg bg-amber-50/80 border border-amber-200 p-2.5 text-[11px] text-amber-900">
                   <Info className="h-3.5 w-3.5 text-amber-700 shrink-0 mt-0.5" />
                   <p>
-                    <strong>Inspection Notice:</strong> Uploaded PSD and native Affinity files require manual layer mapping in Affinity 3.3. Automatic server-side layer parsing is disabled for security and sandboxing safety.
+                    <strong>Inspection Notice:</strong> Uploaded PSD and native Affinity files require manual layer mapping in Affinity 3.3. Automatic server-side layer parsing is disabled for security and sandboxing safety. Uploading a document does not verify live editability.
                   </p>
                 </div>
               </div>
@@ -499,10 +629,12 @@ export function TemplateUploadModal({
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-xs font-semibold uppercase tracking-wider text-[#6541A5]">
-                      {isNewVersion ? '2. Visual Companion Preview' : '3. Visual Companion Preview'}
+                      {isNewVersion
+                        ? '2. Visual Companion Preview'
+                        : '3. Visual Companion Preview'}
                     </h3>
                     <p className="text-[11px] text-[#77727F]">
-                      Highly recommended: A rendered PNG, JPEG, or WebP of this template for web previews.
+                      Highly recommended: A rendered PNG, JPEG, or WebP of this template for private web previews.
                     </p>
                   </div>
                   <span className="text-[11px] text-[#77727F]">Max 10 MB</span>
@@ -523,7 +655,9 @@ export function TemplateUploadModal({
                   >
                     <ImageIcon className="h-5 w-5 text-[#77727F]" />
                     <span className="text-xs font-medium text-[#6541A5] hover:underline">
-                      {previewFile ? 'Change companion preview' : 'Attach preview image (optional)'}
+                      {previewFile
+                        ? 'Change companion preview'
+                        : 'Attach preview image (optional)'}
                     </span>
                   </label>
 

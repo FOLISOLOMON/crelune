@@ -55,8 +55,6 @@ export const NAVIGATION_ITEMS: readonly NavItem[] = [
     label: 'Templates',
     href: APP_ROUTES.TEMPLATES,
     icon: 'file-text',
-    badge: 'Milestone 5',
-    plannedMilestone: 'Milestone 5',
     description: 'Affinity and PSD template catalog with layer field mappings',
   },
   {
