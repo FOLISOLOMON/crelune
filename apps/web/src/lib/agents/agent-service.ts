@@ -1,16 +1,15 @@
 /**
  * CRELUNE — Windows Creative Agent Registration, Heartbeat, Job Claim, Lease Recovery & Asset Streaming Service
  *
- * Implements Stage 5.5 + Stage 5.5.1 hardened backend operations:
- * - Owner agent registration (one-time secret generation, SHA-256 hash persistence) & instant revocation
- * - Explicit per-state recovery policy on lease expiry & agent revocation:
- *   - Auto-recoverable states (`CLAIMED`, `DOWNLOADING_ASSETS`, `OPENING_TEMPLATE`, `EXPORTING`) recover atomically
- *     via PostgreSQL `FOR UPDATE SKIP LOCKED` with claim-token rotation and audit logging.
- *   - `READY_FOR_ARTIST` is NEVER silently reassigned; artist work is preserved and surfaced for explicit owner intervention.
- *   - Terminal states (`EXPORTED`, `FAILED`, `CANCELLED`) are never requeued.
+ * Implements Stage 5.5 + 5.5.1 + 5.5.2 hardened backend operations:
+ * - Canonical Deadlock-Free Lock Order across all database transactions:
+ *     L0: `creative_agents` (`FOR UPDATE` on revocation; `FOR SHARE` on agent claim/status/lease/export)
+ *     L1: `design_jobs` (`FOR UPDATE`, ordered by `id ASC` when multiple)
+ *     L2: `creative_job_dispatches` (`FOR UPDATE`, ordered by `id ASC` when multiple)
+ *     L3: `creative_upload_intents` (atomic conditional consumption)
  * - Mandatory `X-Crelune-Dispatch-Claim` fencing verified in constant time on EVERY dispatch-scoped machine operation
- *   (status updates, lease renewal, template master streaming, asset streaming, export upload intents, and export completion).
- * - Explicit lease renewal (`POST /api/agent/dispatches/[dispatchId]/lease`) extending only a valid unexpired claim.
+ *   AND independently re-verified inside the final atomic export-registration transaction (closing the TOCTOU window).
+ * - Explicit per-state recovery policy on lease expiry & agent revocation (`READY_FOR_ARTIST` preserved for owner intervention).
  * - Strictly manifest-scoped read-only `MEMBER_PHOTO` streaming (`WORKING_ASSET` rejected until Milestone 8).
  */
 
@@ -46,6 +45,15 @@ import {
   type AuthenticatedCreativeAgent,
 } from '@/lib/agents/agent-auth';
 import {
+  CreativeAgentAssetNotFoundError,
+  CreativeAgentClaimError,
+  CreativeAgentForbiddenError,
+  CreativeAgentNotFoundError,
+  CreativeAgentRevokedError,
+  CreativeAgentUnsupportedAssetError,
+  type CreativeAgentClaimErrorCode,
+} from '@/lib/agents/agent-errors';
+import {
   completeExportDeliverableUpload,
   createExportDeliverableUploadIntent,
   DispatchNotFoundError,
@@ -65,59 +73,22 @@ import {
   assertKeyMatchesTemplateMasterScope,
 } from '@/lib/storage/storage-config';
 
+export {
+  CreativeAgentAssetNotFoundError,
+  CreativeAgentClaimError,
+  CreativeAgentForbiddenError,
+  CreativeAgentNotFoundError,
+  CreativeAgentRevokedError,
+  CreativeAgentUnsupportedAssetError,
+  type CreativeAgentClaimErrorCode,
+};
+
 const AGENT_TX_OPTIONS = {
   maxWait: 10_000,
   timeout: 15_000,
 } as const;
 
 export const AGENT_DISPATCH_LEASE_MS = 15 * 60 * 1000; // 15 minutes
-
-export class CreativeAgentNotFoundError extends Error {
-  constructor() {
-    super('Creative agent not found.');
-    this.name = 'CreativeAgentNotFoundError';
-  }
-}
-
-export class CreativeAgentForbiddenError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'CreativeAgentForbiddenError';
-  }
-}
-
-export type CreativeAgentClaimErrorCode =
-  | 'DISPATCH_CLAIM_REQUIRED'
-  | 'DISPATCH_CLAIM_INVALID'
-  | 'DISPATCH_CLAIM_MISMATCH'
-  | 'DISPATCH_LEASE_EXPIRED'
-  | 'DISPATCH_NOT_ASSIGNED';
-
-export class CreativeAgentClaimError extends Error {
-  public readonly code: CreativeAgentClaimErrorCode;
-
-  constructor(message: string, code: CreativeAgentClaimErrorCode) {
-    super(message);
-    this.name = 'CreativeAgentClaimError';
-    this.code = code;
-  }
-}
-
-export class CreativeAgentAssetNotFoundError extends Error {
-  constructor(message: string = 'Authorised asset not found for this dispatch.') {
-    super(message);
-    this.name = 'CreativeAgentAssetNotFoundError';
-  }
-}
-
-export class CreativeAgentUnsupportedAssetError extends Error {
-  constructor(
-    message: string = 'Only MEMBER_PHOTO assets are supported for agent delivery in Milestone 5; general creative working assets are deferred to Milestone 8.'
-  ) {
-    super(message);
-    this.name = 'CreativeAgentUnsupportedAssetError';
-  }
-}
 
 export interface AgentServiceDependencies extends JobPreparationServiceDependencies {
   creativeStorage?: CreativeObjectStorageProvider;
@@ -220,6 +191,44 @@ function mapDispatchRow(
   };
 }
 
+/**
+ * L0 lock helper: acquires `FOR SHARE` on the agent row inside an active
+ * transaction and fails closed with `CreativeAgentRevokedError` (401) if
+ * the agent has been revoked concurrently.
+ */
+async function lockAndVerifyActiveAgentShare(
+  tx: Prisma.TransactionClient,
+  agent: AuthenticatedCreativeAgent
+): Promise<void> {
+  const rows = await tx.$queryRaw<
+    Array<{ id: string; status: string; revoked_at: Date | null }>
+  >`
+    SELECT id, status, revoked_at
+    FROM creative_agents
+    WHERE id = ${agent.id}
+      AND organisation_id = ${agent.organisationId}
+    FOR SHARE
+  `;
+  const row = rows[0];
+  if (!row || row.status !== 'ACTIVE' || row.revoked_at !== null) {
+    throw new CreativeAgentRevokedError();
+  }
+}
+
+async function lookupDispatchParentJobId(
+  organisationId: string,
+  dispatchId: string
+): Promise<string> {
+  const row = await prisma.creativeJobDispatch.findFirst({
+    where: { id: dispatchId, organisationId },
+    select: { designJobId: true },
+  });
+  if (!row) {
+    throw new DispatchNotFoundError();
+  }
+  return row.designJobId;
+}
+
 // =============================================================================
 // OWNER MANAGEMENT OPERATIONS
 // =============================================================================
@@ -285,10 +294,17 @@ export async function revokeCreativeAgent(
   const now = (deps.now ?? (() => new Date()))();
 
   return prisma.$transaction(async (tx) => {
-    const existing = await tx.creativeAgent.findFirst({
-      where: { id: agentId, organisationId: actor.organisationId },
-      select: { id: true, status: true },
-    });
+    // Canonical lock order: L0 (creative_agents FOR UPDATE) -> L1 (design_jobs) -> L2 (creative_job_dispatches)
+    const lockedAgentRows = await tx.$queryRaw<
+      Array<{ id: string; status: string }>
+    >`
+      SELECT id, status
+      FROM creative_agents
+      WHERE id = ${agentId}
+        AND organisation_id = ${actor.organisationId}
+      FOR UPDATE
+    `;
+    const existing = lockedAgentRows[0];
     if (!existing) {
       throw new CreativeAgentNotFoundError();
     }
@@ -304,7 +320,24 @@ export async function revokeCreativeAgent(
       select: AGENT_SUMMARY_SELECT,
     });
 
-    // Lock all active dispatches currently assigned to this agent so concurrent claims/status updates serialize cleanly
+    // L1: Lock affected parent design_jobs in deterministic ascending ID order BEFORE locking dispatches
+    // so the Stage 5.1.2 BEFORE UPDATE OF status trigger on creative_job_dispatches never inverts lock order.
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id
+      FROM design_jobs
+      WHERE organisation_id = ${actor.organisationId}
+        AND id IN (
+          SELECT DISTINCT design_job_id
+          FROM creative_job_dispatches
+          WHERE organisation_id = ${actor.organisationId}
+            AND assigned_agent_id = ${existing.id}
+            AND status IN ('QUEUED', 'CLAIMED', 'DOWNLOADING_ASSETS', 'OPENING_TEMPLATE', 'EXPORTING', 'READY_FOR_ARTIST')
+        )
+      ORDER BY id ASC
+      FOR UPDATE
+    `;
+
+    // L2: Lock all active dispatches currently assigned to this revoked agent in ascending ID order
     const activeDispatches = await tx.$queryRaw<
       Array<{ id: string; design_job_id: string; status: string }>
     >`
@@ -323,7 +356,6 @@ export async function revokeCreativeAgent(
     for (const disp of activeDispatches) {
       if (disp.status === 'READY_FOR_ARTIST') {
         // NEVER silently destroy or reassign artist work in READY_FOR_ARTIST!
-        // Invalidate claim/lease immediately and flag for explicit owner review/recovery.
         await tx.creativeJobDispatch.update({
           where: { id: disp.id },
           data: {
@@ -433,10 +465,8 @@ export async function recordAgentHeartbeat(
 /**
  * Atomically claims the next QUEUED dispatch OR recovers an expired dispatch in
  * an auto-recoverable processing state (`CLAIMED`, `DOWNLOADING_ASSETS`,
- * `OPENING_TEMPLATE`, `EXPORTING`) using PostgreSQL `FOR UPDATE SKIP LOCKED`.
- *
- * `READY_FOR_ARTIST` and terminal states (`EXPORTED`, `FAILED`, `CANCELLED`) are
- * NEVER claimed or overwritten automatically.
+ * `OPENING_TEMPLATE`, `EXPORTING`) using canonical lock order:
+ * L0 (`creative_agents FOR SHARE`) -> L1+L2 (`FOR UPDATE OF j, d SKIP LOCKED`).
  */
 export async function claimNextCreativeDispatch(
   agent: AuthenticatedCreativeAgent,
@@ -456,38 +486,29 @@ export async function claimNextCreativeDispatch(
   const { claimToken, claimTokenHash } = generateDispatchClaimToken();
 
   return prisma.$transaction(async (tx) => {
-    // Re-check agent is still ACTIVE inside the transaction before claiming
-    const activeAgent = await tx.creativeAgent.findFirst({
-      where: {
-        id: agent.id,
-        organisationId: agent.organisationId,
-        status: 'ACTIVE',
-        revokedAt: null,
-      },
-      select: { id: true },
-    });
-    if (!activeAgent) {
-      throw new CreativeAgentForbiddenError(
-        'Creative agent is no longer active and cannot claim dispatches.'
-      );
-    }
+    // L0: Verify agent is still ACTIVE under FOR SHARE
+    await lockAndVerifyActiveAgentShare(tx, agent);
 
+    // L1 + L2: Non-blocking SKIP LOCKED on parent design_jobs (j) and candidate dispatch (d)
     const candidates = await tx.$queryRaw<
       Array<{ id: string; status: string; assigned_agent_id: string | null }>
     >`
-      SELECT id, status, assigned_agent_id
-      FROM creative_job_dispatches
-      WHERE organisation_id = ${agent.organisationId}
+      SELECT d.id, d.status, d.assigned_agent_id
+      FROM creative_job_dispatches d
+      JOIN design_jobs j
+        ON j.id = d.design_job_id
+       AND j.organisation_id = d.organisation_id
+      WHERE d.organisation_id = ${agent.organisationId}
         AND (
-          (status = 'QUEUED' AND (assigned_agent_id IS NULL OR assigned_agent_id = ${agent.id}))
+          (d.status = 'QUEUED' AND (d.assigned_agent_id IS NULL OR d.assigned_agent_id = ${agent.id}))
           OR (
-            status IN ('CLAIMED', 'DOWNLOADING_ASSETS', 'OPENING_TEMPLATE', 'EXPORTING')
-            AND lease_expires_at IS NOT NULL
-            AND lease_expires_at <= ${now}
+            d.status IN ('CLAIMED', 'DOWNLOADING_ASSETS', 'OPENING_TEMPLATE', 'EXPORTING')
+            AND d.lease_expires_at IS NOT NULL
+            AND d.lease_expires_at <= ${now}
           )
         )
-      ORDER BY created_at ASC
-      FOR UPDATE SKIP LOCKED
+      ORDER BY d.created_at ASC
+      FOR UPDATE OF j, d SKIP LOCKED
       LIMIT 1
     `;
 
@@ -623,8 +644,8 @@ async function assertAgentOwnsActiveDispatch(
 
 /**
  * Explicit lease renewal endpoint for long-running active creative work
- * (including `READY_FOR_ARTIST` artist sessions). Extends ONLY the current
- * valid, unexpired lease after verifying agent status and claim fencing token.
+ * (including `READY_FOR_ARTIST` artist sessions).
+ * Canonical lock order: L0 (`creative_agents FOR SHARE`) -> L1 (`design_jobs FOR UPDATE`) -> L2 (`creative_job_dispatches FOR UPDATE`).
  */
 export async function renewAgentDispatchLease(
   agent: AuthenticatedCreativeAgent,
@@ -632,15 +653,36 @@ export async function renewAgentDispatchLease(
   claimToken: string,
   deps: AgentServiceDependencies = {}
 ): Promise<{ dispatch: CreativeJobDispatchSummary; leaseExpiresAt: string }> {
-  const now = (deps.now ?? (() => new Date()))();
-  const nextLease = new Date(now.getTime() + AGENT_DISPATCH_LEASE_MS);
+  if (!claimToken || !isValidDispatchClaimToken(claimToken)) {
+    throw new CreativeAgentClaimError(
+      'Missing or malformed dispatch claim token.',
+      'DISPATCH_CLAIM_INVALID'
+    );
+  }
+
+  const designJobId = await lookupDispatchParentJobId(
+    agent.organisationId,
+    dispatchId
+  );
 
   return prisma.$transaction(async (tx) => {
+    // Canonical lock order: L0 -> L1 -> L2
+    await lockAndVerifyActiveAgentShare(tx, agent);
+
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM design_jobs
+      WHERE id = ${designJobId} AND organisation_id = ${agent.organisationId}
+      FOR UPDATE
+    `;
+
     await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM creative_job_dispatches
       WHERE id = ${dispatchId} AND organisation_id = ${agent.organisationId}
       FOR UPDATE
     `;
+
+    const now = (deps.now ?? (() => new Date()))();
+    const nextLease = new Date(now.getTime() + AGENT_DISPATCH_LEASE_MS);
 
     const dispatch = await assertAgentOwnsActiveDispatch(
       tx,
@@ -684,10 +726,12 @@ export async function updateAgentDispatchStatus(
   input: UpdateCreativeDispatchStatusInput,
   deps: AgentServiceDependencies = {}
 ): Promise<{ dispatch: CreativeJobDispatchSummary; idempotentReplay: boolean }> {
-  const now = (deps.now ?? (() => new Date()))();
-  const nextLease = new Date(now.getTime() + AGENT_DISPATCH_LEASE_MS);
-
-  // If a caller also included a body claimToken, it must never contradict the mandatory header
+  if (!claimToken || !isValidDispatchClaimToken(claimToken)) {
+    throw new CreativeAgentClaimError(
+      'Missing or malformed dispatch claim token.',
+      'DISPATCH_CLAIM_INVALID'
+    );
+  }
   if (input.claimToken && input.claimToken !== claimToken) {
     throw new CreativeAgentClaimError(
       'Body claim token does not match dispatch claim header.',
@@ -695,12 +739,29 @@ export async function updateAgentDispatchStatus(
     );
   }
 
+  const designJobId = await lookupDispatchParentJobId(
+    agent.organisationId,
+    dispatchId
+  );
+
   return prisma.$transaction(async (tx) => {
+    // Canonical lock order: L0 -> L1 -> L2
+    await lockAndVerifyActiveAgentShare(tx, agent);
+
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM design_jobs
+      WHERE id = ${designJobId} AND organisation_id = ${agent.organisationId}
+      FOR UPDATE
+    `;
+
     await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM creative_job_dispatches
       WHERE id = ${dispatchId} AND organisation_id = ${agent.organisationId}
       FOR UPDATE
     `;
+
+    const now = (deps.now ?? (() => new Date()))();
+    const nextLease = new Date(now.getTime() + AGENT_DISPATCH_LEASE_MS);
 
     const dispatch = await assertAgentOwnsActiveDispatch(
       tx,
@@ -924,7 +985,6 @@ export async function streamAgentDispatchAsset(
     );
   }
 
-  // Only MEMBER_PHOTO is supported in Milestone 5; WORKING_ASSET is rejected until Milestone 8.
   if (matchingField.assetReference.assetKind !== 'MEMBER_PHOTO') {
     throw new CreativeAgentUnsupportedAssetError();
   }
@@ -973,14 +1033,35 @@ export async function createAgentExportUploadIntent(
   intent: CreativeUploadIntentSummary;
   upload: PresignedUploadTarget;
 }> {
-  const now = (deps.now ?? (() => new Date()))();
+  if (!claimToken || !isValidDispatchClaimToken(claimToken)) {
+    throw new CreativeAgentClaimError(
+      'Missing or malformed dispatch claim token.',
+      'DISPATCH_CLAIM_INVALID'
+    );
+  }
+
+  const designJobId = await lookupDispatchParentJobId(
+    agent.organisationId,
+    dispatchId
+  );
 
   const dispatch = await prisma.$transaction(async (tx) => {
+    // Canonical lock order: L0 -> L1 -> L2
+    await lockAndVerifyActiveAgentShare(tx, agent);
+
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM design_jobs
+      WHERE id = ${designJobId} AND organisation_id = ${agent.organisationId}
+      FOR UPDATE
+    `;
+
     await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM creative_job_dispatches
       WHERE id = ${dispatchId} AND organisation_id = ${agent.organisationId}
       FOR UPDATE
     `;
+
+    const now = (deps.now ?? (() => new Date()))();
     return assertAgentOwnsActiveDispatch(tx, agent, dispatchId, claimToken, now);
   }, AGENT_TX_OPTIONS);
 
@@ -998,6 +1079,17 @@ export async function createAgentExportUploadIntent(
   );
 }
 
+/**
+ * Completes an agent export upload.
+ *
+ * Performs a lightweight non-mutating preflight to avoid downloading storage
+ * objects for obviously unauthorized callers, then delegates to
+ * `completeExportDeliverableUpload()` with full `claimContext`.
+ *
+ * Authoritative security enforcement occurs INSIDE the final database
+ * transaction of `completeExportDeliverableUpload()` under `L0 -> L1 -> L2 -> L3`
+ * row locks, closing the TOCTOU window between object validation and commit.
+ */
 export async function completeAgentExportUpload(
   agent: AuthenticatedCreativeAgent,
   dispatchId: string,
@@ -1005,7 +1097,7 @@ export async function completeAgentExportUpload(
   input: CreateExportRecordInput,
   deps: AgentServiceDependencies = {}
 ): Promise<{ exportRecord: ExportRecordSummary; idempotentReplay: boolean }> {
-  const now = (deps.now ?? (() => new Date()))();
+  const preflightNow = (deps.now ?? (() => new Date()))();
 
   if (!claimToken || !isValidDispatchClaimToken(claimToken)) {
     throw new CreativeAgentClaimError(
@@ -1014,62 +1106,45 @@ export async function completeAgentExportUpload(
     );
   }
 
-  // Enforce claim fencing atomically under FOR UPDATE.
-  // Supports safe idempotent replay ONLY if the dispatch is already EXPORTED with the
-  // exact same claimTokenHash AND the exact same uploadIntentId already created an ExportRecord.
-  const dispatchInfo = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM creative_job_dispatches
-      WHERE id = ${dispatchId} AND organisation_id = ${agent.organisationId}
-      FOR UPDATE
-    `;
-
-    const dispatch = await tx.creativeJobDispatch.findFirst({
-      where: { id: dispatchId, organisationId: agent.organisationId },
-    });
-    if (!dispatch) {
-      throw new DispatchNotFoundError();
-    }
-
-    if (dispatch.status === 'EXPORTED') {
-      if (
-        dispatch.assignedAgentId !== agent.id ||
-        !dispatch.claimTokenHash ||
-        !constantTimeEqualHex(hashAgentSecret(claimToken), dispatch.claimTokenHash)
-      ) {
-        throw new CreativeAgentClaimError(
-          'Creative job dispatch claim token is stale or does not match the completed claim.',
-          'DISPATCH_CLAIM_MISMATCH'
-        );
-      }
-
-      const existingExport = await tx.exportRecord.findFirst({
-        where: {
-          organisationId: agent.organisationId,
-          designJobId: dispatch.designJobId,
-          dispatchId: dispatch.id,
-          uploadIntentId: input.uploadIntentId,
-          uploadedByAgentId: agent.id,
-        },
-      });
-      if (!existingExport) {
-        throw new JobPreparationConflictError(
-          'Cannot register a new export on an already EXPORTED dispatch.',
-          'DISPATCH_TERMINAL'
-        );
-      }
-      return { id: dispatch.id, designJobId: dispatch.designJobId };
-    }
-
-    const active = await assertAgentOwnsActiveDispatch(
-      tx,
-      agent,
-      dispatchId,
-      claimToken,
-      now
+  // Lightweight preflight only (never relied upon as final authorization)
+  const dispatch = await prisma.creativeJobDispatch.findFirst({
+    where: { id: dispatchId, organisationId: agent.organisationId },
+    select: {
+      id: true,
+      designJobId: true,
+      assignedAgentId: true,
+      status: true,
+      claimTokenHash: true,
+      leaseExpiresAt: true,
+    },
+  });
+  if (!dispatch) {
+    throw new DispatchNotFoundError();
+  }
+  if (dispatch.assignedAgentId !== agent.id) {
+    throw new CreativeAgentClaimError(
+      'Creative job dispatch is not actively assigned to this agent.',
+      'DISPATCH_NOT_ASSIGNED'
     );
-    return { id: active.id, designJobId: active.designJobId };
-  }, AGENT_TX_OPTIONS);
+  }
+  if (
+    !dispatch.claimTokenHash ||
+    !constantTimeEqualHex(hashAgentSecret(claimToken), dispatch.claimTokenHash)
+  ) {
+    throw new CreativeAgentClaimError(
+      'Creative job dispatch claim token is stale or does not match the current lease.',
+      'DISPATCH_CLAIM_MISMATCH'
+    );
+  }
+  if (
+    dispatch.status !== 'EXPORTED' &&
+    (!dispatch.leaseExpiresAt || dispatch.leaseExpiresAt <= preflightNow)
+  ) {
+    throw new CreativeAgentClaimError(
+      'Creative job dispatch lease has expired. Renew or re-claim before continuing.',
+      'DISPATCH_LEASE_EXPIRED'
+    );
+  }
 
   return completeExportDeliverableUpload(
     {
@@ -1078,9 +1153,16 @@ export async function completeAgentExportUpload(
     },
     {
       ...input,
-      designJobId: dispatchInfo.designJobId,
-      dispatchId: dispatchInfo.id,
+      designJobId: dispatch.designJobId,
+      dispatchId: dispatch.id,
     },
-    deps
+    {
+      ...deps,
+      claimContext: {
+        agentId: agent.id,
+        dispatchId: dispatch.id,
+        claimToken,
+      },
+    }
   );
 }

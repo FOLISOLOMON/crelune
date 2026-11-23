@@ -48,6 +48,17 @@ import {
   type TemplateStudioType,
 } from '@crelune/shared';
 import * as auditService from '@/lib/audit/audit-service';
+import {
+  constantTimeEqualHex,
+  hashAgentSecret,
+  isValidDispatchClaimToken,
+} from '@/lib/agents/agent-auth';
+import {
+  CreativeAgentClaimError,
+  CreativeAgentRevokedError,
+  EXPORTABLE_DISPATCH_STATUSES,
+  type AgentClaimVerificationContext,
+} from '@/lib/agents/agent-errors';
 import { loadOwnerBirthdayPreferences } from '@/lib/birthdays/birthday-preferences';
 import {
   DesignJobNotFoundError,
@@ -109,6 +120,17 @@ export class JobPreparationConflictError extends Error {
 export interface JobPreparationServiceDependencies {
   storage?: CreativeObjectStorageProvider;
   now?: () => Date;
+  /**
+   * Optional agent claim verification context enforced atomically inside
+   * the final export-registration database transaction.
+   */
+  claimContext?: AgentClaimVerificationContext;
+  /**
+   * Optional synchronization hook invoked strictly after off-transaction
+   * S3 download/validation and immediately before opening the final
+   * database transaction (used by concurrency race integration tests).
+   */
+  beforeFinalTransaction?: () => Promise<void>;
 }
 
 const MONTH_NAMES = [
@@ -1197,9 +1219,14 @@ export async function cancelCreativeJobDispatch(
   reason?: string | null
 ): Promise<CreativeJobDispatchSummary> {
   return prisma.$transaction(async (tx) => {
+    // Canonical lock order: L1 (design_jobs) -> L2 (creative_job_dispatches)
     await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM design_jobs WHERE id = ${jobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+
+    await tx.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT id FROM creative_job_dispatches WHERE id = ${dispatchId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
 
     const dispatch = await tx.creativeJobDispatch.findFirst({
       where: {
@@ -1252,10 +1279,20 @@ export async function cancelCreativeJobDispatch(
 }
 
 /**
- * Explicit owner recovery action for dispatches held in `READY_FOR_ARTIST`
- * (e.g., after lease expiry or assigned-agent revocation).
- * Preserves local artist working copies (enforced by Windows Creative Agent) and
- * returns the dispatch to `QUEUED` with cleared ownership/claim/lease state.
+ * Concurrency-safe explicit owner recovery action for `READY_FOR_ARTIST`
+ * dispatches that require owner intervention (lease expired OR assigned agent
+ * revoked).
+ *
+ * Canonical lock order: L1 (`design_jobs FOR UPDATE`) -> L2 (`creative_job_dispatches FOR UPDATE`).
+ *
+ * Eligibility invariants (revalidated strictly AFTER acquiring row locks):
+ * - Rejects terminal dispatches (`EXPORTED`, `FAILED`, `CANCELLED`).
+ * - Rejects `QUEUED` dispatches so strictly one concurrent recovery wins.
+ * - Rejects any dispatch with an active, unexpired lease held by a non-revoked agent
+ *   (`DISPATCH_ACTIVE_LEASE_PROTECTED`) so active agent work is never interrupted.
+ * - Rejects non-`READY_FOR_ARTIST` processing states (`CLAIMED`, `DOWNLOADING_ASSETS`,
+ *   `OPENING_TEMPLATE`, `EXPORTING`) which auto-recover via `claimNextCreativeDispatch`.
+ * - Requires explicit `confirmPreserveLocalWork === true`.
  */
 export async function recoverCreativeJobDispatch(
   actor: DesignActorContext,
@@ -1264,13 +1301,25 @@ export async function recoverCreativeJobDispatch(
   input: RecoverCreativeJobDispatchInput,
   deps: JobPreparationServiceDependencies = {}
 ): Promise<CreativeJobDispatchSummary> {
-  const now = (deps.now ?? (() => new Date()))();
+  if (input.confirmPreserveLocalWork !== true) {
+    throw new DesignJobValidationError(
+      'Explicit confirmation to preserve local working copies is required before recovery.'
+    );
+  }
 
   return prisma.$transaction(async (tx) => {
+    // Canonical lock order: L1 (design_jobs) -> L2 (creative_job_dispatches)
     await tx.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM design_jobs WHERE id = ${jobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
 
+    await tx.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT id FROM creative_job_dispatches WHERE id = ${dispatchId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+
+    const now = (deps.now ?? (() => new Date()))();
+
+    // Re-read dispatch strictly AFTER acquiring FOR UPDATE locks
     const dispatch = await tx.creativeJobDispatch.findFirst({
       where: {
         id: dispatchId,
@@ -1279,7 +1328,7 @@ export async function recoverCreativeJobDispatch(
       },
       include: {
         assignedAgent: {
-          select: { status: true },
+          select: { id: true, status: true, revokedAt: true },
         },
       },
     });
@@ -1288,7 +1337,11 @@ export async function recoverCreativeJobDispatch(
     }
 
     const current = dispatch.status as CreativeDispatchStatus;
-    if (current === 'EXPORTED' || current === 'FAILED' || current === 'CANCELLED') {
+    if (
+      current === 'EXPORTED' ||
+      current === 'FAILED' ||
+      current === 'CANCELLED'
+    ) {
       throw new JobPreparationConflictError(
         `Cannot recover a terminal creative dispatch (${current}). Queue a new dispatch instead.`,
         'INVALID_DISPATCH_TRANSITION'
@@ -1296,7 +1349,35 @@ export async function recoverCreativeJobDispatch(
     }
 
     if (current === 'QUEUED') {
-      return mapDispatchSummary(dispatch, now);
+      throw new JobPreparationConflictError(
+        'Creative job dispatch is already queued and does not require owner recovery.',
+        'DISPATCH_NOT_ELIGIBLE_FOR_RECOVERY'
+      );
+    }
+
+    const agentIsRevoked =
+      dispatch.errorCode === 'AGENT_REVOKED_INTERVENTION_REQUIRED' ||
+      Boolean(
+        dispatch.assignedAgent &&
+          (dispatch.assignedAgent.status === 'REVOKED' ||
+            dispatch.assignedAgent.revokedAt !== null)
+      );
+    const leaseIsActiveAndValid = Boolean(
+      dispatch.leaseExpiresAt && dispatch.leaseExpiresAt > now
+    );
+
+    if (leaseIsActiveAndValid && !agentIsRevoked) {
+      throw new JobPreparationConflictError(
+        'Cannot recover a dispatch while an active creative agent holds a valid unexpired lease.',
+        'DISPATCH_ACTIVE_LEASE_PROTECTED'
+      );
+    }
+
+    if (current !== 'READY_FOR_ARTIST') {
+      throw new JobPreparationConflictError(
+        `Dispatch in ${current} state is not eligible for owner-intervention recovery; expired processing dispatches recover automatically on next agent claim.`,
+        'DISPATCH_NOT_ELIGIBLE_FOR_RECOVERY'
+      );
     }
 
     const previousAgentId = dispatch.assignedAgentId;
@@ -1324,6 +1405,7 @@ export async function recoverCreativeJobDispatch(
         previousStatus: current,
         previousAgentId,
         recoveryType: 'OWNER_EXPLICIT_REQUEUE',
+        agentWasRevoked: agentIsRevoked,
         confirmPreserveLocalWork: input.confirmPreserveLocalWork,
       },
     });
@@ -1646,21 +1728,43 @@ export async function completeExportDeliverableUpload(
   deps: JobPreparationServiceDependencies = {}
 ): Promise<{ exportRecord: ExportRecordSummary; idempotentReplay: boolean }> {
   const storage = deps.storage ?? createCreativeObjectStorageProvider();
-  const now = (deps.now ?? (() => new Date()))();
+  const precheckNow = (deps.now ?? (() => new Date()))();
+  const claimContext = deps.claimContext;
 
-  // Check idempotent replay first if uploadIntentId already produced an ExportRecord
-  const existingExport = await prisma.exportRecord.findFirst({
-    where: {
-      organisationId: actor.organisationId,
-      designJobId: input.designJobId,
-      uploadIntentId: input.uploadIntentId,
-    },
-  });
-  if (existingExport) {
-    return {
-      exportRecord: mapExportRecordSummary(existingExport),
-      idempotentReplay: true,
-    };
+  if (claimContext) {
+    if (
+      !claimContext.claimToken ||
+      !isValidDispatchClaimToken(claimContext.claimToken)
+    ) {
+      throw new CreativeAgentClaimError(
+        'Missing or malformed dispatch claim token.',
+        'DISPATCH_CLAIM_INVALID'
+      );
+    }
+    if (actor.agentId && actor.agentId !== claimContext.agentId) {
+      throw new CreativeAgentClaimError(
+        'Agent identity mismatch on export finalization.',
+        'DISPATCH_NOT_ASSIGNED'
+      );
+    }
+  }
+
+  // Non-agent owner path may check existing export idempotency directly before S3 read.
+  // Agent-fenced paths NEVER skip final transactional claim/agent verification.
+  if (!claimContext) {
+    const existingOwnerExport = await prisma.exportRecord.findFirst({
+      where: {
+        organisationId: actor.organisationId,
+        designJobId: input.designJobId,
+        uploadIntentId: input.uploadIntentId,
+      },
+    });
+    if (existingOwnerExport) {
+      return {
+        exportRecord: mapExportRecordSummary(existingOwnerExport),
+        idempotentReplay: true,
+      };
+    }
   }
 
   const intent = await prisma.creativeUploadIntent.findFirst({
@@ -1673,22 +1777,6 @@ export async function completeExportDeliverableUpload(
   if (!intent) {
     throw new DesignJobValidationError('Export upload intent not found.');
   }
-  if (intent.status !== 'PENDING') {
-    throw new JobPreparationConflictError(
-      `Export upload intent is ${intent.status} and cannot be finalized.`,
-      'UPLOAD_INTENT_NOT_REUSABLE'
-    );
-  }
-  if (intent.expiresAt <= now) {
-    await prisma.creativeUploadIntent.update({
-      where: { id: intent.id },
-      data: { status: 'EXPIRED' },
-    });
-    throw new JobPreparationConflictError(
-      'Export upload intent has expired. Request a fresh upload intent.',
-      'UPLOAD_INTENT_EXPIRED'
-    );
-  }
 
   assertKeyMatchesExportDeliverableScope(intent.storageKey, {
     envPrefix: storage.envPrefix,
@@ -1696,116 +1784,296 @@ export async function completeExportDeliverableUpload(
     designJobId: input.designJobId,
   });
 
-  let downloaded: { body: Uint8Array };
-  try {
-    downloaded = await storage.getObjectBounded(
-      intent.storageKey,
-      CREATIVE_BYTE_LIMITS.EXPORT_DELIVERABLE_MAX_BYTES
-    );
-  } catch (err) {
-    await prisma.creativeUploadIntent.update({
-      where: { id: intent.id },
-      data: { status: 'REJECTED', rejectionReason: 'OBJECT_READ_FAILED' },
-    });
-    throw err;
-  }
+  // Off-transaction S3 download, SHA-256 verification, and binary format validation
+  // run ONLY while the intent is still PENDING. If the intent was already VERIFIED,
+  // enter the final transaction directly so winning-claim idempotent replay succeeds
+  // while stale/revoked claims are rejected atomically.
+  let actualBytes: Uint8Array | null = null;
+  let actualSha256: string | null = null;
+  let verifiedDims: { widthPx: number | null; heightPx: number | null } = {
+    widthPx: null,
+    heightPx: null,
+  };
 
-  const actualBytes = downloaded.body;
-  const actualSha256 = crypto
-    .createHash('sha256')
-    .update(actualBytes)
-    .digest('hex');
-
-  if (
-    actualBytes.byteLength !== intent.expectedByteSize ||
-    (intent.expectedSha256 && actualSha256 !== intent.expectedSha256)
-  ) {
-    await prisma.creativeUploadIntent.update({
-      where: { id: intent.id },
-      data: {
-        status: 'REJECTED',
-        verifiedByteSize: actualBytes.byteLength,
-        verifiedSha256: actualSha256,
-        rejectionReason: 'CHECKSUM_OR_SIZE_MISMATCH',
-      },
-    });
-    await storage.deleteObject(intent.storageKey).catch(() => {});
-    throw new DesignJobValidationError(
-      'Uploaded export file size or SHA-256 checksum does not match upload intent.'
-    );
-  }
-
-  let verifiedDims: { widthPx: number | null; heightPx: number | null };
-  try {
-    verifiedDims = await validateExportDeliverableBytes(
-      input.format,
-      actualBytes
-    );
-  } catch (err) {
-    await prisma.creativeUploadIntent.update({
-      where: { id: intent.id },
-      data: {
-        status: 'REJECTED',
-        verifiedByteSize: actualBytes.byteLength,
-        verifiedSha256: actualSha256,
-        rejectionReason: 'INVALID_EXPORT_BINARY',
-      },
-    });
-    await storage.deleteObject(intent.storageKey).catch(() => {});
-    throw err;
-  }
-
-  const createdRecord = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM design_jobs WHERE id = ${input.designJobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
-
-    const job = await tx.designJob.findFirst({
-      where: { id: input.designJobId, organisationId: actor.organisationId },
-      select: { id: true, status: true, exportedAt: true },
-    });
-    if (!job) {
-      throw new DesignJobNotFoundError();
-    }
-
-    const claimed = await tx.creativeUploadIntent.updateMany({
-      where: {
-        id: intent.id,
-        organisationId: actor.organisationId,
-        status: 'PENDING',
-      },
-      data: {
-        status: 'VERIFIED',
-        verifiedByteSize: actualBytes.byteLength,
-        verifiedSha256: actualSha256,
-        verifiedAt: now,
-      },
-    });
-    if (claimed.count !== 1) {
+  if (intent.status === 'PENDING') {
+    if (intent.expiresAt <= precheckNow) {
+      await prisma.creativeUploadIntent.updateMany({
+        where: { id: intent.id, status: 'PENDING' },
+        data: { status: 'EXPIRED' },
+      });
       throw new JobPreparationConflictError(
-        'Export upload intent was already consumed.',
-        'UPLOAD_INTENT_NOT_REUSABLE'
+        'Export upload intent has expired. Request a fresh upload intent.',
+        'UPLOAD_INTENT_EXPIRED'
       );
     }
 
-    if (input.dispatchId) {
-      const dispatch = await tx.creativeJobDispatch.findFirst({
-        where: {
-          id: input.dispatchId,
-          designJobId: job.id,
-          organisationId: actor.organisationId,
-        },
-        select: { id: true, status: true },
+    let downloaded: { body: Uint8Array };
+    try {
+      downloaded = await storage.getObjectBounded(
+        intent.storageKey,
+        CREATIVE_BYTE_LIMITS.EXPORT_DELIVERABLE_MAX_BYTES
+      );
+    } catch (err) {
+      await prisma.creativeUploadIntent.updateMany({
+        where: { id: intent.id, status: 'PENDING' },
+        data: { status: 'REJECTED', rejectionReason: 'OBJECT_READ_FAILED' },
       });
-      if (!dispatch) {
-        throw new DispatchNotFoundError();
+      throw err;
+    }
+
+    actualBytes = downloaded.body;
+    actualSha256 = crypto
+      .createHash('sha256')
+      .update(actualBytes)
+      .digest('hex');
+
+    if (
+      actualBytes.byteLength !== intent.expectedByteSize ||
+      (intent.expectedSha256 && actualSha256 !== intent.expectedSha256)
+    ) {
+      await prisma.creativeUploadIntent.updateMany({
+        where: { id: intent.id, status: 'PENDING' },
+        data: {
+          status: 'REJECTED',
+          verifiedByteSize: actualBytes.byteLength,
+          verifiedSha256: actualSha256,
+          rejectionReason: 'CHECKSUM_OR_SIZE_MISMATCH',
+        },
+      });
+      await storage.deleteObject(intent.storageKey).catch(() => {});
+      throw new DesignJobValidationError(
+        'Uploaded export file size or SHA-256 checksum does not match upload intent.'
+      );
+    }
+
+    try {
+      verifiedDims = await validateExportDeliverableBytes(
+        input.format,
+        actualBytes
+      );
+    } catch (err) {
+      await prisma.creativeUploadIntent.updateMany({
+        where: { id: intent.id, status: 'PENDING' },
+        data: {
+          status: 'REJECTED',
+          verifiedByteSize: actualBytes.byteLength,
+          verifiedSha256: actualSha256,
+          rejectionReason: 'INVALID_EXPORT_BINARY',
+        },
+      });
+      await storage.deleteObject(intent.storageKey).catch(() => {});
+      throw err;
+    }
+  } else if (intent.status !== 'VERIFIED') {
+    throw new JobPreparationConflictError(
+      `Export upload intent is ${intent.status} and cannot be finalized.`,
+      'UPLOAD_INTENT_NOT_REUSABLE'
+    );
+  }
+
+  // Optional deterministic synchronization barrier for concurrency race tests
+  if (deps.beforeFinalTransaction) {
+    await deps.beforeFinalTransaction();
+  }
+
+  // =========================================================================
+  // FINAL ATOMIC DATABASE TRANSACTION
+  // Canonical Lock Order (Deadlock-Free DAG):
+  //   L0: creative_agents (FOR SHARE, if agent claim context)
+  //   L1: design_jobs (FOR UPDATE)
+  //   L2: creative_job_dispatches (FOR UPDATE, if dispatch-scoped)
+  //   L3: creative_upload_intents (atomic conditional update)
+  // =========================================================================
+  const finalized = await prisma.$transaction(
+    async (tx) => {
+      const finalNow = (deps.now ?? (() => new Date()))();
+      const targetDispatchId = claimContext?.dispatchId ?? input.dispatchId ?? null;
+
+      // L0: Revalidate agent is STILL ACTIVE under FOR SHARE (serializes with revokeCreativeAgent)
+      if (claimContext) {
+        const agentRows = await tx.$queryRaw<
+          Array<{ id: string; status: string; revoked_at: Date | null }>
+        >`
+          SELECT id, status, revoked_at
+          FROM creative_agents
+          WHERE id = ${claimContext.agentId}
+            AND organisation_id = ${actor.organisationId}
+          FOR SHARE
+        `;
+        const agentRow = agentRows[0];
+        if (
+          !agentRow ||
+          agentRow.status !== 'ACTIVE' ||
+          agentRow.revoked_at !== null
+        ) {
+          throw new CreativeAgentRevokedError();
+        }
       }
-      if (dispatch.status !== 'EXPORTED') {
+
+      // L1: Lock parent DesignJob
+      await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM design_jobs WHERE id = ${input.designJobId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+
+      const job = await tx.designJob.findFirst({
+        where: { id: input.designJobId, organisationId: actor.organisationId },
+        select: { id: true, status: true, exportedAt: true },
+      });
+      if (!job) {
+        throw new DesignJobNotFoundError();
+      }
+
+      // L2: Lock & independently revalidate dispatch ownership, claim token, lease & exportable state
+      if (targetDispatchId) {
+        await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT id FROM creative_job_dispatches WHERE id = ${targetDispatchId} AND organisation_id = ${actor.organisationId} FOR UPDATE`;
+
+        const dispatch = await tx.creativeJobDispatch.findFirst({
+          where: {
+            id: targetDispatchId,
+            designJobId: job.id,
+            organisationId: actor.organisationId,
+          },
+          select: {
+            id: true,
+            organisationId: true,
+            designJobId: true,
+            assignedAgentId: true,
+            status: true,
+            claimTokenHash: true,
+            leaseExpiresAt: true,
+          },
+        });
+        if (!dispatch) {
+          throw new DispatchNotFoundError();
+        }
+
+        if (claimContext) {
+          if (dispatch.assignedAgentId !== claimContext.agentId) {
+            throw new CreativeAgentClaimError(
+              'Creative job dispatch is no longer assigned to this agent.',
+              'DISPATCH_NOT_ASSIGNED'
+            );
+          }
+          if (
+            !dispatch.claimTokenHash ||
+            !constantTimeEqualHex(
+              hashAgentSecret(claimContext.claimToken),
+              dispatch.claimTokenHash
+            )
+          ) {
+            throw new CreativeAgentClaimError(
+              'Creative job dispatch claim token is stale or does not match the current lease.',
+              'DISPATCH_CLAIM_MISMATCH'
+            );
+          }
+
+          // Exact winning-claim idempotent replay (handles both sequential retries and concurrent duplicates)
+          if (dispatch.status === 'EXPORTED') {
+            const existingAgentExport = await tx.exportRecord.findFirst({
+              where: {
+                organisationId: actor.organisationId,
+                designJobId: job.id,
+                dispatchId: dispatch.id,
+                uploadIntentId: input.uploadIntentId,
+                uploadedByAgentId: claimContext.agentId,
+              },
+            });
+            if (existingAgentExport) {
+              return { record: existingAgentExport, idempotentReplay: true };
+            }
+            throw new JobPreparationConflictError(
+              'Cannot register a new export on an already EXPORTED dispatch.',
+              'DISPATCH_TERMINAL'
+            );
+          }
+
+          if (
+            dispatch.status === 'CANCELLED' ||
+            dispatch.status === 'FAILED'
+          ) {
+            throw new JobPreparationConflictError(
+              `Cannot finalize export on a ${dispatch.status} dispatch.`,
+              'DISPATCH_TERMINAL'
+            );
+          }
+
+          if (
+            !(EXPORTABLE_DISPATCH_STATUSES as readonly string[]).includes(
+              dispatch.status
+            )
+          ) {
+            throw new CreativeAgentClaimError(
+              `Dispatch status ${dispatch.status} is not eligible for export finalization.`,
+              'DISPATCH_NOT_EXPORTABLE'
+            );
+          }
+
+          if (
+            !dispatch.leaseExpiresAt ||
+            dispatch.leaseExpiresAt <= finalNow
+          ) {
+            throw new CreativeAgentClaimError(
+              'Creative job dispatch lease expired before export finalization.',
+              'DISPATCH_LEASE_EXPIRED'
+            );
+          }
+        }
+      }
+
+      // Check concurrent idempotent completion inside the lock (owner or same winning claim)
+      const existingInsideTx = await tx.exportRecord.findFirst({
+        where: {
+          organisationId: actor.organisationId,
+          designJobId: job.id,
+          uploadIntentId: input.uploadIntentId,
+          ...(claimContext
+            ? {
+                dispatchId: targetDispatchId,
+                uploadedByAgentId: claimContext.agentId,
+              }
+            : {}),
+        },
+      });
+      if (existingInsideTx) {
+        return { record: existingInsideTx, idempotentReplay: true };
+      }
+
+      if (!actualBytes || !actualSha256) {
+        throw new JobPreparationConflictError(
+          'Export upload intent was already consumed by another request.',
+          'UPLOAD_INTENT_NOT_REUSABLE'
+        );
+      }
+
+      // L3: Atomically consume PENDING upload intent
+      const claimedIntent = await tx.creativeUploadIntent.updateMany({
+        where: {
+          id: intent.id,
+          organisationId: actor.organisationId,
+          status: 'PENDING',
+        },
+        data: {
+          status: 'VERIFIED',
+          verifiedByteSize: actualBytes.byteLength,
+          verifiedSha256: actualSha256,
+          verifiedAt: finalNow,
+        },
+      });
+      if (claimedIntent.count !== 1) {
+        throw new JobPreparationConflictError(
+          'Export upload intent was already consumed.',
+          'UPLOAD_INTENT_NOT_REUSABLE'
+        );
+      }
+
+      if (targetDispatchId) {
         await tx.creativeJobDispatch.update({
-          where: { id: dispatch.id },
+          where: { id: targetDispatchId },
           data: {
             status: 'EXPORTED',
-            completedAt: now,
+            completedAt: finalNow,
             // Retain claimTokenHash strictly so idempotent export-completion retries
             // from the exact same winning claim remain verifiable while terminal
             // status + cleared leaseExpiresAt block all further active operations.
@@ -1813,91 +2081,92 @@ export async function completeExportDeliverableUpload(
           },
         });
       }
-    }
 
-    // ExportRecord is NEVER approved for publish or published automatically.
-    const record = await tx.exportRecord.create({
-      data: {
+      // ExportRecord is NEVER approved for publish or published automatically.
+      const record = await tx.exportRecord.create({
+        data: {
+          organisationId: actor.organisationId,
+          designJobId: job.id,
+          dispatchId: targetDispatchId,
+          uploadedByAgentId: actor.agentId ?? null,
+          uploadedByUserId: actor.userId ?? null,
+          uploadIntentId: intent.id,
+          format: input.format,
+          storageBucket: intent.storageBucket,
+          storageKey: intent.storageKey,
+          mimeType: intent.expectedMimeType,
+          byteSize: actualBytes.byteLength,
+          sha256: actualSha256,
+          widthPx: verifiedDims.widthPx ?? input.widthPx ?? null,
+          heightPx: verifiedDims.heightPx ?? input.heightPx ?? null,
+          resolutionDpi: input.resolutionDpi ?? null,
+          isApprovedForPublish: false,
+          ownerApprovedAt: null,
+          ownerApprovedByUserId: null,
+          publishedAt: null,
+        },
+      });
+
+      // Advance APPROVED -> EXPORTED (keeping PUBLISHED strictly separate!) or record proof arrival on IN_PROGRESS -> AWAITING_REVIEW
+      const currentStatus = job.status as DesignJobStatus;
+      if (currentStatus === 'APPROVED') {
+        await tx.designJob.update({
+          where: { id: job.id },
+          data: {
+            status: 'EXPORTED',
+            exportedAt: job.exportedAt ?? finalNow,
+          },
+        });
+        await tx.designJobHistory.create({
+          data: {
+            organisationId: actor.organisationId,
+            designJobId: job.id,
+            previousStatus: 'APPROVED',
+            newStatus: 'EXPORTED',
+            note: `Verified ${input.format} deliverable registered (SHA-256 ${actualSha256.slice(0, 12)}...). Publication still requires explicit owner confirmation.`,
+            changedByUserId: actor.userId ?? null,
+          },
+        });
+      } else if (currentStatus === 'IN_PROGRESS') {
+        await tx.designJob.update({
+          where: { id: job.id },
+          data: { status: 'AWAITING_REVIEW' },
+        });
+        await tx.designJobHistory.create({
+          data: {
+            organisationId: actor.organisationId,
+            designJobId: job.id,
+            previousStatus: 'IN_PROGRESS',
+            newStatus: 'AWAITING_REVIEW',
+            note: `Verified ${input.format} deliverable uploaded for owner visual review (SHA-256 ${actualSha256.slice(0, 12)}...).`,
+            changedByUserId: actor.userId ?? null,
+          },
+        });
+      }
+
+      await auditService.recordAuditEvent(tx, {
         organisationId: actor.organisationId,
-        designJobId: job.id,
-        dispatchId: input.dispatchId ?? null,
-        uploadedByAgentId: actor.agentId ?? null,
-        uploadedByUserId: actor.userId ?? null,
-        uploadIntentId: intent.id,
-        format: input.format,
-        storageBucket: intent.storageBucket,
-        storageKey: intent.storageKey,
-        mimeType: intent.expectedMimeType,
-        byteSize: actualBytes.byteLength,
-        sha256: actualSha256,
-        widthPx: verifiedDims.widthPx ?? input.widthPx ?? null,
-        heightPx: verifiedDims.heightPx ?? input.heightPx ?? null,
-        resolutionDpi: input.resolutionDpi ?? null,
-        isApprovedForPublish: false,
-        ownerApprovedAt: null,
-        ownerApprovedByUserId: null,
-        publishedAt: null,
-      },
-    });
-
-    // Advance APPROVED -> EXPORTED (keeping PUBLISHED strictly separate!) or record proof arrival on IN_PROGRESS -> AWAITING_REVIEW
-    const currentStatus = job.status as DesignJobStatus;
-    if (currentStatus === 'APPROVED') {
-      await tx.designJob.update({
-        where: { id: job.id },
-        data: {
-          status: 'EXPORTED',
-          exportedAt: job.exportedAt ?? now,
-        },
-      });
-      await tx.designJobHistory.create({
-        data: {
-          organisationId: actor.organisationId,
+        actorUserId: actor.userId ?? null,
+        action: auditService.AUDIT_ACTIONS.EXPORT_RECORD_CREATED,
+        entityType: 'ExportRecord',
+        entityId: record.id,
+        metadata: {
           designJobId: job.id,
-          previousStatus: 'APPROVED',
-          newStatus: 'EXPORTED',
-          note: `Verified ${input.format} deliverable registered (SHA-256 ${actualSha256.slice(0, 12)}...). Publication still requires explicit owner confirmation.`,
-          changedByUserId: actor.userId ?? null,
+          dispatchId: targetDispatchId,
+          format: input.format,
+          byteSize: actualBytes.byteLength,
+          uploadedByAgent: Boolean(actor.agentId),
         },
       });
-    } else if (currentStatus === 'IN_PROGRESS') {
-      await tx.designJob.update({
-        where: { id: job.id },
-        data: { status: 'AWAITING_REVIEW' },
-      });
-      await tx.designJobHistory.create({
-        data: {
-          organisationId: actor.organisationId,
-          designJobId: job.id,
-          previousStatus: 'IN_PROGRESS',
-          newStatus: 'AWAITING_REVIEW',
-          note: `Verified ${input.format} deliverable uploaded for owner visual review (SHA-256 ${actualSha256.slice(0, 12)}...).`,
-          changedByUserId: actor.userId ?? null,
-        },
-      });
-    }
 
-    await auditService.recordAuditEvent(tx, {
-      organisationId: actor.organisationId,
-      actorUserId: actor.userId ?? null,
-      action: auditService.AUDIT_ACTIONS.EXPORT_RECORD_CREATED,
-      entityType: 'ExportRecord',
-      entityId: record.id,
-      metadata: {
-        designJobId: job.id,
-        dispatchId: input.dispatchId ?? null,
-        format: input.format,
-        byteSize: actualBytes.byteLength,
-        uploadedByAgent: Boolean(actor.agentId),
-      },
-    });
-
-    return record;
-  });
+      return { record, idempotentReplay: false };
+    },
+    { maxWait: 10000, timeout: 15000 }
+  );
 
   return {
-    exportRecord: mapExportRecordSummary(createdRecord),
-    idempotentReplay: false,
+    exportRecord: mapExportRecordSummary(finalized.record),
+    idempotentReplay: finalized.idempotentReplay,
   };
 }
 

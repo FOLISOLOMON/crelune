@@ -49,6 +49,7 @@ import {
   inspectExistingWorkspaces,
   prepareIsolatedJobWorkspace,
   verifyMasterTemplateIntegrity,
+  WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
 } from './workspace/job-workspace.js';
 
 const tempDirsToClean: string[] = [];
@@ -336,7 +337,8 @@ describe('Windows Creative Agent — Real Windows DPAPI Credential & Claim Stora
       expect(await claimStore.loadClaim('dsp_dpapi_1')).toBe(claimToken);
       await claimStore.clearClaim('dsp_dpapi_1');
       expect(await claimStore.loadClaim('dsp_dpapi_1')).toBeNull();
-    }
+    },
+    15_000
   );
 
   it('supports MemoryCredentialStore for isolated non-disk tests', async () => {
@@ -367,7 +369,8 @@ describe('Windows Creative Agent — Live Affinity 3.3 Detection (Read-Only)', (
       expect(report.version).toMatch(/^3\.3\./);
       expect(report.scriptingEnabled).toBe(false);
       expect(report.mcpServerEnabled).toBe(false);
-    }
+    },
+    15_000
   );
 });
 
@@ -473,18 +476,141 @@ describe('Windows Creative Agent — Workspace Preservation, Working Assets, Aff
     ).toBe(0);
     await expect(fs.access(existingExportPath)).resolves.toBeUndefined();
 
-    // 5. Explicit user-confirmed overwrite replaces working copy only when explicitly requested
+    // 5. Explicit overwrite is IMPOSSIBLE without designated user approval path
+    const unapprovedAttempt = await prepareIsolatedJobWorkspace({
+      workspaceRoot,
+      rawManifest: manifest,
+      templateBytes: psdBytes,
+      assets: [],
+      explicitWorkingCopyReplacementApproval: {
+        approvedByUser: true,
+        confirmationToken: WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
+        reason: 'no', // Too short -> rejected!
+      },
+    });
+    expect(unapprovedAttempt.workingCopyStatus).toBe(
+      'PRESERVED_WITH_ARTIST_EDITS'
+    );
+    expect(unapprovedAttempt.workingCopySha256).toBe(artistEditedSha);
+
+    // Valid designated approval path replaces working copy cleanly and logs event
     const explicitlyReplaced = await prepareIsolatedJobWorkspace({
       workspaceRoot,
       rawManifest: manifest,
       templateBytes: psdBytes,
       assets: [],
-      explicitOverwriteWorkingCopy: true,
+      explicitWorkingCopyReplacementApproval: {
+        approvedByUser: true,
+        confirmationToken: WORKING_COPY_REPLACEMENT_CONFIRMATION_TOKEN,
+        reason: 'Artist explicitly confirmed resetting working copy to master.',
+      },
     });
     expect(explicitlyReplaced.workingCopyStatus).toBe(
       'REPLACED_BY_EXPLICIT_USER_ACTION'
     );
     expect(explicitlyReplaced.workingCopySha256).toBe(psdSha);
+    expect(await fs.readFile(explicitlyReplaced.eventLogPath, 'utf8')).toContain(
+      'WORKING_COPY_EXPLICITLY_REPLACED'
+    );
+  });
+
+  it('uses atomic exclusive creation so concurrent preparations never overwrite a working copy, artist edits, source master, or existing exports', async () => {
+    const workspaceRoot = await makeTempDir('crelune-concurrent-ws-');
+    const psdBytes = createSyntheticPsdBytes();
+    const psdSha = computeSha256Hex(psdBytes);
+    const manifest = createValidManifest({
+      designJobId: 'job_race_01',
+      dispatchId: 'dsp_race_01',
+      templateSha256: psdSha,
+    });
+
+    // 1. Two concurrent initial preparations race on a brand-new workspace
+    const [resA, resB] = await Promise.all([
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+    ]);
+
+    const statuses = [resA.workingCopyStatus, resB.workingCopyStatus].sort();
+    expect(statuses).toEqual(['CREATED', 'PRESERVED_UNCHANGED']);
+    expect(resA.masterVerified && resB.masterVerified).toBe(true);
+    // Manifest JSON remains valid and non-truncated under concurrent writes
+    const parsedManifest = JSON.parse(await fs.readFile(resA.manifestPath, 'utf8'));
+    expect(parsedManifest.designJobId).toBe('job_race_01');
+
+    // 2. Artist edits working copy + creates existing export; 4 concurrent retries MUST preserve both!
+    const artistBytes = Buffer.concat([
+      Buffer.from(psdBytes),
+      Buffer.from('CONCURRENT_ARTIST_EDITS_SAFE'),
+    ]);
+    await fs.writeFile(resA.workingCopyPath, artistBytes);
+    const artistSha = computeSha256Hex(artistBytes);
+
+    const exportBytes = createMinimalValidPngBytes(1080, 1350);
+    const existingExportPath = path.join(resA.exportsDir, 'existing-final.png');
+    await fs.writeFile(existingExportPath, exportBytes);
+
+    const concurrentRetries = await Promise.all([
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+      prepareIsolatedJobWorkspace({
+        workspaceRoot,
+        rawManifest: manifest,
+        templateBytes: psdBytes,
+        assets: [],
+      }),
+    ]);
+
+    for (const outcome of concurrentRetries) {
+      expect(outcome.workingCopyStatus).toBe('PRESERVED_WITH_ARTIST_EDITS');
+      expect(outcome.preservedExistingWorkingCopy).toBe(true);
+      expect(outcome.workingCopySha256).toBe(artistSha);
+      expect(outcome.masterVerified).toBe(true);
+      expect(outcome.preservedExistingExports).toEqual(['existing-final.png']);
+    }
+
+    expect(
+      Buffer.compare(await fs.readFile(resA.workingCopyPath), artistBytes)
+    ).toBe(0);
+    expect(
+      (
+        await verifyMasterTemplateIntegrity({
+          masterSourcePath: resA.masterSourcePath,
+          expectedSha256: psdSha,
+        })
+      ).ok
+    ).toBe(true);
+    expect(
+      Buffer.compare(
+        await fs.readFile(existingExportPath),
+        Buffer.from(exportBytes)
+      )
+    ).toBe(0);
   });
 
   it('rejects tampered template downloads and unsupported WORKING_ASSET manifests before touching disk', async () => {

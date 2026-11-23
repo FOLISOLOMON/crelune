@@ -10,8 +10,9 @@ import {
   CreativeAgentClaimError,
   CreativeAgentForbiddenError,
   CreativeAgentNotFoundError,
+  CreativeAgentRevokedError,
   CreativeAgentUnsupportedAssetError,
-} from '@/lib/agents/agent-service';
+} from '@/lib/agents/agent-errors';
 import { DesignJobValidationError } from '@/lib/designs/design-job-service';
 import {
   DispatchNotFoundError,
@@ -70,6 +71,12 @@ export function handleAgentRouteError(
   }
   if (err instanceof CreativeAgentAssetNotFoundError) {
     return agentJsonResponse({ error: err.message }, 404);
+  }
+  if (err instanceof CreativeAgentRevokedError) {
+    return agentJsonResponse(
+      { error: err.message, code: 'AGENT_REVOKED' },
+      401
+    );
   }
   if (err instanceof CreativeAgentClaimError) {
     return agentJsonResponse({ error: err.message, code: err.code }, 403);
