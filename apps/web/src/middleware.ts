@@ -69,12 +69,31 @@ export async function middleware(request: NextRequest) {
   const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const session = await verifySessionTokenEdge(sessionCookie, secretKey);
 
-  // 5. Exact public route matching with method validation
+  // 5. Exact public & machine-authenticated route matching with strict method validation
+  const isAgentMachineRoute =
+    (pathname === '/api/agent/heartbeat' && request.method === 'POST') ||
+    (pathname === '/api/agent/jobs/claim' && request.method === 'POST') ||
+    (request.method === 'POST' &&
+      /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/status$/.test(pathname)) ||
+    (request.method === 'GET' &&
+      /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/template$/.test(pathname)) ||
+    (request.method === 'GET' &&
+      /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/assets\/[a-zA-Z0-9_-]{1,80}$/.test(
+        pathname
+      )) ||
+    (request.method === 'POST' &&
+      /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/exports\/upload-intents$/.test(
+        pathname
+      )) ||
+    (request.method === 'POST' &&
+      /^\/api\/agent\/dispatches\/[a-zA-Z0-9_-]{1,80}\/exports$/.test(pathname));
+
   const isPublicRoute =
     pathname === '/login' ||
     (pathname === '/api/auth/login' && request.method === 'POST') ||
     (pathname === '/api/auth/logout' && request.method === 'POST') ||
-    (pathname === '/api/cron/birthday-reminders' && request.method === 'POST');
+    (pathname === '/api/cron/birthday-reminders' && request.method === 'POST') ||
+    isAgentMachineRoute;
 
   // 6. If already authenticated with valid token signature and accessing login, redirect to dashboard
   if (pathname === '/login') {

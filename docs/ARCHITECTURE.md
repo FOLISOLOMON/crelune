@@ -242,3 +242,19 @@ sequenceDiagram
    - Owners can queue an idempotent, row-locked `CreativeJobDispatch` (`POST /api/designs/[id]/dispatches`) transitioning `DRAFT -> PENDING`, OR operate 100% standalone via authenticated manual downloads (`GET /api/designs/[id]/preparation/manifest`, `GET /api/designs/[id]/preparation/master`, `GET /api/members/[id]/photo`).
 4. **Verified Deliverable Intake (`ExportRecord`)**:
    - Manual and agent exports (`PNG`, `JPEG`, `PDF` up to 50 MB) upload via presigned PUT into `crelune-dev-creative` (`exports/jobs/{designJobId}/...`), undergo magic-byte + `sharp`/PDF verification and SHA-256 matching, and always default to `isApprovedForPublish: false`, `publishedAt: null`, strictly separating `EXPORTED` from `PUBLISHED`.
+
+---
+
+## 10. Stage 5.5 Windows Creative Agent & Outbound Machine API Architecture
+
+1. **Outbound-Only Machine Communication (`apps/agent` -> `apps/web`)**:
+   - The standalone Windows Creative Agent (`@crelune/agent`) opens zero inbound listening ports and never requires inbound firewall access.
+   - All backend traffic flows strictly outbound over HTTPS (loopback HTTP allowed exclusively for local development) using per-machine revocable Bearer tokens (`cln_agent_<64-hex>`) registered and revoked by the owner in Settings (`/settings` -> `/api/agents`).
+   - [`middleware.ts`](file:///d:/Projects/Crelune/apps/web/src/middleware.ts) explicitly allowlists ONLY the 7 exact `/api/agent/*` path+method pairs for Bearer auth while keeping `/api/agents/**` behind standard owner session + CSRF enforcement.
+2. **Atomic Dispatch Claiming & Lease Recovery**:
+   - `POST /api/agent/jobs/claim` claims queued or lease-expired dispatches atomically via PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED`, issuing a short-lived hashed `claimToken` and 15-minute lease.
+   - Revoking an agent immediately invalidates its Bearer token (`401`) and releases any `CLAIMED`/`DOWNLOADING_ASSETS` dispatches back to `QUEUED`.
+3. **Isolated Local Workspaces & Truthful Affinity 3.3 Integration**:
+   - Each job is materialized strictly within `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/` with path-traversal/junction rejection and SHA-256 verification.
+   - Original template masters in `source/` are marked read-only and verified before and after every creative action; artists edit only disposable working copies in `working/`.
+   - Verified against installed Affinity `3.3.3.5004` (`Canva.Affinity_3.3.3.5004_x64__8a0j1tnjnt4a4`): Scripting and MCP remain disabled by default and untouched. Interactive launch of allowlisted `%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe` requires explicit user approval (`ASSISTED` mode), falling back cleanly to `MANUAL` mode without breaking job completion or verified export submission.

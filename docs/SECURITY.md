@@ -283,3 +283,21 @@ Implemented in Milestone 2.1.2:
    - Failed verifications mark the intent `REJECTED`, enqueue `CreativeStorageCleanup`, delete the orphan object, and sanitize all HTTP error responses and `AuditLog` entries so storage keys, signed URLs, and AWS credentials never leak.
    - `abandonUploadIntent` preserves `expiresAt` and enqueues `CreativeStorageCleanup` whose final `'COMPLETED'` sweep is deferred until `expiresAt + CREATIVE_CLEANUP_EXPIRY_GRACE_MS` (`60s`) so late in-flight presigned PUTs cannot escape cleanup; `cleanupPendingCreativeStorage` verifies no active `TemplateVersion` or `ExportRecord` references a key before deletion (`REJECTED` otherwise).
    - `GET /api/templates/[id]/versions/[versionId]/preview` streams private preview bytes with `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, and `X-Robots-Tag: noindex, nofollow, noarchive`.
+
+---
+
+## 13. Milestone 5 Stages 5.4–5.5 Job Preparation, Windows Creative Agent & Credential Security
+
+1. **Secret-Free Job Manifests (`Stage 5.4`)**:
+   - Every `JobPrepManifest` persisted on `CreativeJobDispatch.manifestJson` and downloadable by the owner or claimed agent passes `jobPrepManifestSchema` and `containsForbiddenManifestSecret()`, rejecting database URLs, AWS/S3 credentials, presigned URL query signatures, Bearer tokens, session secrets, and absolute filesystem paths.
+2. **Per-Machine Revocable Agent Credentials & Windows DPAPI (`Stage 5.5`)**:
+   - Owner-registered agent tokens (`cln_agent_<64-hex>`) are revealed exactly once on creation and persisted in PostgreSQL exclusively as SHA-256 hashes (`CreativeAgent.tokenHash`).
+   - [`verifyAgentBearerRequest`](file:///d:/Projects/Crelune/apps/web/src/lib/agents/agent-auth.ts) uses constant-time hash comparison, rejects query-string tokens, and returns `401` (`Cache-Control: private, no-store`) immediately upon revocation.
+   - On Windows, [`WindowsDpapiCredentialStore`](file:///d:/Projects/Crelune/apps/agent/src/security/dpapi-store.ts) protects the Bearer token via Windows DPAPI (`System.Security.Cryptography.ProtectedData`, `DataProtectionScope.CurrentUser`) over stdin/stdout with `execFile(..., { shell: false })` — plaintext secrets are never written to disk or passed in CLI arguments.
+3. **Filesystem Containment, Process Allowlisting & Read-Only Asset Scoping (`Stage 5.5`)**:
+   - [`path-safety.ts`](file:///d:/Projects/Crelune/apps/agent/src/security/path-safety.ts) blocks directory traversal (`..`), absolute/drive/UNC paths, null bytes, and Windows symlink/junction escapes outside `<workspaceRoot>/jobs/<jobId>/`.
+   - [`affinity-adapter.ts`](file:///d:/Projects/Crelune/apps/agent/src/affinity/affinity-adapter.ts) never executes remote shell commands, allowlists ONLY `%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe` with `shell: false`, gates interactive launch behind explicit user approval, keeps Affinity MCP disabled by default (loopback-only if opted in), and never modifies global `ScriptingPreferences.xml` or `MCPPreferences.xml`.
+   - `GET /api/agent/dispatches/[dispatchId]/assets/[assetId]` strictly enforces that `assetId` appears in the claimed dispatch's `manifestJson` and performs read-only reads on member photo storage.
+4. **Sanitized Diagnostics & Export/Publication Separation**:
+   - [`logger.ts`](file:///d:/Projects/Crelune/apps/agent/src/security/logger.ts) strips Bearer tokens, `cln_agent_*`/`clm_*` secrets, presigned query signatures, and Postgres URLs from logs and workspace `events.jsonl`.
+   - Export registration (`POST /api/designs/[id]/exports` and `POST /api/agent/dispatches/[dispatchId]/exports`) verifies file signatures, dimensions, and SHA-256 digests and enforces `isApprovedForPublish: false`, `publishedAt: null` so exporting never implies publication.

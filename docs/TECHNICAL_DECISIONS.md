@@ -218,3 +218,32 @@ An independent code review identified three integrity gaps across the Stage 3.6 
 
 - Strong concurrency correctness and atomic multi-table reconciliation on PostgreSQL without requiring destructive DDL migrations on production or brittle composite unique constraints on nullable/cancelled columns.
 - Zero interference with non-birthday creative workflows or historical preparation states.
+
+---
+
+## ADR 015 — Exact Template Version Pinning, Standalone Manual Fallback & Windows Creative Agent Architecture
+
+- **Date**: 2026-11-23
+- **Status**: Accepted (Supersedes contingent status of Decision C / ADR 008 for Milestone 5)
+- **Scope**: Milestone 5 Stages 5.4 & 5.5 (`@crelune/shared`, `apps/web`, `apps/agent`)
+
+### Context
+
+Live workstation verification on 2026-11-23 confirmed Affinity MSIX package `Canva.Affinity_3.3.3.5004_x64__8a0j1tnjnt4a4` installed with App Execution Alias `%LOCALAPPDATA%\Microsoft\WindowsApps\Affinity.exe`, while both `ScriptingPreferences.xml` (`ScriptingEnabled=False`) and `MCPPreferences.xml` (`EnableMCPServer=False`) remain disabled by default. Neither an official headless Affinity scripting CLI nor safe automatic PSD layer editing exists for production automation.
+
+### Decisions
+
+1. **Exact Immutable Version Pinning (`Stage 5.4`)**:
+   - Binding a template to a `DesignJob` pins an exact `TemplateVersion` (`templateVersionId`), protected by both application validation and Stage 5.1.2 PostgreSQL `FOR NO KEY UPDATE` consistency triggers. Updating a template's active version never alters existing pinned jobs, and active dispatches lock template rebinding (`409 TEMPLATE_LOCKED_BY_ACTIVE_DISPATCH`).
+2. **Dual Execution Architecture: Agent Queue + Standalone Manual Fallback**:
+   - CRELUNE Web exposes both an idempotent dispatch queue for the Windows Creative Agent and complete standalone manual endpoints (`manifest`, SHA-256-verified `master`, private member photo, and manual verified export upload) so creative work never depends on the local agent running.
+3. **Outbound-Only Windows Creative Agent with Windows DPAPI (`Stage 5.5`)**:
+   - `@crelune/agent` operates strictly outbound over HTTPS using revocable per-machine Bearer tokens stored exclusively via Windows DPAPI (`CurrentUser` scope) on disk and SHA-256 hashed in PostgreSQL.
+   - Dispatches are claimed atomically via `FOR UPDATE SKIP LOCKED` with lease expiration and instant revocation cleanup.
+4. **Truthful Assisted/Manual Affinity Handoff**:
+   - The agent isolates each job in `<workspaceRoot>/jobs/<jobId>/{source,working,assets,exports,logs}/`, marks `source/` masters read-only with pre/post SHA-256 checks, gates launching allowlisted `Affinity.exe` on the `working/` copy behind explicit user approval (`ASSISTED`), and records `MANUAL` whenever launch is declined or unavailable. Global Affinity Scripting/MCP preferences are never modified; any future MCP bridge remains strictly opt-in and loopback-only.
+
+### Consequences
+
+- Preserves 100% template immutability, zero unverified automation claims, and reliable day-to-day creative production on Windows 11 with Affinity 3.3.3.5004.
+- Maintains a clean seam to introduce verified MCP or scripting tools later without breaking existing schemas, manifests, or security invariants.

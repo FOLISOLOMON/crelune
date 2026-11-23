@@ -14,6 +14,8 @@ import {
 import { Shield, Database, User, Sliders } from 'lucide-react';
 import { SessionRevokedNotice } from '@/components/auth/SessionRevokedNotice';
 import { BirthdayPreferencesCard } from '@/components/settings/BirthdayPreferencesCard';
+import { CreativeAgentsCard } from '@/components/settings/CreativeAgentsCard';
+import { listCreativeAgents } from '@/lib/agents/agent-service';
 import { loadOwnerBirthdayPreferences } from '@/lib/birthdays/birthday-preferences';
 
 export const dynamic = 'force-dynamic';
@@ -30,20 +32,24 @@ export default async function SettingsPage() {
   }
 
   const { profile, preferences } = auth.owner;
-  const [dbHealth, birthdayPreferences] = await Promise.all([
+  const [dbHealth, birthdayPreferences, registeredAgents] = await Promise.all([
     checkDatabaseConnection(),
     loadOwnerBirthdayPreferences(prisma, profile.id),
+    listCreativeAgents(profile.organisationId),
   ]);
 
   return (
     <div className="space-y-6">
       <Header
         title="Settings & Workspace Configuration"
-        description="Owner profile, infrastructure status, birthday scheduling rules, and application preferences"
+        description="Owner profile, infrastructure status, birthday scheduling rules, Windows Creative Agents, and application preferences"
       />
 
       {/* Interactive Birthday & Reminder Preferences */}
       <BirthdayPreferencesCard initialPreferences={birthdayPreferences} />
+
+      {/* Windows Creative Agents Pairing & Revocation */}
+      <CreativeAgentsCard initialAgents={registeredAgents} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Owner Profile Card */}

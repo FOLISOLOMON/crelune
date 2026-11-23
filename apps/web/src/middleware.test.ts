@@ -146,6 +146,35 @@ describe('Middleware Route Protection & Edge Security (Milestone 2.1 & 2.1.1)', 
       );
       expect(notifGet.status).toBe(401);
     });
+
+    it('passes exact /api/agent/* machine routes through to Bearer verification while blocking wrong methods and dotted/unknown paths', async () => {
+      const allowedCases: Array<[string, string]> = [
+        ['/api/agent/heartbeat', 'POST'],
+        ['/api/agent/jobs/claim', 'POST'],
+        ['/api/agent/dispatches/disp_abc123/status', 'POST'],
+        ['/api/agent/dispatches/disp_abc123/template', 'GET'],
+        ['/api/agent/dispatches/disp_abc123/assets/mem_123', 'GET'],
+        ['/api/agent/dispatches/disp_abc123/exports/upload-intents', 'POST'],
+        ['/api/agent/dispatches/disp_abc123/exports', 'POST'],
+      ];
+      for (const [path, method] of allowedCases) {
+        const res = await middleware(createMockRequest(path, { method }));
+        expect(res.status).toBe(200);
+      }
+
+      const blockedCases: Array<[string, string]> = [
+        ['/api/agent/heartbeat', 'GET'],
+        ['/api/agent/jobs/claim', 'GET'],
+        ['/api/agent/dispatches/disp_abc123/template', 'POST'],
+        ['/api/agent/dispatches/disp.evil/template', 'GET'],
+        ['/api/agent/secrets.json', 'GET'],
+        ['/api/agents', 'GET'],
+      ];
+      for (const [path, method] of blockedCases) {
+        const res = await middleware(createMockRequest(path, { method }));
+        expect(res.status).toBe(401);
+      }
+    });
   });
 
   describe('Protected Pages Redirection', () => {
