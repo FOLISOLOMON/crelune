@@ -1,0 +1,61 @@
+{
+  "name": "@crelune/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild:ios": "expo prebuild --platform ios --no-install",
+    "prebuild:android": "expo prebuild --platform android --no-install",
+    "config:verify": "expo config --type introspect --json",
+    "export:verify": "expo export --platform android --platform ios --output-dir .expo-export-check",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint \"app/**/*.{ts,tsx}\" \"src/**/*.{ts,tsx}\" app.config.ts",
+    "test": "jest --watchAll=false"
+  },
+  "dependencies": {
+    "@crelune/shared": "*",
+    "@crelune/ui": "*",
+    "@react-native-community/netinfo": "12.0.1",
+    "@tanstack/react-query": "^5.108.4",
+    "expo": "~58.0.26",
+    "expo-application": "~58.1.2",
+    "expo-constants": "~58.0.16",
+    "expo-crypto": "~58.0.8",
+    "expo-dev-client": "~58.0.21",
+    "expo-device": "~58.0.5",
+    "expo-font": "~58.0.12",
+    "expo-haptics": "~58.0.8",
+    "expo-image": "~58.0.18",
+    "expo-linking": "~58.0.17",
+    "expo-router": "~58.0.32",
+    "expo-secure-store": "~58.0.3",
+    "expo-splash-screen": "~58.0.14",
+    "expo-status-bar": "~58.0.5",
+    "lucide-react-native": "^1.78.0",
+    "react": "19.3.1",
+    "react-native": "0.88.1",
+    "react-native-gesture-handler": "~3.3.0",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-screens": "~4.30.1",
+    "react-native-svg": "15.16.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@testing-library/react-native": "^14.1.0",
+    "@types/jest": "^30.0.0",
+    "@types/react": "^19.1.1",
+    "eslint": "^8.57.1",
+    "eslint-config-expo": "~58.0.4",
+    "jest": "^30.0.0",
+    "jest-expo": "~58.0.15",
+    "typescript": "^5.7.3"
+  },
+  "expo": {
+    "install": {
+      "exclude": ["react", "typescript"]
+    }
+  }
+}

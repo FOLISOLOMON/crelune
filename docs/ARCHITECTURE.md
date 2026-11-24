@@ -11,11 +11,11 @@
 ## 1. Executive Architectural Summary
 
 > [!IMPORTANT]
-> **Implementation Status: Milestones 0–5 Complete; Milestone 6 Stage 6.1 Mobile Auth & Backend Complete**
+> **Implementation Status: Milestones 0–5 Complete; Milestone 6 Stages 6.1–6.2 Implemented**
 >
-> Through Milestone 6 Stage 6.1, CRELUNE Web (`apps/web`), Windows Creative Agent (`apps/agent`), shared domain packages (`@crelune/shared`, `@crelune/ui`, `@crelune/database`), Neon Lakebase Postgres persistence, and Stage 6.1 mobile authentication/device-session APIs are **IMPLEMENTED**.
+> Through Milestone 6 Stage 6.2, CRELUNE Web (`apps/web`), Windows Creative Agent (`apps/agent`), CRELUNE Mobile native foundation (`apps/mobile` — Expo SDK 58 + Expo Router + SecureStore + single-flight refresh client + 5-tab shell with live Home), shared domain packages (`@crelune/shared`, `@crelune/ui`, `@crelune/database`), and Neon Lakebase Postgres persistence are **IMPLEMENTED**.
 >
-> The native mobile client (`apps/mobile`, Stages 6.2–6.7), Programmes & Events (Milestone 7), and Asset Library (Milestone 8) remain scheduled sequentially according to the Development Roadmap.
+> Mobile operational modules (Stages 6.3–6.7), Programmes & Events (Milestone 7), and Asset Library (Milestone 8) remain scheduled sequentially according to the Development Roadmap.
 
 CRELUNE (*kreh-LOON*) is a personal creative and media operations platform designed for a single owner/operator (church media lead and graphic designer). The proposed architecture coordinates three distinct clients through a single unified backend and canonical PostgreSQL database:
 
@@ -278,3 +278,15 @@ sequenceDiagram
    - `GET /api/dashboard` wraps [`getDashboardSnapshot`](file:///d:/Projects/Crelune/apps/web/src/lib/dashboard/dashboard-service.ts) (batched into two bounded query waves for serverless pooler resilience) for authenticated owners.
    - `GET/PATCH /api/settings/notifications` reads and updates `UserPreference` push toggles (`pushNotificationsEnabled`, `pushBirthdayReminders`, `pushDesignUpdates`) with transactional `AuditLog` tracking.
    - Web Settings (`/settings`) renders [`MobileDevicesCard`](file:///d:/Projects/Crelune/apps/web/src/components/settings/MobileDevicesCard.tsx) for owner visibility and immediate single-device revocation; `@crelune/ui/colors` exports React-Native-safe color tokens without DOM dependencies.
+
+---
+
+## 12. Milestone 6 Stage 6.2 Native Mobile Application Foundation (`apps/mobile`)
+
+1. **Workspace & Monorepo Isolation:**
+   - [`apps/mobile`](file:///d:/Projects/Crelune/apps/mobile) (`@crelune/mobile`) runs on Expo SDK 58 (`expo@~58.0.26`), React Native `0.88.1` (New Architecture), React `19.3.1`, TypeScript, and Expo Router (`expo-router@~58.0.32`) with zero WebViews and zero direct database/S3 access.
+   - [`metro.config.js`](file:///d:/Projects/Crelune/apps/mobile/metro.config.js) resolves `@crelune/shared` and `@crelune/ui/colors` across npm workspaces while explicitly blocking `@crelune/database`, `@prisma/client`, `apps/web`, and `apps/agent`.
+2. **Application-Wide Single-Flight Session & API Layer:**
+   - [`session-manager.ts`](file:///d:/Projects/Crelune/apps/mobile/src/auth/session-manager.ts) and [`client.ts`](file:///d:/Projects/Crelune/apps/mobile/src/api/client.ts) enforce one shared `refreshInFlightPromise` across proactive pre-expiry refresh, reactive `401` handling, `AppState` foreground resume, and React Query; stale-token generation checks; at-most-once retries; persist-before-release `expo-secure-store` ordering; and clean separation between terminal auth failures (wiping SecureStore, React Query cache, and `expo-image` memory cache with single-shot login redirect) and temporary network/timeout/`5xx` failures.
+3. **5-Tab Native Shell & Honest Roadmap Boundaries:**
+   - Native Expo Router tabs (`Home`, `Calendar`, `Designs`, `Members`, `More`) render live `GET /api/dashboard` data on `Home`, live owner profile/session info and Sign Out on `More`, and honest roadmap placeholders on `Calendar` (Stage 6.4 / M7), `Designs` (Stage 6.5), and `Members` (Stage 6.3).

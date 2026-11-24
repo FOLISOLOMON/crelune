@@ -4,8 +4,9 @@
 **Project:** CRELUNE  
 **Milestone:** Milestone 6 — Mobile Application (Stage 6.1 Backend & Shared Preparation)  
 **Baseline Commit:** `f9b1b5a63eeab2310098e53caf6c215e7d516ca9`  
+**Final Stage 6.1 Commit:** `9437b31f6a2b83b1f58f4c14e2c4bae8bdd4fc61`  
 **Branch:** `main`  
-**Status:** Stage 6.1 Implemented & Verified (Stages 6.2–6.7 Not Started)
+**Status:** Stage 6.1 Accepted & Closed (Final M3–M5 PostgreSQL Regression Verified)
 
 ---
 
@@ -87,7 +88,7 @@ Stage 6.1 delivers strictly the backend, database, shared contract, and Web Sett
 | Production build (5 workspaces) | `cmd /c "npm run build"` | `PASS` (Next.js `15.5.29` compiled all routes incl. `/api/dashboard`, `/api/mobile/**`, `/api/settings/notifications`, Middleware `66.5 kB` + `tsc -b`) |
 | Neon `development` schema drift | `prisma migrate diff --from-url $DATABASE_URL_UNPOOLED --to-schema-datamodel packages/database/prisma/schema.prisma --script` | `PASS` (`-- This is an empty migration.`) |
 | Neon `development` Stage 6.1 & Auth PG tests | `node -r dotenv/config node_modules/vitest/vitest.mjs run --root apps/web --no-file-parallelism --testTimeout=120000 --hookTimeout=45000 src/test/stage61-mobile-auth.pg.integration.test.ts src/lib/auth/rate-limit.pg.integration.test.ts dotenv_config_path=.env.local` | `PASS` (`2` files, `8` tests passed: `3` Stage 6.1 PG tests + `5` `auth_throttles` PG tests) |
-| Legacy M3–M5 PG integration suites | `npm run test:integration:db` (other non-Stage-6.1 `*.pg.integration.test.ts` files) | `NOT RUN` in Stage 6.1 (unrelated M3–M5 tables/triggers verified intact via `pg_trigger` and unit/route regression suites) |
+| Full M2–M6.1 Neon `development` PG regression | `cmd /c "npm run test:integration:db"` (+ targeted re-run of `rate-limit.pg.integration.test.ts`) | `PASS` (All `11` M3–M5 suites `52/52` + Stage 6.1 `3/3` passed on first run; `2` transient Neon pooler TCP disconnects in `rate-limit.pg.integration.test.ts` confirmed `5/5 PASS` on targeted re-run; exact pre/post counts & S3 hygiene verified clean) |
 | Mobile runtime / Android / iOS | `apps/mobile` tests & device checks | `NOT APPLICABLE` (Stage 6.2+ scope; `apps/mobile` not scaffolded yet) |
 
 ---

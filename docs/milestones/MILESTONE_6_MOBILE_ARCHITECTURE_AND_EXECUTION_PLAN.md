@@ -411,7 +411,12 @@ Only changes directly required for secure native mobile auth, push delivery, and
 - **Scope:**
   - Initialize `apps/mobile` (`app.config.ts`, `eas.json`, `metro.config.js`, `tsconfig.json`, Jest + `@testing-library/react-native` config).
   - Build `src/theme/` consuming `@crelune/ui/colors` with numeric RN typography, spacing, radii, and accessible touch targets (`>= 44pt` / `48dp`).
-  - Implement `src/api/client.ts` (strict HTTPS enforcement in release, Zod response parsing, single-flight refresh mutex, `NetInfo` offline detection) and `src/auth/` (`expo-secure-store`, login/logout, session hydration, logout cache purge).
+  - Implement `src/api/client.ts` (strict HTTPS enforcement in release, Zod response parsing, single-flight refresh mutex, `NetInfo` offline detection) and `src/auth/` (`expo-secure-store`, login/logout, session hydration, logout cache purge) satisfying all five mandatory refresh-token concurrency rules:
+    - **A. Single-flight refresh:** One application-wide `refreshInFlightPromise` shared across proactive pre-expiry refresh, reactive `401` handling, foreground resume, and React Query retries.
+    - **B. Stale access-token protection:** Each request tracks its sent token and credential generation so `401` responses from stale tokens reuse an already-rotated active token without triggering duplicate refresh rotation.
+    - **C. Concurrent waiters & at-most-once retries:** Waiting callers share one refresh promise, retry at most once, and reject cleanly on refresh failure or concurrent logout.
+    - **D. Persist-before-release ordering:** Newly rotated access/refresh tokens persist to SecureStore before mutating in-memory credentials, resolving `refreshInFlightPromise`, or releasing waiters; SecureStore write failures fail closed and wipe inconsistent auth state.
+    - **E. Failure recovery & lost refresh response:** Terminal auth errors (`SESSION_EXPIRED`, `DEVICE_REVOKED`, `REFRESH_TOKEN_REUSE_DETECTED`, `INVALID_REFRESH_TOKEN`) wipe SecureStore, query/read caches, and private image memory cache and redirect once to `/(auth)/login` with an explanatory message; temporary network/timeout/`5xx` errors preserve credentials without forced sign-out; lost refresh responses recover deterministically via server `REFRESH_TOKEN_REUSE_DETECTED` on reconnect.
   - Implement `(auth)/login.tsx` and the 5 native bottom tabs (`Home`, `Calendar`, `Designs`, `Members`, `More`) with live `Home` wired to `GET /api/dashboard` and live `More` sign-out/account section.
 - **Expected Files / Packages:** `apps/mobile/**`, root `package-lock.json` (workspace install).
 - **API / Database Impact:** None (consumes Stage 6.1 APIs).

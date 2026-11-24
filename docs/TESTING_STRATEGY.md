@@ -383,6 +383,29 @@ Verified for Stage 6.1 against local workspaces and Neon `development` (`br-name
    - `pg_constraint` / `pg_trigger` verified all 3 `chk_mobile_sessions_*` CHECK constraints and all 3 Milestone 5.1.2 triggers active (`PASS`).
    - Executed [`stage61-mobile-auth.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/test/stage61-mobile-auth.pg.integration.test.ts) (`3` tests) and [`rate-limit.pg.integration.test.ts`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/rate-limit.pg.integration.test.ts) (`5` tests) against Neon `development` (`2` files, `8` tests passed, `0` failed), proving live PostgreSQL CHECK constraint rejections (`23514`), SHA-256-only refresh storage, unified Mobile Bearer + Web Cookie/CSRF behavior across `/api/dashboard`, `/api/members`, and `/api/auth/me`, concurrent single-winner refresh rotation with committed entire-family replay revocation, hard 30-day `familyExpiresAt` expiry, independent single-device revocation, cross-organisation `404` isolation, logout push-token clearing, and `User.sessionVersion` global revocation.
    - Post-test Neon `development` hygiene confirmed `0` residual synthetic `__pg*` records and `0` leftover mobile/throttle rows while preserving existing workspace state (`1` organisation, `1` owner user). Neon `production` untouched.
-4. **Checks Not Executed in Stage 6.1**:
-   - Mobile client (`apps/mobile`) Jest/Expo/Android/iOS runtime checks: `NOT APPLICABLE` (Stage 6.2+ not started).
-   - Non-Stage-6.1 legacy M3–M5 PostgreSQL integration files under `npm run test:integration:db`: `NOT RUN` individually in Stage 6.1 (covered by unit/route suites plus verified intact triggers).
+4. **Final Stage 6.1 M3–M5 PostgreSQL Regression Verification**:
+   - Executed `cmd /c "npm run test:integration:db"` (`13` suites, `60` tests) against Neon `development` (`br-nameless-silence-bexjp44k`): all `11` M3–M5 suites (`52/52` tests) and Stage 6.1 (`3/3` tests) passed on first run; `2` transient Neon pooler TCP disconnects in `rate-limit.pg.integration.test.ts` were confirmed `5/5 PASS` on targeted re-run; exact pre/post row counts across all 20 tables and S3 buckets verified clean with Neon `production` untouched.
+
+---
+
+## 17. Milestone 6, Stage 6.2 Testing Evidence (Native Mobile Application Foundation)
+
+Verified for Stage 6.2 (`apps/mobile`, `@crelune/mobile`):
+1. **TypeScript, ESLint, Expo Doctor & Monorepo Regression**:
+   - `cmd /c "npm run type-check"` (`6` workspaces incl. `@crelune/mobile`): `PASS` (`0` errors).
+   - `cmd /c "npm run lint"` (`@crelune/mobile` + `@crelune/web`): `PASS` (`0` warnings / `0` errors).
+   - `npx --yes expo-doctor` (in `apps/mobile`): `PASS` (`20/20 checks passed`).
+   - Full workspace unit/route tests + production build: `@crelune/mobile` (`3` files, `22` tests `PASS`), `@crelune/web` (`31` files, `223` tests `PASS`), `@crelune/shared` (`9` files, `57` tests `PASS`), `@crelune/ui` (`1` file, `3` tests `PASS`), `@crelune/agent` (`1` file, `17` tests `PASS`), `npm run build` (`PASS`).
+2. **Mobile Jest + RNTL Suites (`apps/mobile/src/__tests__/`)**:
+   - [`env-and-secure-store.test.ts`](file:///d:/Projects/Crelune/apps/mobile/src/__tests__/env-and-secure-store.test.ts) (`4` tests): brand hex tokens from `@crelune/ui/colors`, `>= 48dp` targets, HTTPS release fail-closed + dev HTTP allowlist, `SecureStore` persistence/hydration/corruption cleanup/write failure.
+   - [`session-and-refresh-concurrency.test.ts`](file:///d:/Projects/Crelune/apps/mobile/src/__tests__/session-and-refresh-concurrency.test.ts) (`13` tests): login flow, single-flight refresh across 5 concurrent `401` waiters, proactive/foreground vs reactive `401` race + stale-token `401` protection, at-most-once retry guard, strict persist-before-release SecureStore ordering + fail-closed persistence failure, all 4 terminal auth failures (`SESSION_EXPIRED`, `DEVICE_REVOKED`, `REFRESH_TOKEN_REUSE_DETECTED`, `INVALID_REFRESH_TOKEN`), temporary network/`503` preservation, concurrent logout abort/fencing during in-flight refresh, lost-refresh-response end-to-end recovery, and malformed payload rejection.
+   - [`navigation-and-screens.test.tsx`](file:///d:/Projects/Crelune/apps/mobile/src/__tests__/navigation-and-screens.test.tsx) (`5` tests): hydration screen -> single-shot login redirect -> authenticated tabs transition, `LoginScreen` expiry notice + validation + sign-in, `OfflineBar` disconnected banner, live `HomeScreen` dashboard metrics + error retry, honest Milestone 7 Calendar placeholder + `MoreTabScreen` sign-out.
+3. **Metro Bundling, Config Introspection & Live HTTP E2E**:
+   - `npm run export:verify --workspace=@crelune/mobile`: `PASS` — Android Hermes bundle (`3497` modules, `5.7 MB`) and iOS Hermes bundle (`3507` modules, `5.7 MB`).
+   - `expo config --type introspect --json` (`development`/`preview`/`production`): `PASS` — verified iOS & Android identifiers, `Info.plist` strings, `ITSAppUsesNonExemptEncryption: false`, least-privilege permissions, and all 4 Expo plugins.
+   - `npm run prebuild:android --workspace=@crelune/mobile`: `PASS` — generated Android CNG native project cleanly.
+   - Live HTTP E2E against running local `apps/web` (`http://127.0.0.1:3000` on Neon `development`): `PASS` (`login 200`, `/api/dashboard 200`, `/api/auth/me 200`, `/api/mobile/auth/refresh 200` + old token `401`, `/api/mobile/auth/logout 200` + post-logout `401`, clean synthetic DB teardown).
+4. **Honest Blocked / Unverified Runtime Items**:
+   - **Android Emulator Launch:** `BLOCKED` on this Windows workstation — `emulator-check.exe accel` returned `accel: 6 (Android Emulator hypervisor driver is not installed on this machine)`.
+   - **Local Android Gradle APK Compile:** `BLOCKED` on this Windows workstation — React Native `0.88.1` Gradle settings plugin requires JDK 17 (`languageVersion=17`), whereas host currently exposes only JDK `21.0.13.9` and Android Studio JBR `25.0.4` (`foojay` toolchain download hit `Connection reset`).
+   - **iOS Native Project Generation (`.xcodeproj`) & Physical iOS/Android Device Runtime:** `BLOCKED / PENDING` — Windows host skips Xcode `.xcodeproj` prebuild (runs on EAS cloud macOS runners); `0` physical Android USB devices attached and no physical iPhone currently available (physical iPhone testing remains mandatory prior to public release).

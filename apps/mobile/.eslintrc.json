@@ -1,0 +1,26 @@
+{
+  "root": true,
+  "extends": "expo",
+  "ignorePatterns": ["android/", "ios/", ".expo/", ".expo-export-check/", "dist/"],
+  "rules": {
+    "no-restricted-imports": [
+      "error",
+      {
+        "paths": [
+          {
+            "name": "@crelune/database",
+            "message": "CRELUNE Mobile must never import @crelune/database directly."
+          },
+          {
+            "name": "@prisma/client",
+            "message": "CRELUNE Mobile must never import Prisma directly."
+          },
+          {
+            "name": "react-native-webview",
+            "message": "WebViews are strictly prohibited in CRELUNE Mobile."
+          }
+        ]
+      }
+    ]
+  }
+}

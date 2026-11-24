@@ -325,3 +325,16 @@ Implemented in Milestone 2.1.2:
    - [`verifyActiveMobileOwnerInDatabase`](file:///d:/Projects/Crelune/apps/web/src/lib/auth/owner-guard.ts) verifies `User.isActive`, `User.role === 'OWNER'`, `User.sessionVersion`, `MobileDevice.revokedAt === null`, and active unrotated/unexpired `MobileSession` on every API call.
    - Independent device revocation (`POST /api/mobile/devices/[id]/revoke` and Web Settings [`MobileDevicesCard`](file:///d:/Projects/Crelune/apps/web/src/components/settings/MobileDevicesCard.tsx)) revokes only the selected device, invalidates all its sessions, clears `expoPushToken`, returns generic `404` across organisations, and leaves other active devices unaffected.
    - `POST /api/mobile/auth/logout` accepts Mobile Bearer exclusively, revokes the current session family, and clears `expoPushToken`. Web mutations continue to enforce mandatory Origin/Referer CSRF (`403`) whenever cookie-authenticated.
+
+---
+
+## 15. Milestone 6 Stage 6.2 Mobile Client Security Controls (`apps/mobile`)
+
+1. **Hardware-Backed Credential Storage & Persist-Before-Release (`secure-store.ts`, `session-manager.ts`)**:
+   - Mobile access tokens, refresh tokens, and persistent `deviceInstallId` are stored strictly in `expo-secure-store` (`AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`), never in `AsyncStorage`, URLs, or logs; Android manifests automatically attach `secure_store_backup_rules` / `secure_store_data_extraction_rules`.
+   - Rotated credentials MUST persist to `expo-secure-store` before active in-memory state updates or queued API requests are released; persistence failures fail closed and wipe inconsistent auth state so rotated-out refresh tokens are never reused.
+2. **Transport Security, Zero Secrets & Bundle Guardrails (`env.ts`, `metro.config.js`, `.eslintrc.json`)**:
+   - Release builds fail closed on any non-HTTPS API URL (`validateApiBaseUrl`); cleartext HTTP is permitted in `__DEV__` exclusively for explicit local hosts (`10.0.2.2`, `localhost`, `127.0.0.1`, RFC-1918 LAN IPv4).
+   - Metro `blockList` and ESLint `no-restricted-imports` prohibit `@crelune/database`, `@prisma/client`, and `react-native-webview` from entering the mobile bundle.
+3. **Terminal Failure Cache Purge & Logout Fencing**:
+   - Terminal auth failures (`SESSION_EXPIRED`, `DEVICE_REVOKED`, `REFRESH_TOKEN_REUSE_DETECTED`, `INVALID_REFRESH_TOKEN`) and user sign-out clear `expo-secure-store`, clear React Query cached records, clear `expo-image` private memory cache, abort any in-flight refresh via `AbortController` + `logoutGeneration` fencing, and redirect once to `/(auth)/login`. Temporary network/timeout/`5xx` failures preserve credentials safely without forced logout.
