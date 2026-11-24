@@ -34,6 +34,7 @@ apps/mobile/GoogleService-Info.plist
 .env*.local
 .env.production
 .env.staging
+.vercel
 
 # Prisma
 packages/database/prisma/*.db
